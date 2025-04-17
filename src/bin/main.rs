@@ -8,10 +8,14 @@ use simplelog::{Config as SimpleLogConfig, CombinedLogger, WriteLogger, LevelFil
 use std::fs::File;
 use seed_tools::utils::generate_release_name;
 use seed_tools::types::{PathsConfig, QbittorrentConfig, TorrentLeechConfig, SeedpoolConfig};
+use trackers::common::process_custom_upload;
+
 mod trackers {
     pub mod seedpool;
     pub mod torrentleech;
+    pub mod common;
 }
+
 
 #[derive(Deserialize)]
 struct Config {
@@ -96,20 +100,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut errors = Vec::new();
 
-    if args.contains(&"-TL".to_string()) {
-        if let Err(e) = trackers::torrentleech::process_torrentleech_release(
+    if args.iter().any(|arg| arg.starts_with('-') && arg.len() == 5 && arg[1..].chars().all(|c| c.is_digit(10))) {
+        let category_type_arg = args.iter().find(|arg| arg.starts_with('-') && arg.len() == 5).unwrap();
+        let category_id: u32 = category_type_arg[1..3].trim_start_matches('0').parse().unwrap_or(0); // First two digits, strip leading zeros
+        let type_id: u32 = category_type_arg[3..5].trim_start_matches('0').parse().unwrap_or(0);     // Last two digits, strip leading zeros
+    
+        let tracker = if args.contains(&"-SP".to_string()) {
+            "seedpool"
+        } else if args.contains(&"-TL".to_string()) {
+            "torrentleech"
+        } else {
+            error!("No valid tracker specified for custom upload");
+            return Ok(());
+        };
+    
+        let mkbrr_path = &main_config.paths.mktorrent; // Path to mkbrr binary
+    
+        // Call process_custom_upload and skip all other processing
+        if let Err(e) = process_custom_upload(
             input_path,
-            &sanitized_name,
-            &mut main_config,
-            &torrentleech_config,
-            &mkbrr_path,
-            &mediainfo_path,
+            category_id,
+            type_id,
+            &main_config.qbittorrent,
+            tracker,
+            Some(&seedpool_config),
+            Some(&torrentleech_config),
+            mkbrr_path, // Pass the mkbrr path here
         ) {
-            error!("Error processing TorrentLeech release: {}", e);
-            errors.push(format!("TorrentLeech: {}", e));
+            error!("Error processing custom upload: {}", e);
         }
+        return Ok(()); // Exit after handling the custom upload
     }
-
+    
+    // Default processing logic (e.g., TMDB checks, sample generation, etc.) continues here
     if args.contains(&"-SP".to_string()) {
         if let Err(e) = trackers::seedpool::process_seedpool_release(
             input_path,
@@ -123,6 +146,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ) {
             error!("Error processing Seedpool release: {}", e);
             errors.push(format!("Seedpool: {}", e));
+        }
+    }
+
+    if args.contains(&"-TL".to_string()) {
+        if let Err(e) = trackers::torrentleech::process_torrentleech_release(
+            input_path,
+            &sanitized_name,
+            &mut main_config,
+            &torrentleech_config,
+            &mkbrr_path,
+            &mediainfo_path,
+        ) {
+            error!("Error processing TorrentLeech release: {}", e);
+            errors.push(format!("TorrentLeech: {}", e));
         }
     }
 
