@@ -1,0 +1,15 @@
+general:
+  enabled: true
+  passkey: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  api_key: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+settings:
+  stripshit_from_videos: true
+  announce_url: "https://seedpool.org/announce/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  upload_url: "https://seedpool.org/api/torrents/upload?api_token=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  custom_description: |
+    This description is rendered for you via config.yaml and is sponsored by Shrek.
+
+screenshots:
+  remote_path: "seedpool@xxxxxxxxxxxxxxxxxxxxxxxx"
+  image_path: "https://cdn.seedpool.org"
