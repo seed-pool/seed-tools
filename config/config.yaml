@@ -1,0 +1,22 @@
+general:
+  tmdb_api_key: "xxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+paths:
+  torrent_dir: "/home/user/seed-tools/torrents"
+  screenshots_dir: "/home/user/seed-tools/screenshots"
+  ffmpeg: "/home/user/seed-tools/bin/ffmpeg"
+  ffprobe: "/home/user/seed-tools/bin/ffprobe"
+  mktorrent: "/home/user/seed-tools/bin/mkbrr"
+
+qbittorrent:
+  - webui_url: "http://localhost:8080"
+    username: "user"
+    password: "xxxxxxxxxxxxx"
+    category: ""
+    default_save_path: "/home/user/files"
+
+  - webui_url: "http://localhost:8081"
+    username: "user"
+    password: "xxxxxxxxxxxxxx"
+    category: ""
+    default_save_path: "/home/user/files"
