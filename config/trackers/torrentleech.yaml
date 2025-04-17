@@ -1,0 +1,29 @@
+general:
+  enabled: true
+  announce_url_1: "https://tracker.torrentleech.org/a/xxxxxxxxxxxxxxxxxxxxxxxxxxxx/announce"
+  announce_url_2: "https://tracker.tleechreload.org/a/xxxxxxxxxxxxxxxxxxxxxxxxxxxx/announce"
+
+settings:
+  stripshit_from_videos: true
+  tl_key: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  upload_url: "https://www.torrentleech.org/torrents/upload/apiupload"
+  custom_description: |
+    This description is rendered for you via config.yaml and is sponsored by Shrek.
+
+categories:
+  Anime: 34
+  Movie4K: 47
+  MovieBluray: 13
+  MovieBlurayRip: 14
+  MovieCam: 8
+  MovieTS: 9
+  MovieDocumentary: 29
+  MovieDvd: 12
+  MovieDvdRip: 11
+  MovieForeign: 36
+  MovieHdRip: 43
+  MovieWebrip: 37
+  TvBoxsets: 27
+  TvEpisodes: 26
+  TvEpisodesHd: 32
+  TvForeign: 44
