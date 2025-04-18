@@ -1,14 +1,21 @@
-use std::{fs, env, thread, time::Duration, path::Path, collections::HashMap};
+use std::{
+    fs,
+    env,
+    path::Path,
+    collections::HashMap,
+    thread,
+    time::Duration,
+};
 use regex::Regex;
 use serde::Deserialize;
 use serde_yaml;
-use reqwest::blocking::Client;
 use log::{info, error};
 use simplelog::{Config as SimpleLogConfig, CombinedLogger, WriteLogger, LevelFilter};
 use std::fs::File;
 use seed_tools::utils::generate_release_name;
-use seed_tools::types::{PathsConfig, QbittorrentConfig, TorrentLeechConfig, SeedpoolConfig};
+use seed_tools::types::{Config, SeedpoolConfig, TorrentLeechConfig, QbittorrentConfig, DelugeConfig};
 use trackers::common::process_custom_upload;
+use reqwest::blocking::Client;
 
 mod trackers {
     pub mod seedpool;
@@ -16,17 +23,9 @@ mod trackers {
     pub mod common;
 }
 
-
-#[derive(Deserialize)]
-struct Config {
-    general: GeneralConfig,
-    paths: PathsConfig,
-    qbittorrent: Vec<QbittorrentConfig>,
-}
-
 #[derive(Deserialize)]
 struct GeneralConfig {
-    tmdb_api_key: String,
+    pub tmdb_api_key: String,
 }
 
 trait Tracker {
@@ -37,6 +36,7 @@ trait Tracker {
     fn upload(
         &self,
         torrent_file: &str,
+        release_name: &str,
         description: Option<&str>,
         mediainfo: Option<&str>,
         nfo_file: &Option<String>,
@@ -47,18 +47,25 @@ trait Tracker {
         tvdb_id: Option<u32>,
         season_number: Option<u32>,
         episode_number: Option<u32>,
-        resolution_id: Option<u32>, // Ensure this is included
+        resolution_id: Option<u32>,
     ) -> Result<(), String>;
     fn generate_metadata(&self, torrent_file: &str) -> Result<HashMap<String, String>, String>;
 }
 
 fn load_yaml_config<T: serde::de::DeserializeOwned>(path: &str) -> T {
-    serde_yaml::from_str(&fs::read_to_string(path).expect("Failed to read config file")).expect("Failed to parse YAML config")
+    serde_yaml::from_str(&fs::read_to_string(path).expect("Failed to read config file"))
+        .expect("Failed to parse YAML config")
 }
 
 fn extract_binaries() -> Result<String, String> {
-    let bin_dir = env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?.join("bin");
-    if bin_dir.exists() && ["ffmpeg", "ffprobe", "mkbrr", "mediainfo"].iter().all(|b| bin_dir.join(b).exists()) {
+    let bin_dir = env::current_dir()
+        .map_err(|e| format!("Failed to get current directory: {}", e))?
+        .join("bin");
+    if bin_dir.exists()
+        && ["ffmpeg", "ffprobe", "mkbrr", "mediainfo"]
+            .iter()
+            .all(|b| bin_dir.join(b).exists())
+    {
         return Ok(bin_dir.to_string_lossy().to_string());
     }
     fs::create_dir_all(&bin_dir).map_err(|e| format!("Failed to create bin directory: {}", e))?;
@@ -66,22 +73,30 @@ fn extract_binaries() -> Result<String, String> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    CombinedLogger::init(vec![WriteLogger::new(LevelFilter::Debug, SimpleLogConfig::default(), File::create("seed-tools.log")?)])?;
+    CombinedLogger::init(vec![WriteLogger::new(
+        LevelFilter::Debug,
+        SimpleLogConfig::default(),
+        File::create("seed-tools.log")?,
+    )])?;
+
     let args: Vec<String> = env::args().collect();
     let binaries_dir = extract_binaries().unwrap_or_default();
     let ffmpeg_path = Path::new(&binaries_dir).join("ffmpeg");
     let ffprobe_path = Path::new(&binaries_dir).join("ffprobe");
     let mkbrr_path = Path::new(&binaries_dir).join("mkbrr");
     let mediainfo_path = Path::new(&binaries_dir).join("mediainfo");
+
+    // Load configurations
     let mut main_config: Config = load_yaml_config("config/config.yaml");
-    let torrentleech_config: TorrentLeechConfig = load_yaml_config("config/trackers/torrentleech.yaml");
     let seedpool_config: SeedpoolConfig = load_yaml_config("config/trackers/seedpool.yaml");
+    let torrentleech_config: TorrentLeechConfig = load_yaml_config("config/trackers/torrentleech.yaml");
 
     if args.len() < 2 {
         error!("Usage: seedtool <input_path> or seedtool -sync or seedtool <input_path> -SP/-TL");
         return Ok(());
     }
 
+    log::debug!("Raw command-line arguments: {:?}", args);
     let input_path = &args[1];
     let sanitized_name = generate_release_name(
         &Path::new(input_path)
@@ -92,7 +107,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     if args.len() == 2 && args[1] == "-sync" {
-        if let Err(e) = sync_qbittorrent(&main_config.qbittorrent, &main_config.general.tmdb_api_key) {
+        if let Err(e) = sync_qbittorrent(&main_config.qbittorrent, &seedpool_config.general.api_key) {
             error!("Error syncing qBittorrent: {}", e);
         }
         return Ok(());
@@ -102,9 +117,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if args.iter().any(|arg| arg.starts_with('-') && arg.len() == 5 && arg[1..].chars().all(|c| c.is_digit(10))) {
         let category_type_arg = args.iter().find(|arg| arg.starts_with('-') && arg.len() == 5).unwrap();
-        let category_id: u32 = category_type_arg[1..3].trim_start_matches('0').parse().unwrap_or(0); // First two digits, strip leading zeros
-        let type_id: u32 = category_type_arg[3..5].trim_start_matches('0').parse().unwrap_or(0);     // Last two digits, strip leading zeros
-    
+        let category_id: u32 = category_type_arg[1..3].trim_start_matches('0').parse().unwrap_or(0);
+        let type_id: u32 = category_type_arg[3..5].trim_start_matches('0').parse().unwrap_or(0);
+
         let tracker = if args.contains(&"-SP".to_string()) {
             "seedpool"
         } else if args.contains(&"-TL".to_string()) {
@@ -113,27 +128,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             error!("No valid tracker specified for custom upload");
             return Ok(());
         };
-    
-        let mkbrr_path = &main_config.paths.mktorrent; // Path to mkbrr binary
-    
-        // Call process_custom_upload and skip all other processing
+
         if let Err(e) = process_custom_upload(
             input_path,
             category_id,
             type_id,
             &main_config.qbittorrent,
+            &main_config.deluge,
             tracker,
             Some(&seedpool_config),
             Some(&torrentleech_config),
-            mkbrr_path, // Pass the mkbrr path here
+            mkbrr_path.to_str().ok_or("Invalid mkbrr_path")?,
         ) {
             error!("Error processing custom upload: {}", e);
         }
-        return Ok(()); // Exit after handling the custom upload
+        return Ok(());
     }
-    
-    // Default processing logic (e.g., TMDB checks, sample generation, etc.) continues here
+
     if args.contains(&"-SP".to_string()) {
+        log::debug!("Input path passed to process_seedpool_release: {}", input_path);
         if let Err(e) = trackers::seedpool::process_seedpool_release(
             input_path,
             &sanitized_name,
