@@ -14,9 +14,18 @@ qbittorrent:
     password: "xxxxxxxxxxxxx"
     category: ""
     default_save_path: "/home/user/files"
+    executable: "/usr/bin/qbittorrent-nox"
 
   - webui_url: "http://localhost:8081"
     username: "user"
     password: "xxxxxxxxxxxxxx"
     category: ""
     default_save_path: "/home/user/files"
+    executable: "/usr/bin/qbittorrent-nox"
+
+deluge:
+    webui_url: "https://localhost:52345"
+    daemon_port: 19148
+    username: "user"
+    password: "xxxxxxxxxxxxxxxxxxxxx"
+    label: ""    
