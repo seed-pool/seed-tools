@@ -1,22 +1,41 @@
 use reqwest::blocking::{multipart::Form, Client};
+use reqwest::blocking::ClientBuilder;
+use reqwest::cookie::Jar;
 use std::path::Path;
+use std::sync::Arc;
 use regex::Regex;
 use log::{info, error};
-use crate::types::{PathsConfig, QbittorrentConfig, VideoSettings};
 use std::process::Command;
-use serde_json::Value;
+use serde_json::{Value, json};
 use rand::Rng;
 use std::os::unix::fs::PermissionsExt;
 use std::fs::{self, Permissions};
-
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
+use crate::types::{PathsConfig, QbittorrentConfig, VideoSettings, DelugeConfig};
 pub fn generate_release_name(base_name: &str) -> String {
     let mut release_name = base_name.to_string();
-    release_name = Regex::new(r"\.(mkv|mp4|m4b|avi|mov|flv|wmv|ts)$").unwrap().replace(&release_name, "").to_string();
-    release_name = Regex::new(r"[^A-Za-z0-9+\-]").unwrap().replace_all(&release_name, ".").to_string();
-    release_name = Regex::new(r"\.\.+").unwrap().replace_all(&release_name, ".").to_string();
-    release_name = Regex::new(r"-\.+|\.-+").unwrap().replace_all(&release_name, "-").to_string();
-    release_name = Regex::new(r"\.$").unwrap().replace(&release_name, "").to_string();
-    release_name.trim_start_matches('.').to_string()
+    release_name = Regex::new(r"\.(mkv|mp4|m4b|avi|mov|flv|wmv|ts)$")
+        .unwrap()
+        .replace(&release_name, "")
+        .to_string(); // Remove file extensions
+    release_name = Regex::new(r"[^A-Za-z0-9+\-]")
+        .unwrap()
+        .replace_all(&release_name, ".")
+        .to_string(); // Replace non-alphanumeric characters with dots
+    release_name = Regex::new(r"\.\.+")
+        .unwrap()
+        .replace_all(&release_name, ".")
+        .to_string(); // Replace multiple dots with a single dot
+    release_name = Regex::new(r"-\.+|\.-+")
+        .unwrap()
+        .replace_all(&release_name, "-")
+        .to_string(); // Replace mixed dot-dash patterns
+    release_name = Regex::new(r"\.$")
+        .unwrap()
+        .replace(&release_name, "")
+        .to_string(); // Remove trailing dots
+    release_name.trim_start_matches('.').to_string() // Remove leading dots
 }
 
 pub fn find_video_files<T>(
@@ -37,23 +56,21 @@ where
     info!("Exclusions enabled: {}", exclusions_enabled);
 
     if path.is_file() {
+        log::debug!("Processing file: {}", path.display());
         process_file(path, &mut video_files, &mut nfo_file, &supported_extensions, exclusions_enabled)?;
     } else if path.is_dir() {
         for entry in fs::read_dir(path).map_err(|e| format!("Failed to read directory: {}", e))? {
             let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
             let file_path = entry.path();
+            log::debug!("Processing file: {}", file_path.display());
             process_file(&file_path, &mut video_files, &mut nfo_file, &supported_extensions, exclusions_enabled)?;
         }
     }
 
-    video_files.retain(|file| {
-        let file_name = Path::new(file).file_name().unwrap_or_default().to_string_lossy().to_lowercase();
-        let is_valid = supported_extensions.iter().any(|ext| file_name.ends_with(ext));
-        if !is_valid {
-            info!("Excluding non-video file: {}", file_name);
-        }
-        is_valid
-    });
+    if video_files.is_empty() {
+        error!("No valid video files detected after exclusions.");
+        return Err("No valid video files detected.".to_string());
+    }
 
     info!("Final NFO file: {:?}", nfo_file);
 
@@ -157,150 +174,55 @@ pub fn generate_mediainfo(video_file: &str, mediainfo_path: &str) -> Result<Stri
 pub fn add_torrent_to_all_qbittorrent_instances(
     torrent_files: &[String],
     qbittorrent_configs: &[QbittorrentConfig],
+    deluge_config: &DelugeConfig, // Add Deluge config
     input_path: &str,
-    is_folder: bool,
 ) -> Result<(), String> {
+    let is_folder = Path::new(input_path).is_dir();
+
+    // Add torrents to all qBittorrent instances
     for config in qbittorrent_configs {
         for torrent_file in torrent_files {
-            if let Err(e) = add_torrent_to_qbittorrent(
-                torrent_file,
-                config,
-                input_path,
-                is_folder,
-            ) {
-                error!("Error adding torrent '{}' to qBittorrent: {}", torrent_file, e);
+            if let Some(executable) = &config.executable {
+                // Call add_torrent_to_qbittorrent for each instance
+                if let Err(e) = add_torrent_to_qbittorrent(torrent_file, config, input_path, is_folder) {
+                    error!(
+                        "Error adding torrent '{}' to qBittorrent instance '{}': {}",
+                        torrent_file, config.webui_url, e
+                    );
+                } else {
+                    info!(
+                        "Successfully added torrent '{}' to qBittorrent instance '{}'.",
+                        torrent_file, config.webui_url
+                    );
+                }
             } else {
-                info!(
-                    "Successfully added torrent '{}' to qBittorrent instance '{}'.",
-                    torrent_file, config.webui_url
+                error!(
+                    "No executable specified for qBittorrent instance '{}'. Skipping.",
+                    config.webui_url
                 );
             }
         }
     }
-    Ok(())
-}
 
-pub fn add_torrent_to_qbittorrent(
-    torrent_file: &str,
-    config: &QbittorrentConfig,
-    input_path: &str,
-    is_folder: bool,
-) -> Result<(), String> {
-    let client = reqwest::blocking::Client::new();
+    // Add torrents to Deluge
+    for torrent_file in torrent_files {
+        let save_path = if is_folder {
+            Path::new(input_path).to_string_lossy().to_string()
+        } else {
+            Path::new(input_path)
+                .parent()
+                .unwrap_or_else(|| Path::new(&deluge_config.webui_url))
+                .to_string_lossy()
+                .to_string()
+        };
 
-    // Log in to qBittorrent
-    info!("Logging in to qBittorrent...");
-    let login_response = client
-        .post(format!("{}/api/v2/auth/login", config.webui_url))
-        .form(&[
-            ("username", config.username.as_str()),
-            ("password", config.password.as_str()),
-        ])
-        .send()
-        .map_err(|e| format!("Failed to log in to qBittorrent: {}", e))?;
-
-    if !login_response.status().is_success() {
-        return Err(format!(
-            "Failed to log in to qBittorrent: {}",
-            login_response.status()
-        ));
-    }
-    info!("Logged in to qBittorrent successfully.");
-
-    // Verify that the torrent file exists
-    if !Path::new(torrent_file).exists() {
-        return Err(format!("Torrent file does not exist: {}", torrent_file));
-    }
-
-    // Determine if the resulting torrent is a single file by checking mkbrr output
-    let is_single_file_torrent = {
-        let mkbrr_path = Path::new("bin").join("mkbrr");
-
-        let mkbrr_output = Command::new(mkbrr_path)
-            .args(&["inspect", torrent_file])
-            .output()
-            .map_err(|e| format!("Failed to run mkbrr to inspect torrent info: {}", e))?;
-
-        if !mkbrr_output.status.success() {
-            return Err(format!(
-                "mkbrr failed to inspect torrent info. Stderr: {}",
-                String::from_utf8_lossy(&mkbrr_output.stderr)
-            ));
+        if let Err(e) = add_torrent_to_deluge(torrent_file, deluge_config, &save_path) {
+            error!("Error adding torrent '{}' to Deluge: {}", torrent_file, e);
+        } else {
+            info!("Successfully added torrent '{}' to Deluge.", torrent_file);
         }
-
-        let output = String::from_utf8_lossy(&mkbrr_output.stdout);
-        let has_file_tree = output.contains("File tree:");
-        let files_line = output.lines().find(|line| line.starts_with("Files:"));
-        files_line
-            .map(|line| line.contains("Files: 1"))
-            .unwrap_or(!has_file_tree)
-    };
-    info!("is_single_file_torrent: {}", is_single_file_torrent);
-
-    // Set the `createSubfolder` parameter
-    let create_subfolder = if Path::new(input_path).is_dir() && is_single_file_torrent {
-        "true"
-    } else {
-        "false"
-    };
-    info!("createSubfolder parameter set to: {}", create_subfolder);
-
-    // Adjust the save path to include a subfolder if needed
-    let save_path = if create_subfolder == "true" {
-        Path::new(&config.default_save_path)
-            .join(Path::new(input_path).file_name().unwrap_or_default())
-            .to_string_lossy()
-            .to_string()
-    } else {
-        config.default_save_path.clone()
-    };
-    info!("savepath set to: {}", save_path);
-
-    // Set the `autoTMM` parameter based on whether the input is a folder
-//    let auto_tmm = if is_folder { "false" } else { "false" };
-
-    // Construct the multipart form
-    let mut form = Form::new()
-        .file("torrents", torrent_file)
-        .map_err(|e| format!("Failed to attach torrent file: {}", e))?
-        .text("savepath", save_path.clone())
-        .text("autoTMM", "true")
-        .text("paused", "false")
-        .text("skip_checking", "true")
-        .text("createSubfolder", create_subfolder);
-
-    // Add the category if specified in the config
-    if let Some(category) = &config.category {
-        info!("Using category for qBittorrent: {}", category);
-        form = form.text("category", category.clone());
     }
 
-    // Debug: Log the form data
-    info!("Form data being sent to qBittorrent API:");
-    info!("  Torrent File: {}", torrent_file);
-    info!("  savepath: {}", save_path);
-    info!("  createSubfolder: {}", create_subfolder);
-
-    // Upload the torrent file
-    info!("Injecting torrent into qBittorrent...");
-    let upload_response = client
-        .post(format!("{}/api/v2/torrents/add", config.webui_url))
-        .multipart(form)
-        .send()
-        .map_err(|e| format!("Failed to upload torrent to qBittorrent: {}", e))?;
-
-    let status = upload_response.status();
-    let response_body = upload_response.text().unwrap_or_else(|_| "Failed to read response body".to_string());
-    info!("qBittorrent API Response: {}", response_body);
-
-    if !status.is_success() || response_body.to_lowercase().contains("fails") {
-        return Err(format!(
-            "Failed to upload torrent to qBittorrent: {}. Response: {}",
-            status, response_body
-        ));
-    }
-
-    info!("Torrent added to qBittorrent successfully.");
     Ok(())
 }
 
@@ -337,35 +259,29 @@ pub fn contains_excluded_keywords(name: &str) -> bool {
 
 pub fn generate_sample(
     video_file: &str,
-    output_dir: &str,
+    screenshots_dir: &str,
     remote_path: &str,
     ffmpeg_path: &str,
-    release_name: &str,
+    input_name: &str, // Use the complete input name
 ) -> Result<String, String> {
-    let extension = Path::new(video_file)
-        .extension()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-    let sample_file = format!("{}/{}.sample.{}", output_dir, release_name, extension);
+    let sample_file = format!("{}/{}.sample.mkv", screenshots_dir, input_name);
 
-    // Ensure the output directory exists
-    fs::create_dir_all(output_dir).map_err(|e| format!("Failed to create output directory: {}", e))?;
+    // Generate the sample file
+    let ffmpeg_command = format!(
+        "{} -i \"{}\" -ss 00:10:00 -t 00:00:30 -c:v libx264 -preset ultrafast -crf 23 -c:a aac \"{}\"",
+        ffmpeg_path, video_file, sample_file
+    );
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(ffmpeg_command)
+        .output()
+        .map_err(|e| format!("Failed to execute ffmpeg: {}", e))?;
 
-    info!("Generating sample file: {}", sample_file);
-    let status = Command::new(ffmpeg_path)
-        .args(&[
-            "-i", video_file,
-            "-ss", "00:05:00", // Start time for the sample
-            "-t", "00:00:20",  // Duration of the sample
-            "-c", "copy",
-            &sample_file,
-        ])
-        .status()
-        .map_err(|e| format!("Failed to run ffmpeg for sample generation: {}", e))?;
-
-    if !status.success() {
-        return Err(format!("ffmpeg failed to generate sample for {}", video_file));
+    if !output.status.success() {
+        return Err(format!(
+            "Failed to generate sample file. ffmpeg output: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
     }
 
     // Set permissions to 777
@@ -378,7 +294,7 @@ pub fn generate_sample(
     // Upload the sample file
     upload_to_cdn(&sample_file, remote_path)?;
 
-    Ok(format!("https://cdn.seedpool.org/{}.sample.{}", release_name, extension))
+    Ok(format!("{}/{}.sample.mkv", remote_path, input_name))
 }
 
 pub fn generate_description(
@@ -388,22 +304,39 @@ pub fn generate_description(
     _datestamp: &str,
     custom_description: Option<&str>,
     youtube_trailer_url: Option<&str>,
-    _image_path: &str, // No need to use image_path here
+    base_url: &str, // Base URL for assets (e.g., screenshots, thumbnails, etc.)
+    release_name: &str, // Release name for generating sanitized links
 ) -> String {
     let mut description = String::new();
 
-    // Add screenshots in a 2x2 pattern
+    // Sanitize the release name
+    let sanitized_release_name = generate_release_name(release_name);
+
+    // Add screenshots in a 2x2 table pattern
     if !screenshots.is_empty() && !thumbnails.is_empty() {
         description.push_str("[center]\n");
+        description.push_str("    [tr]\n");
+
         for (i, (screenshot, thumbnail)) in screenshots.iter().zip(thumbnails.iter()).enumerate() {
+            let screenshot_url = format!("{}/{}", base_url, Path::new(screenshot).file_name().unwrap_or_default().to_string_lossy());
+            let thumbnail_url = format!("{}/{}", base_url, Path::new(thumbnail).file_name().unwrap_or_default().to_string_lossy());
+
             description.push_str(&format!(
-                "[url={}][img width=720]{}[/img][/url] ",
-                screenshot, thumbnail
+                "        [td][url={}][img width=720]{}[/img][/url][/td]\n",
+                screenshot_url, thumbnail_url
             ));
+
+            // Add a new row every 2 images
             if (i + 1) % 2 == 0 {
-                description.push_str("\n");
+                description.push_str("    [/tr]\n    [tr]\n");
             }
         }
+
+        // Close the last row
+        if screenshots.len() % 2 != 0 {
+            description.push_str("    [/tr]\n");
+        }
+
         description.push_str("[/center]\n\n");
     }
 
@@ -413,9 +346,18 @@ pub fn generate_description(
             .file_name()
             .unwrap_or_default()
             .to_string_lossy();
+        let sample_link = format!("{}/{}", base_url, sample_filename);
         description.push_str(&format!(
             "[center][b][spoiler=Sample: {}]{}[/spoiler][/b][/center]\n\n",
-            sample_filename, sample_url
+            sample_filename, sample_link
+        ));
+    }
+
+    // Add YouTube trailer link if available
+    if let Some(trailer_url) = youtube_trailer_url {
+        description.push_str(&format!(
+            "[center][b][url={}][Trailer on YouTube][/url][/b][/center]\n\n",
+            trailer_url
         ));
     }
 
@@ -582,8 +524,7 @@ pub fn generate_screenshots(
     ffmpeg_path: &str,
     ffprobe_path: &str,
     remote_path: &str,
-    image_path: &str, // Pass the image path from seedpool.yaml
-    release_name: &str,
+    input_name: &str, // Use the complete input name
 ) -> Result<(Vec<String>, Vec<String>), String> {
     let mut screenshots_list = Vec::new();
     let mut thumbnails_list = Vec::new();
@@ -595,10 +536,11 @@ pub fn generate_screenshots(
     let timestamps = generate_random_timestamps(duration, 4);
 
     for (i, shot_time) in timestamps.iter().enumerate() {
-        let shot_name = format!("{}_{}.jpg", release_name, i + 1);
-        let screenshot_file = format!("{}/{}", output_dir, shot_name);
-        let thumbnail_file = screenshot_file.replace(".jpg", "_thumb.jpg");
+        // Generate filenames for screenshots and thumbnails
+        let screenshot_file = format!("{}/{}_{}.jpg", output_dir, input_name, i + 1);
+        let thumbnail_file = format!("{}/{}_{}_thumb.jpg", output_dir, input_name, i + 1);
 
+        // Generate screenshot
         generate_screenshot(video_file, ffmpeg_path, shot_time, &screenshot_file)?;
         generate_thumbnail(ffmpeg_path, &screenshot_file, &thumbnail_file)?;
 
@@ -617,8 +559,8 @@ pub fn generate_screenshots(
         upload_to_cdn(&thumbnail_file, remote_path)?;
 
         // Add URLs to the lists
-        screenshots_list.push(format!("{}/{}", image_path, shot_name));
-        thumbnails_list.push(format!("{}/{}", image_path, shot_name.replace(".jpg", "_thumb.jpg")));
+        screenshots_list.push(format!("{}/{}", remote_path, screenshot_file));
+        thumbnails_list.push(format!("{}/{}", remote_path, thumbnail_file));
     }
 
     Ok((screenshots_list, thumbnails_list))
@@ -756,4 +698,223 @@ fn extract_rar_archives(folder_path: &str) -> Result<Option<String>, String> {
 
     info!("Extraction completed. Extracted files are in: {}", folder_path);
     Ok(Some(folder_path.to_string()))
+}
+
+pub fn add_torrent_to_qbittorrent(
+    torrent_file: &str,
+    config: &QbittorrentConfig,
+    input_path: &str,
+    is_folder: bool,
+) -> Result<(), String> {
+    let client = reqwest::blocking::Client::new();
+
+    // Log in to qBittorrent
+    info!("Logging in to qBittorrent...");
+    let login_response = client
+        .post(format!("{}/api/v2/auth/login", config.webui_url))
+        .form(&[
+            ("username", config.username.as_str()),
+            ("password", config.password.as_str()),
+        ])
+        .send()
+        .map_err(|e| format!("Failed to log in to qBittorrent: {}", e))?;
+
+    if !login_response.status().is_success() {
+        return Err(format!(
+            "Failed to log in to qBittorrent: {}",
+            login_response.status()
+        ));
+    }
+    info!("Logged in to qBittorrent successfully.");
+
+    // Verify that the torrent file exists
+    if !Path::new(torrent_file).exists() {
+        return Err(format!("Torrent file does not exist: {}", torrent_file));
+    }
+
+    // Determine the save path
+    let save_path = if is_folder {
+        // Use the original folder name as the subfolder
+        Path::new(&config.default_save_path)
+            .join(Path::new(input_path).file_name().unwrap_or_default())
+            .to_string_lossy()
+            .to_string()
+    } else {
+        // For single-file inputs, use the parent directory of the file
+        let parent_dir = Path::new(input_path)
+            .parent()
+            .unwrap_or_else(|| Path::new(&config.default_save_path));
+        parent_dir.to_string_lossy().to_string()
+    };
+    info!("savepath set to: {}", save_path);
+
+    // Determine if the torrent being added is a folder
+    let torrent_is_folder = Path::new(torrent_file).is_dir();
+    info!("is_folder: {}, torrent_is_folder: {}", is_folder, torrent_is_folder);
+
+    // Set the `createSubfolder` parameter
+    let create_subfolder = if is_folder && torrent_is_folder {
+        "false" // Do not create a subfolder if both input and torrent are folders
+    } else if is_folder && !torrent_is_folder {
+        "false" // Do not create a subfolder even if the input is a folder but the torrent is a single file
+    } else {
+        "false" // Do not create a subfolder for single-file inputs
+    };
+    info!("createSubfolder parameter set to: {}", create_subfolder);
+
+    // Ensure the savepath exists if needed
+    if !(is_folder && torrent_is_folder) {
+        if let Err(e) = std::fs::create_dir_all(&save_path) {
+            error!("Failed to create savepath '{}': {}", save_path, e);
+            return Err(format!("Failed to create savepath '{}': {}", save_path, e));
+        }
+    }
+
+    // Construct the multipart form
+    let mut form = Form::new()
+        .file("torrents", torrent_file)
+        .map_err(|e| format!("Failed to attach torrent file: {}", e))?
+        .text("createSubfolder", create_subfolder)
+        .text("autoTMM", "false") // Disable autoTMM to respect the savepath
+        .text("paused", "false")
+        .text("skip_checking", "true");
+
+    // Add the savepath only if the input and torrent are not both folders
+    if !(is_folder && torrent_is_folder) {
+        form = form.text("savepath", save_path.clone());
+        info!("savepath included in form: {}", save_path);
+    } else {
+        info!("savepath not included in form as both input and torrent are folders");
+    }
+
+    // Add the category if specified in the config
+    if let Some(category) = &config.category {
+        info!("Using category for qBittorrent: {}", category);
+        form = form.text("category", category.clone());
+    }
+
+    // Debug: Log the form data
+    info!("Form data being sent to qBittorrent API:");
+    info!("  Torrent File: {}", torrent_file);
+    if !(is_folder && torrent_is_folder) {
+        info!("  savepath: {}", save_path);
+    }
+    info!("  createSubfolder: {}", create_subfolder);
+    info!("  autoTMM: false");
+
+    // Upload the torrent file
+    info!("Injecting torrent into qBittorrent...");
+    let upload_response = client
+        .post(format!("{}/api/v2/torrents/add", config.webui_url))
+        .multipart(form)
+        .send()
+        .map_err(|e| format!("Failed to upload torrent to qBittorrent: {}", e))?;
+
+    let status = upload_response.status();
+    let response_body = upload_response.text().unwrap_or_else(|_| "Failed to read response body".to_string());
+    info!("qBittorrent API Response: {}", response_body);
+
+    if !status.is_success() || response_body.to_lowercase().contains("fails") {
+        return Err(format!(
+            "Failed to upload torrent to qBittorrent: {}. Response: {}",
+            status, response_body
+        ));
+    }
+
+    info!("Torrent added to qBittorrent successfully.");
+    Ok(())
+}
+
+pub fn add_torrent_to_deluge(
+    torrent_file: &str,
+    config: &DelugeConfig,
+    save_path: &str,
+) -> Result<(), String> {
+    info!("Adding torrent '{}' to Deluge at '{}'", torrent_file, config.webui_url);
+
+    // Create a client with cookie storage
+    let cookie_jar = Arc::new(Jar::default());
+    let client = ClientBuilder::new()
+        .cookie_store(true)
+        .cookie_provider(cookie_jar.clone())
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+
+    // Log in to Deluge
+    let login_payload = json!({
+        "method": "auth.login",
+        "params": [config.password],
+        "id": 1
+    });
+
+    let login_response = client
+        .post(format!("{}/json", config.webui_url))
+        .json(&login_payload)
+        .send()
+        .map_err(|e| format!("Failed to log in to Deluge: {}", e))?;
+
+    let login_result: serde_json::Value = login_response
+        .json()
+        .map_err(|e| format!("Failed to parse Deluge login response: {}", e))?;
+
+    if !login_result["result"].as_bool().unwrap_or(false) {
+        return Err("Failed to log in to Deluge: Invalid credentials".to_string());
+    }
+
+    info!("Logged in to Deluge successfully.");
+
+    // Add the torrent
+    let add_torrent_payload = json!({
+        "method": "web.add_torrents",
+        "params": [[{
+            "path": torrent_file,
+            "options": {
+                "download_location": save_path,
+                "add_paused": false,
+                "move_completed": false,
+                "label": config.label.clone().unwrap_or_default(),
+            }
+        }]],
+        "id": 2
+    });
+
+    info!("Deluge add torrent payload: {:?}", add_torrent_payload);
+
+    let add_torrent_response = client
+        .post(format!("{}/json", config.webui_url))
+        .json(&add_torrent_payload)
+        .send()
+        .map_err(|e| format!("Failed to add torrent to Deluge: {}", e))?;
+
+    let add_torrent_result: serde_json::Value = add_torrent_response
+        .json()
+        .map_err(|e| format!("Failed to parse Deluge add torrent response: {}", e))?;
+
+    info!("Deluge add torrent response: {:?}", add_torrent_result);
+
+    // Check for errors in the response
+    if let Some(error) = add_torrent_result.get("error") {
+        if !error.is_null() {
+            return Err(format!(
+                "Deluge returned an error while adding torrent: {:?}",
+                error
+            ));
+        }
+    }
+
+    // Check the result field for success
+    if let Some(result) = add_torrent_result.get("result") {
+        if let Some(first_result) = result.as_array().and_then(|arr| arr.get(0)) {
+            if first_result.as_bool().unwrap_or(false) {
+                info!(
+                    "Successfully added torrent '{}' to Deluge. Torrent hash: {:?}",
+                    torrent_file,
+                    result.as_array().and_then(|arr| arr.get(1))
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    Err("Failed to add torrent to Deluge: Unexpected response format".to_string())
 }
