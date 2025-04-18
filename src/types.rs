@@ -2,6 +2,11 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 #[derive(Deserialize)]
+pub struct GeneralConfig {
+    pub tmdb_api_key: String,
+}
+
+#[derive(Deserialize)]
 pub struct PathsConfig {
     pub torrent_dir: String,
     pub screenshots_dir: String,
@@ -17,6 +22,16 @@ pub struct QbittorrentConfig {
     pub password: String,
     pub category: Option<String>,
     pub default_save_path: String,
+    pub executable: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct DelugeConfig {
+    pub webui_url: String,
+    pub daemon_port: u16,
+    pub username: String,
+    pub password: String,
+    pub label: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -67,6 +82,14 @@ pub struct SeedpoolGeneralConfig {
 pub struct SeedpoolScreenshots {
     pub remote_path: String,
     pub image_path: String,
+}
+
+#[derive(Deserialize)]
+pub struct Config {
+    pub general: GeneralConfig,
+    pub paths: PathsConfig,
+    pub qbittorrent: Vec<QbittorrentConfig>,
+    pub deluge: DelugeConfig,
 }
 
 pub trait VideoSettings {
