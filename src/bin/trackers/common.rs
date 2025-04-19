@@ -1,18 +1,21 @@
 use std::path::Path;
-use log::{info, error};
+use log::info;
 use reqwest::blocking::multipart::Form;
 use seed_tools::utils::{create_torrent, add_torrent_to_all_qbittorrent_instances};
-use crate::{QbittorrentConfig, SeedpoolConfig, TorrentLeechConfig};
+use seed_tools::types::PathsConfig; // Import PathsConfig
+use crate::{QbittorrentConfig, SeedpoolConfig, TorrentLeechConfig, DelugeConfig};
 
 pub fn process_custom_upload(
     input_path: &str,
     category_id: u32,
     type_id: u32,
     qbittorrent_configs: &[QbittorrentConfig],
-    tracker: &str, // "seedpool" or "torrentleech"
+    deluge_config: &DelugeConfig, // Deluge configuration
+    tracker: &str, // Determines which tracker is being used
     seedpool_config: Option<&SeedpoolConfig>,
     torrentleech_config: Option<&TorrentLeechConfig>,
-    mkbrr_path: &str, // Path to mkbrr binary
+    mkbrr_path: &str,
+    paths_config: &PathsConfig, // Add this parameter
 ) -> Result<(), String> {
     let base_name = Path::new(input_path)
         .file_name()
@@ -94,10 +97,11 @@ pub fn process_custom_upload(
 
     // Inject the torrent into qBittorrent
     add_torrent_to_all_qbittorrent_instances(
-        &[torrent_file],
-        qbittorrent_configs,
-        input_path,
-        Path::new(input_path).is_dir(),
+        &[torrent_file], // Use the single torrent file wrapped in a slice
+        qbittorrent_configs, // Ensure this is passed correctly
+        deluge_config, // Pass the DelugeConfig
+        input_path, // Pass the input_path argument
+        paths_config, // Use paths_config directly
     )?;
 
     Ok(())
