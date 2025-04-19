@@ -13,7 +13,7 @@
 ### 🚀 Running the Tool
 
 #### Video Uploads:
-This assumes a Movie or TV show upload. It will fetch tmdb/imdb/tvdb ids, create a sample, create screenshots, generate a description with all these goodies linked, and upload to the requiered tracker(s) 
+This assumes a Movie or TV show upload. It will fetch tmdb/imdb/tvdb ids, create a sample, create screenshots, generate a description with all these goodies linked, and upload to the required tracker(s) 
 ```bash
 ./seed-tools <input_path> -SP
 
