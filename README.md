@@ -1,5 +1,5 @@
 # seed-tools (Linux)
-yest
+yesting
 ## 📦 Usage
 
 ### 🔧 Setup
