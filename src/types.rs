@@ -12,7 +12,8 @@ pub struct PathsConfig {
     pub screenshots_dir: String,
     pub ffmpeg: String,
     pub ffprobe: String,
-    pub mktorrent: String,
+    pub mkbrr: String,
+    pub mediainfo: String, // Added this field
 }
 
 #[derive(Deserialize)]
@@ -23,6 +24,7 @@ pub struct QbittorrentConfig {
     pub category: Option<String>,
     pub default_save_path: String,
     pub executable: Option<String>,
+    pub fastresumes: String,
 }
 
 #[derive(Deserialize)]
@@ -32,6 +34,7 @@ pub struct DelugeConfig {
     pub username: String,
     pub password: String,
     pub label: Option<String>,
+    pub default_save_path: String,
 }
 
 #[derive(Deserialize)]
