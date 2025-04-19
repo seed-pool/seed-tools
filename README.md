@@ -1,22 +1,32 @@
-# seed-tools linux
+# seed-tools (Linux)
 
-Usage:
+## 📦 Usage
 
-Copy seed-tool executable somewhere and create a config directory in the same folder for it.
+### 🔧 Setup
 
-Copy config.toml to the config directory
+1. Copy the `seed-tools` executable somewhere on your system.
+2. In the **same folder**, create a `config` directory.
+3. Copy your `config.yaml` file into that `config` directory.
+4. In the `config` directory create a `trackers` folder
+5. Copy `seedpool.yaml` and `torrentlecch.yaml`files into that `trackers` folder.
 
-Run:
+### 🚀 Running the Tool
+
+#### Video Uploads:
+This assumes a Movie or TV show upload. It will fetch tmdb/imdb/tvdb ids, create a sample, create screenshots, generate a description with all these goodies linked, and upload to the requiered tracker(s) 
+```bash
+./seed-tools <input_path> -SP
 
 ./seed-tools <input_path> -SP -TL
-
-Or only one or the other.
-
+```
+#### 📤 Non-Video Upload (Skip All Checks)
+Non-video upload, skip all filechecks and processing. The -0000 argument will be used as category id and type id for upload. i.e pass -1614 to uploads a PC game.
+```
 ./seed-tools <input_path> -SP -0000
+```
 
-Non-video upload, skip all filechecks and processing. The -0000 argument will be used as category id and type id for upload. i.e pass -1614
-to uploads a PC game.
-
+#### 🔄 Sync Mode (Cross-seeding)
+Scans all torrents currently seeding in qBittorrent, checks Seedpool for matches, and adds any matches back to qBittorrent for cross-seeding.
+```
 ./seed-tools -sync
-
-Iterate through all torrents seeding in qbit and check seedpool for matches. Add matches to qbit for cross-seeding
+```
