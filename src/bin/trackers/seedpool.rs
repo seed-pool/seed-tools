@@ -1,8 +1,12 @@
 use reqwest::blocking::multipart::Form;
 use std::collections::HashMap;
 use std::path::Path;
-use crate::{Config, SeedpoolConfig, Tracker};
-use seed_tools::utils::{generate_release_name, find_video_files, create_torrent, generate_mediainfo, generate_sample, generate_screenshots, fetch_tmdb_id, fetch_external_ids, generate_description, add_torrent_to_all_qbittorrent_instances};
+use crate::{Config, Client, SeedpoolConfig, Tracker};
+use seed_tools::utils::{
+    generate_release_name, find_video_files, create_torrent, generate_mediainfo, generate_sample,
+    generate_screenshots, fetch_tmdb_id, fetch_external_ids, generate_description,
+    add_torrent_to_all_qbittorrent_instances,
+};
 use regex::Regex;
 use log::{info, error};
 
@@ -21,112 +25,119 @@ pub fn process_seedpool_release(
     mkbrr_path: &Path,
     mediainfo_path: &Path,
 ) -> Result<(), String> {
-    log::debug!("Calling determine_release_type_and_title with input_path: {}", input_path);
+    log::debug!("Processing release for input_path: {}", input_path);
 
+    // determine release type and title
     let (mut release_type, title, year, season_number, mut episode_number) =
         determine_release_type_and_title(input_path);
+    let base_name = Path::new(input_path)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
 
-    log::debug!(
-        "process_seedpool_release: release_type={}, title={}, year={:?}, season_number={:?}, episode_number={:?}",
-        release_type, title, year, season_number, episode_number
-    );
+    // check for duplicates
+    if let Some(download_link) = check_seedpool_dupes(&base_name, &seedpool_config.general.api_key)? {
+        log::info!("Duplicate found for '{}'. Downloading and adding to clients.", base_name);
 
+        let client = reqwest::blocking::Client::new();
+        let response = client
+            .get(&download_link)
+            .send()
+            .map_err(|e| format!("Failed to download torrent: {}", e))?;
+        if !response.status().is_success() {
+            return Err(format!("Failed to download torrent. HTTP Status: {}", response.status()));
+        }
+
+        let torrent_data = response
+            .bytes()
+            .map_err(|e| format!("Failed to read torrent data: {}", e))?;
+        let torrent_file_path = Path::new(&config.paths.torrent_dir).join(format!("{}.torrent", base_name));
+        std::fs::write(&torrent_file_path, &torrent_data)
+            .map_err(|e| format!("Failed to save torrent file: {}", e))?;
+
+        add_torrent_to_all_qbittorrent_instances(
+            &[torrent_file_path.to_string_lossy().to_string()],
+            &config.qbittorrent,
+            &config.deluge,
+            input_path,
+            &config.paths,
+        )?;
+        return Ok(());
+    }
+
+    // adjust episode number if none
     if episode_number.is_none() {
-        log::warn!("Episode number is None. Adjusting episode_number to 0.");
+        log::warn!("Episode number is None. Adjusting to 0.");
         episode_number = Some(0);
     }
 
-    // Determine category_id and type_id based on release type
+    // determine category and type ids
     let (mut category_id, mut type_id) = match release_type.as_str() {
         "tv" => (2, 24),
         "movie" => (1, 22),
         "boxset" => (13, 26),
         _ => (0, 0),
     };
-
-    // Only override category_id and type_id for boxsets
     if release_type == "boxset" && episode_number == Some(0) {
-        category_id = 13; // Boxset category
-        type_id = 26;     // Boxset type
+        category_id = 13;
+        type_id = 26;
     }
 
-    log::debug!("process_seedpool_release: category_id={}, type_id={}", category_id, type_id);
-
+    // fetch tmdb id and find video files
     let tmdb_id = fetch_tmdb_id(&title, year, &config.general.tmdb_api_key, &release_type)?;
-    log::debug!("process_seedpool_release: tmdb_id={}", tmdb_id);
-
-    let base_name = Path::new(input_path)
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string(); // Extract only the base name
-
-    let release_name = generate_release_name(&base_name); // Pass only the base name
-
     let (video_files, nfo_file) = find_video_files(input_path, &config.paths, &seedpool_config.settings)?;
     if video_files.is_empty() {
         return Err("No valid video files detected.".to_string());
     }
 
+    // create torrent and generate metadata
     let torrent_files = vec![create_torrent(
         &video_files,
         &config.paths.torrent_dir,
         &seedpool_config.settings.announce_url,
         &mkbrr_path.to_string_lossy(),
     )?];
-
     let mediainfo_output = generate_mediainfo(&video_files[0], &mediainfo_path.to_string_lossy())?;
-
     let sample_url = generate_sample(
         &video_files[0],
         &config.paths.screenshots_dir,
         &seedpool_config.screenshots.remote_path,
         &ffmpeg_path.to_string_lossy(),
-        &base_name, // Use the base name
+        &base_name,
     )?;
-
     let (screenshots, thumbnails) = generate_screenshots(
         &video_files[0],
         &config.paths.screenshots_dir,
         &ffmpeg_path.to_string_lossy(),
         &ffprobe_path.to_string_lossy(),
         &seedpool_config.screenshots.remote_path,
-        &base_name, // Use the base name
+        &base_name,
     )?;
-
-    let (imdb_id, tvdb_id) = match fetch_external_ids(tmdb_id, &release_type, &config.general.tmdb_api_key) {
-        Ok(ids) => ids,
-        Err(e) => {
-            error!("Failed to fetch external IDs: {}. Defaulting to 0 for IMDb and TVDB IDs.", e);
-            (None, None)
-        }
-    };
-
+    let (imdb_id, tvdb_id) = fetch_external_ids(tmdb_id, &release_type, &config.general.tmdb_api_key)
+        .unwrap_or((None, None));
     let resolution_id = get_seedpool_resolution_id(input_path);
 
-    log::debug!(
-        "process_seedpool_release: resolution_id={}, imdb_id={:?}, tvdb_id={:?}",
-        resolution_id, imdb_id, tvdb_id
-    );
-
+    // generate description
     let description = generate_description(
         &screenshots,
         &thumbnails,
         &sample_url,
-        &chrono::Utc::now().format("%A the %dth of %B %Y at %I:%M %p UTC").to_string(),
+        &chrono::Utc::now().to_string(),
         Some(&seedpool_config.settings.custom_description),
         None,
         &seedpool_config.screenshots.image_path,
-        &release_name,
+        &generate_release_name(&base_name),
     );
 
+    // upload to seedpool
     Seedpool {
         upload_url: seedpool_config.settings.upload_url.clone(),
         api_key: seedpool_config.general.api_key.clone(),
     }
     .upload(
         &torrent_files[0],
-        &release_name, // Pass the release name explicitly
+        &generate_release_name(&base_name),
         Some(&description),
         Some(&mediainfo_output),
         &nfo_file,
@@ -140,11 +151,13 @@ pub fn process_seedpool_release(
         Some(resolution_id),
     )?;
 
+    // add torrent to clients
     add_torrent_to_all_qbittorrent_instances(
         &torrent_files,
         &config.qbittorrent,
-        &config.deluge, // Pass the DelugeConfig
-        input_path, // Pass the input_path argument
+        &config.deluge,
+        input_path,
+        &config.paths,
     )?;
 
     Ok(())
@@ -234,32 +247,6 @@ fn get_seedpool_resolution_id(input_path: &str) -> u32 {
         }
     }
 
-    if let Ok(entries) = std::fs::read_dir(input_path) {
-        for entry in entries.flatten() {
-            if let Some(file_name) = entry.file_name().to_str() {
-                if let Some(captures) = resolution_regex.captures(file_name) {
-                    if let Some(resolution) = captures.get(1).map(|m| m.as_str().to_lowercase()) {
-                        return match resolution.as_str() {
-                            "8640p" => 10,
-                            "4320p" => 1,
-                            "2160p" => 2,
-                            "1440p" => 3,
-                            "1080p" => 3,
-                            "1080i" => 4,
-                            "720p" => 5,
-                            "576p" => 6,
-                            "576i" => 7,
-                            "480p" => 8,
-                            "480i" => 9,
-                            _ => 10,
-                        };
-                    }
-                }
-            }
-        }
-    }
-
-    log::warn!("No resolution detected in input path or filenames: {}", input_path);
     10
 }
 
@@ -374,4 +361,87 @@ impl Tracker for Seedpool {
         }
         Ok(())
     }
+}
+
+fn check_seedpool_dupes(
+    name: &str,
+    seedpool_api_key: &str,
+) -> Result<Option<String>, String> {
+    let client = Client::new();
+
+    info!("Checking Seedpool for existing torrent with name: '{}'", name);
+
+    let normalized_name = generate_release_name(name);
+    info!("Normalized Name for Seedpool Query: '{}'", normalized_name);
+
+    let season_episode_regex = Regex::new(r"S(\d{2})E(\d{2})").unwrap();
+    let season_episode = season_episode_regex.captures(name).map(|caps| {
+        (
+            caps.get(1).unwrap().as_str().parse::<u32>().unwrap_or(0),
+            caps.get(2).unwrap().as_str().parse::<u32>().unwrap_or(0),
+        )
+    });
+    if let Some((season, episode)) = &season_episode {
+        info!("Detected Season/Episode: S{}E{}", season, episode);
+    }
+
+    let mut query_url = format!(
+        "https://seedpool.org/api/torrents/filter?name={}&perPage=10&sortField=name&sortDirection=asc&api_token={}",
+        urlencoding::encode(&normalized_name),
+        seedpool_api_key
+    );
+
+    if let Some((season, episode)) = &season_episode {
+        query_url = format!(
+            "{}&seasonNumber={}&episodeNumber={}",
+            query_url, season, episode
+        );
+    }
+
+    info!("Seedpool API Query URL: {}", query_url);
+
+    let search_response = client
+        .get(&query_url)
+        .send()
+        .map_err(|e| format!("Failed to query Seedpool for '{}': {}", name, e))?;
+
+    if !search_response.status().is_success() {
+        return Err(format!(
+            "Failed to query Seedpool for '{}': HTTP {}",
+            name,
+            search_response.status()
+        ));
+    }
+
+    let raw_response = search_response.text().unwrap_or_else(|_| "Failed to read response body".to_string());
+    info!("Seedpool API Response: {}", raw_response);
+
+    let search_results: serde_json::Value = serde_json::from_str(&raw_response)
+        .map_err(|e| format!("Failed to parse Seedpool response for '{}': {}", name, e))?;
+
+    let empty_vec = vec![];
+    let data = search_results["data"].as_array().unwrap_or(&empty_vec);
+
+    for result in data {
+        if let Some(attributes) = result["attributes"].as_object() {
+            if let Some(title) = attributes.get("name").and_then(|t| t.as_str()) {
+                info!("Checking result title: {}", title);
+
+                if let Some((season, episode)) = &season_episode {
+                    if !title.contains(&format!("S{:02}E{:02}", season, episode)) {
+                        info!("Skipping result due to mismatched season/episode: {}", title);
+                        continue;
+                    }
+                }
+
+                if let Some(download_link) = attributes.get("download_link").and_then(|d| d.as_str()) {
+                    info!("Duplicate found for '{}'. Download link: {}", name, download_link);
+                    return Ok(Some(download_link.to_string()));
+                }
+            }
+        }
+    }
+
+    info!("No duplicate found for '{}'.", name);
+    Ok(None)
 }
