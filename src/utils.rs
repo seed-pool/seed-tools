@@ -174,8 +174,9 @@ pub fn generate_mediainfo(video_file: &str, mediainfo_path: &str) -> Result<Stri
 pub fn add_torrent_to_all_qbittorrent_instances(
     torrent_files: &[String],
     qbittorrent_configs: &[QbittorrentConfig],
-    deluge_config: &DelugeConfig, // Add Deluge config
+    deluge_config: &DelugeConfig,
     input_path: &str,
+    paths_config: &PathsConfig, // Add this parameter
 ) -> Result<(), String> {
     let is_folder = Path::new(input_path).is_dir();
 
@@ -184,7 +185,13 @@ pub fn add_torrent_to_all_qbittorrent_instances(
         for torrent_file in torrent_files {
             if let Some(executable) = &config.executable {
                 // Call add_torrent_to_qbittorrent for each instance
-                if let Err(e) = add_torrent_to_qbittorrent(torrent_file, config, input_path, is_folder) {
+                if let Err(e) = add_torrent_to_qbittorrent(
+                    torrent_file,
+                    config,
+                    input_path,
+                    is_folder,
+                    paths_config, // Pass paths_config here
+                ) {
                     error!(
                         "Error adding torrent '{}' to qBittorrent instance '{}': {}",
                         torrent_file, config.webui_url, e
@@ -216,7 +223,14 @@ pub fn add_torrent_to_all_qbittorrent_instances(
                 .to_string()
         };
 
-        if let Err(e) = add_torrent_to_deluge(torrent_file, deluge_config, &save_path) {
+        // Pass the `is_folder` argument to `add_torrent_to_deluge`
+        if let Err(e) = add_torrent_to_deluge(
+            torrent_file,
+            deluge_config,
+            &save_path,
+            is_folder,
+            paths_config, // Pass paths_config here
+        ) {
             error!("Error adding torrent '{}' to Deluge: {}", torrent_file, e);
         } else {
             info!("Successfully added torrent '{}' to Deluge.", torrent_file);
@@ -268,7 +282,7 @@ pub fn generate_sample(
 
     // Generate the sample file
     let ffmpeg_command = format!(
-        "{} -i \"{}\" -ss 00:10:00 -t 00:00:30 -c:v libx264 -preset ultrafast -crf 23 -c:a aac \"{}\"",
+        "{} -i \"{}\" -ss 00:05:00 -t 00:00:20 -c:v copy -c:a copy -c:s copy \"{}\"",
         ffmpeg_path, video_file, sample_file
     );
     let output = Command::new("sh")
@@ -700,11 +714,114 @@ fn extract_rar_archives(folder_path: &str) -> Result<Option<String>, String> {
     Ok(Some(folder_path.to_string()))
 }
 
+pub fn determine_save_path(
+    input_path: &str,
+    default_save_path: &str,
+    is_folder: bool,
+    is_single_file_torrent: bool,
+    torrent_file: &str, // Path to the .torrent file
+    mkbrr_path: &str,   // Path to the mkbrr binary
+) -> Result<(String, String), String> {
+    let input = Path::new(input_path);
+
+    // Fallback for empty default_save_path
+    let default_save_path = if default_save_path.is_empty() {
+        log::warn!("default_save_path is empty. Falling back to '/home/beholder/files'.");
+        "/home/beholder/files".to_string()
+    } else {
+        default_save_path.to_string()
+    };
+
+    // Explicitly check if the input is a folder and contains only a single file
+    let contains_single_file = if input.is_dir() {
+        let entries: Vec<_> = fs::read_dir(input)
+            .map_err(|e| format!("Failed to read directory '{}': {}", input_path, e))?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().is_file())
+            .collect();
+
+        entries.len() == 1
+    } else {
+        false
+    };
+
+    // Use mkbrr to inspect the .torrent file if the input is a folder
+    let mkbrr_contains_single_file = if is_folder {
+        let output = Command::new(mkbrr_path)
+            .args(&["inspect", torrent_file])
+            .output()
+            .map_err(|e| format!("Failed to run mkbrr: {}", e))?;
+
+        if !output.status.success() {
+            return Err(format!(
+                "mkbrr failed to inspect torrent file '{}': {}",
+                torrent_file,
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+
+        // Parse the mkbrr output
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        log::debug!("mkbrr output: {}", stdout);
+
+        // Check if the output contains a single file
+        stdout.lines().any(|line| line.trim_start().starts_with("Name:"))
+            && !stdout.lines().any(|line| line.trim_start().starts_with("Files:"))
+    } else {
+        false
+    };
+
+    // Combine both checks
+    let contains_single_file = contains_single_file || mkbrr_contains_single_file;
+
+    // Determine the base save path
+    let base_save_path = if is_folder {
+        if is_single_file_torrent || contains_single_file {
+            // If the input is a folder and the torrent contains a single file, create a subfolder
+            Path::new(&default_save_path)
+                .join(input.file_name().unwrap_or_default())
+                .to_string_lossy()
+                .to_string()
+        } else {
+            // For folder-to-folder torrents, use the default save path directly
+            default_save_path.clone()
+        }
+    } else {
+        // For single-file inputs, use the default save path directly
+        default_save_path.clone()
+    };
+
+    // Determine if a subfolder should be created
+    let create_subfolder = if is_folder && (is_single_file_torrent || contains_single_file) {
+        "true" // Create a subfolder if the input is a folder and the torrent contains a single file
+    } else {
+        "false" // Do not create a subfolder for other cases
+    };
+
+    // Debugging logs
+    log::debug!("determine_save_path:");
+    log::debug!("  input_path: {}", input_path);
+    log::debug!("  default_save_path: {}", default_save_path);
+    log::debug!("  is_folder: {}", is_folder);
+    log::debug!("  is_single_file_torrent: {}", is_single_file_torrent);
+    log::debug!("  contains_single_file: {}", contains_single_file);
+    log::debug!("  base_save_path: {}", base_save_path);
+    log::debug!("  create_subfolder: {}", create_subfolder);
+
+    // Ensure the save path exists
+    if let Err(e) = std::fs::create_dir_all(&base_save_path) {
+        return Err(format!("Failed to create save path '{}': {}", base_save_path, e));
+    }
+
+    Ok((base_save_path, create_subfolder.to_string()))
+}
+
 pub fn add_torrent_to_qbittorrent(
     torrent_file: &str,
     config: &QbittorrentConfig,
     input_path: &str,
     is_folder: bool,
+    paths_config: &PathsConfig,
 ) -> Result<(), String> {
     let client = reqwest::blocking::Client::new();
 
@@ -732,75 +849,36 @@ pub fn add_torrent_to_qbittorrent(
         return Err(format!("Torrent file does not exist: {}", torrent_file));
     }
 
-    // Determine the save path
-    let save_path = if is_folder {
-        // Use the original folder name as the subfolder
-        Path::new(&config.default_save_path)
-            .join(Path::new(input_path).file_name().unwrap_or_default())
-            .to_string_lossy()
-            .to_string()
-    } else {
-        // For single-file inputs, use the parent directory of the file
-        let parent_dir = Path::new(input_path)
-            .parent()
-            .unwrap_or_else(|| Path::new(&config.default_save_path));
-        parent_dir.to_string_lossy().to_string()
-    };
+    // Determine if the torrent being added is a folder or a single file
+    let is_single_file_torrent = Path::new(input_path).is_file();
+
+    // Determine the save path and subfolder creation logic
+    let (save_path, create_subfolder) = determine_save_path(
+        input_path,
+        &config.default_save_path,
+        is_folder,
+        is_single_file_torrent,
+        torrent_file,
+        &paths_config.mkbrr,
+    )?;
     info!("savepath set to: {}", save_path);
-
-    // Determine if the torrent being added is a folder
-    let torrent_is_folder = Path::new(torrent_file).is_dir();
-    info!("is_folder: {}, torrent_is_folder: {}", is_folder, torrent_is_folder);
-
-    // Set the `createSubfolder` parameter
-    let create_subfolder = if is_folder && torrent_is_folder {
-        "false" // Do not create a subfolder if both input and torrent are folders
-    } else if is_folder && !torrent_is_folder {
-        "false" // Do not create a subfolder even if the input is a folder but the torrent is a single file
-    } else {
-        "false" // Do not create a subfolder for single-file inputs
-    };
     info!("createSubfolder parameter set to: {}", create_subfolder);
-
-    // Ensure the savepath exists if needed
-    if !(is_folder && torrent_is_folder) {
-        if let Err(e) = std::fs::create_dir_all(&save_path) {
-            error!("Failed to create savepath '{}': {}", save_path, e);
-            return Err(format!("Failed to create savepath '{}': {}", save_path, e));
-        }
-    }
 
     // Construct the multipart form
     let mut form = Form::new()
         .file("torrents", torrent_file)
         .map_err(|e| format!("Failed to attach torrent file: {}", e))?
-        .text("createSubfolder", create_subfolder)
-        .text("autoTMM", "false") // Disable autoTMM to respect the savepath
+        .text("createSubfolder", create_subfolder.clone())
+        .text("autoTMM", "false")
         .text("paused", "false")
-        .text("skip_checking", "true");
-
-    // Add the savepath only if the input and torrent are not both folders
-    if !(is_folder && torrent_is_folder) {
-        form = form.text("savepath", save_path.clone());
-        info!("savepath included in form: {}", save_path);
-    } else {
-        info!("savepath not included in form as both input and torrent are folders");
-    }
+        .text("skip_checking", "true")
+        .text("savepath", save_path.clone());
 
     // Add the category if specified in the config
     if let Some(category) = &config.category {
         info!("Using category for qBittorrent: {}", category);
         form = form.text("category", category.clone());
     }
-
-    // Debug: Log the form data
-    info!("Form data being sent to qBittorrent API:");
-    info!("  Torrent File: {}", torrent_file);
-    if !(is_folder && torrent_is_folder) {
-        info!("  savepath: {}", save_path);
-    }
-    info!("  createSubfolder: {}", create_subfolder);
-    info!("  autoTMM: false");
 
     // Upload the torrent file
     info!("Injecting torrent into qBittorrent...");
@@ -828,9 +906,33 @@ pub fn add_torrent_to_qbittorrent(
 pub fn add_torrent_to_deluge(
     torrent_file: &str,
     config: &DelugeConfig,
-    save_path: &str,
+    input_path: &str,
+    is_folder: bool,
+    paths_config: &PathsConfig,
 ) -> Result<(), String> {
     info!("Adding torrent '{}' to Deluge at '{}'", torrent_file, config.webui_url);
+
+    // Determine if the torrent being added is a folder or a single file
+    let is_single_file_torrent = Path::new(input_path).is_file();
+
+    // Determine the save path and subfolder creation logic
+    let (base_save_path, _) = determine_save_path(
+        input_path,
+        &config.default_save_path,
+        is_folder,
+        is_single_file_torrent,
+        torrent_file,
+        &paths_config.mkbrr,
+    )?;
+    info!("savepath set to: {}", base_save_path);
+
+    // Convert the save path to an absolute path
+    let absolute_save_path = fs::canonicalize(&base_save_path)
+        .map_err(|e| format!("Failed to resolve absolute path for save path '{}': {}", base_save_path, e))?;
+
+    // Convert the torrent file path to an absolute path
+    let absolute_torrent_file = fs::canonicalize(torrent_file)
+        .map_err(|e| format!("Failed to resolve absolute path for torrent file '{}': {}", torrent_file, e))?;
 
     // Create a client with cookie storage
     let cookie_jar = Arc::new(Jar::default());
@@ -867,11 +969,12 @@ pub fn add_torrent_to_deluge(
     let add_torrent_payload = json!({
         "method": "web.add_torrents",
         "params": [[{
-            "path": torrent_file,
+            "path": absolute_torrent_file.to_string_lossy(),
             "options": {
-                "download_location": save_path,
+                "download_location": absolute_save_path.to_string_lossy(),
                 "add_paused": false,
                 "move_completed": false,
+                "skip_checking": true, // Skip hash check
                 "label": config.label.clone().unwrap_or_default(),
             }
         }]],
@@ -902,19 +1005,6 @@ pub fn add_torrent_to_deluge(
         }
     }
 
-    // Check the result field for success
-    if let Some(result) = add_torrent_result.get("result") {
-        if let Some(first_result) = result.as_array().and_then(|arr| arr.get(0)) {
-            if first_result.as_bool().unwrap_or(false) {
-                info!(
-                    "Successfully added torrent '{}' to Deluge. Torrent hash: {:?}",
-                    torrent_file,
-                    result.as_array().and_then(|arr| arr.get(1))
-                );
-                return Ok(());
-            }
-        }
-    }
-
-    Err("Failed to add torrent to Deluge: Unexpected response format".to_string())
+    info!("Torrent added to Deluge successfully.");
+    Ok(())
 }
