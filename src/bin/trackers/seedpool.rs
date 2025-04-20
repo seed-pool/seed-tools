@@ -103,15 +103,18 @@ pub fn process_seedpool_release(
         &video_files[0],
         &config.paths.screenshots_dir,
         &seedpool_config.screenshots.remote_path,
+        &seedpool_config.screenshots.image_path,
         &ffmpeg_path.to_string_lossy(),
         &base_name,
     )?;
+    
     let (screenshots, thumbnails) = generate_screenshots(
         &video_files[0],
         &config.paths.screenshots_dir,
         &ffmpeg_path.to_string_lossy(),
         &ffprobe_path.to_string_lossy(),
         &seedpool_config.screenshots.remote_path,
+        &seedpool_config.screenshots.image_path,
         &base_name,
     )?;
     let (imdb_id, tvdb_id) = fetch_external_ids(tmdb_id, &release_type, &config.general.tmdb_api_key)
