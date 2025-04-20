@@ -275,10 +275,12 @@ pub fn generate_sample(
     video_file: &str,
     screenshots_dir: &str,
     remote_path: &str,
+    image_path: &str, // Public-facing URL base
     ffmpeg_path: &str,
     input_name: &str, // Use the complete input name
 ) -> Result<String, String> {
-    let sample_file = format!("{}/{}.sample.mkv", screenshots_dir, input_name);
+    let sanitized_input_name = generate_release_name(input_name); // Sanitize the input name
+    let sample_file = format!("{}/{}.sample.mkv", screenshots_dir, sanitized_input_name);
 
     // Generate the sample file
     let ffmpeg_command = format!(
@@ -299,16 +301,18 @@ pub fn generate_sample(
     }
 
     // Set permissions to 777
-    info!("Setting permissions to 777 for file: {}", sample_file);
-    fs::set_permissions(&sample_file, Permissions::from_mode(0o777))
-        .map_err(|e| format!("Failed to set permissions for sample file '{}': {}", sample_file, e))?;
-
-    info!("Sample file generated: {}", sample_file);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&sample_file, fs::Permissions::from_mode(0o777))
+            .map_err(|e| format!("Failed to set permissions for sample file '{}': {}", sample_file, e))?;
+    }
 
     // Upload the sample file
     upload_to_cdn(&sample_file, remote_path)?;
 
-    Ok(format!("{}/{}.sample.mkv", remote_path, input_name))
+    // Return the public-facing URL for the sample
+    Ok(format!("{}/{}.sample.mkv", image_path, sanitized_input_name))
 }
 
 pub fn generate_description(
@@ -323,21 +327,15 @@ pub fn generate_description(
 ) -> String {
     let mut description = String::new();
 
-    // Sanitize the release name
-    let sanitized_release_name = generate_release_name(release_name);
 
     // Add screenshots in a 2x2 table pattern
     if !screenshots.is_empty() && !thumbnails.is_empty() {
-        description.push_str("[center]\n");
-        description.push_str("    [tr]\n");
+        description.push_str("    [center][tr]\n");
 
         for (i, (screenshot, thumbnail)) in screenshots.iter().zip(thumbnails.iter()).enumerate() {
-            let screenshot_url = format!("{}/{}", base_url, Path::new(screenshot).file_name().unwrap_or_default().to_string_lossy());
-            let thumbnail_url = format!("{}/{}", base_url, Path::new(thumbnail).file_name().unwrap_or_default().to_string_lossy());
-
             description.push_str(&format!(
                 "        [td][url={}][img width=720]{}[/img][/url][/td]\n",
-                screenshot_url, thumbnail_url
+                screenshot, thumbnail
             ));
 
             // Add a new row every 2 images
@@ -346,27 +344,23 @@ pub fn generate_description(
             }
         }
 
-        // Close the last row
+        // Close the last row properly
         if screenshots.len() % 2 != 0 {
-            description.push_str("    [/tr]\n");
+            description.push_str("    [/center][/tr]\n");
         }
-
-        description.push_str("[/center]\n\n");
     }
 
     // Add sample link if available
     if !sample_url.is_empty() {
-        let sample_filename = Path::new(sample_url)
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy();
-        let sample_link = format!("{}/{}", base_url, sample_filename);
         description.push_str(&format!(
-            "[center][b][spoiler=Sample: {}]{}[/spoiler][/b][/center]\n\n",
-            sample_filename, sample_link
+            "[b][spoiler=Sample: {}]{}[/spoiler][/b]\n\n",
+            Path::new(sample_url).file_name().unwrap_or_default().to_string_lossy(),
+            sample_url
         ));
     }
 
+
+    description.push_str("\n");
     // Add YouTube trailer link if available
     if let Some(trailer_url) = youtube_trailer_url {
         description.push_str(&format!(
@@ -375,16 +369,16 @@ pub fn generate_description(
         ));
     }
 
-    // Add custom description
+    // Add custom description (not centered)
     if let Some(custom_desc) = custom_description {
         description.push_str(custom_desc);
         description.push_str("\n\n");
     }
 
-    // Append the default non-video description wrapped in [note]
-    description.push_str("[note]\n");
+    // Append the default non-video description wrapped in [note] (not centered)
+
     description.push_str(&default_non_video_description());
-    description.push_str("\n[/note]");
+
 
     description
 }
@@ -538,6 +532,7 @@ pub fn generate_screenshots(
     ffmpeg_path: &str,
     ffprobe_path: &str,
     remote_path: &str,
+    image_path: &str, // Public-facing URL base
     input_name: &str, // Use the complete input name
 ) -> Result<(Vec<String>, Vec<String>), String> {
     let mut screenshots_list = Vec::new();
@@ -546,13 +541,14 @@ pub fn generate_screenshots(
     // Ensure the output directory exists
     fs::create_dir_all(output_dir).map_err(|e| format!("Failed to create output directory: {}", e))?;
 
+    let sanitized_input_name = generate_release_name(input_name); // Sanitize the input name
     let duration = get_video_duration(video_file, ffprobe_path)?;
     let timestamps = generate_random_timestamps(duration, 4);
 
     for (i, shot_time) in timestamps.iter().enumerate() {
-        // Generate filenames for screenshots and thumbnails
-        let screenshot_file = format!("{}/{}_{}.jpg", output_dir, input_name, i + 1);
-        let thumbnail_file = format!("{}/{}_{}_thumb.jpg", output_dir, input_name, i + 1);
+        // Generate sanitized filenames for screenshots and thumbnails
+        let screenshot_file = format!("{}/{}_{}.jpg", output_dir, sanitized_input_name, i + 1);
+        let thumbnail_file = format!("{}/{}_{}_thumb.jpg", output_dir, sanitized_input_name, i + 1);
 
         // Generate screenshot
         generate_screenshot(video_file, ffmpeg_path, shot_time, &screenshot_file)?;
@@ -572,9 +568,9 @@ pub fn generate_screenshots(
         upload_to_cdn(&screenshot_file, remote_path)?;
         upload_to_cdn(&thumbnail_file, remote_path)?;
 
-        // Add URLs to the lists
-        screenshots_list.push(format!("{}/{}", remote_path, screenshot_file));
-        thumbnails_list.push(format!("{}/{}", remote_path, thumbnail_file));
+        // Add public-facing URLs to the lists
+        screenshots_list.push(format!("{}/{}", image_path, Path::new(&screenshot_file).file_name().unwrap().to_string_lossy()));
+        thumbnails_list.push(format!("{}/{}", image_path, Path::new(&thumbnail_file).file_name().unwrap().to_string_lossy()));
     }
 
     Ok((screenshots_list, thumbnails_list))
