@@ -1,8 +1,8 @@
 #!/bin/bash
-USER_DIR="/home/user" # Replace with the actual user directory
+SEED_TOOLS_DIR="/home/user/seed-tools" # Set the directory where seed-tools is located
 
-env >> "$USER_DIR/seed-tools/debug.log"
-echo "Arguments: $@" >> "$USER_DIR/seed-tools/debug.log"
+env >> "$SEED_TOOLS_DIR/debug.log"
+echo "Arguments: $@" >> "$SEED_TOOLS_DIR/debug.log"
 
 ARGS=("$@")
 CLEAN_ARGS=()
@@ -18,5 +18,5 @@ if [[ "${CLEAN_ARGS[-1]}" =~ ^[0-9]{4}$ ]]; then
     CLEAN_ARGS+=("-c" "$CUSTOM_CAT_TYPE")
 fi
 
-cd "$USER_DIR/seed-tools" || exit 1
-./seed-tools "${CLEAN_ARGS[@]}" >> "$USER_DIR/seed-tools/debug.log" 2>&1
+cd "$SEED_TOOLS_DIR" || exit 1
+./seed-tools "${CLEAN_ARGS[@]}" >> "$SEED_TOOLS_DIR/debug.log" 2>&1
