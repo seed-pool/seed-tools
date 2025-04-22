@@ -284,7 +284,7 @@ pub fn generate_sample(
 
     // Generate the sample file
     let ffmpeg_command = format!(
-        "{} -i \"{}\" -ss 00:05:00 -t 00:00:20 -c:v copy -c:a copy -c:s copy \"{}\"",
+        "{} -i \"{}\" -ss 00:05:00 -t 00:00:20 -map 0 -c copy \"{}\"",
         ffmpeg_path, video_file, sample_file
     );
     let output = Command::new("sh")
@@ -819,28 +819,44 @@ pub fn add_torrent_to_qbittorrent(
     is_folder: bool,
     paths_config: &PathsConfig,
 ) -> Result<(), String> {
-    let client = reqwest::blocking::Client::new();
+    // 1. Create a client with cookie support ENABLED
+    info!("Creating HTTP client with cookie support for qBittorrent.");
+    let client = Client::builder()
+        .cookie_store(true) // <-- Key change: Enable cookie persistence
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
-    // Log in to qBittorrent
-    info!("Logging in to qBittorrent...");
-    let login_response = client
-        .post(format!("{}/api/v2/auth/login", config.webui_url))
+    // 2. Log in to qBittorrent (using the cookie-enabled client)
+    let login_url = format!("{}/api/v2/auth/login", config.webui_url);
+    info!("Logging in to qBittorrent at {}...", login_url);
+    let login_response = client // Use the SAME client instance
+        .post(&login_url)
         .form(&[
-            ("username", config.username.as_str()),
-            ("password", config.password.as_str()),
+            ("username", config.username.as_str()),            ("password", config.password.as_str()),
         ])
         .send()
-        .map_err(|e| format!("Failed to log in to qBittorrent: {}", e))?;
+        .map_err(|e| format!("Failed to send login request to qBittorrent: {}", e))?;
 
-    if !login_response.status().is_success() {
+    // 3. Check Login Response Status AND Body
+    let login_status = login_response.status();
+    let login_body = login_response.text().map_err(|e| format!("Failed to read login response body: {}", e))?;
+
+    if !login_status.is_success() {
         return Err(format!(
-            "Failed to log in to qBittorrent: {}",
-            login_response.status()
+            "qBittorrent login request failed: {} - Body: {}",
+            login_status, login_body
         ));
     }
-    info!("Logged in to qBittorrent successfully.");
+    // qBittorrent API v2 returns "Ok." on successful login
+    if login_body.trim() != "Ok." {
+        return Err(format!(
+            "qBittorrent login failed (unexpected response): {}",
+            login_body
+        ));
+    }
+    info!("Logged in to qBittorrent successfully (SID cookie received and stored).");
 
-    // Verify that the torrent file exists
+    // --- Existing Logic (Verify torrent file, determine save path) ---
     if !Path::new(torrent_file).exists() {
         return Err(format!("Torrent file does not exist: {}", torrent_file));
     }
@@ -851,20 +867,21 @@ pub fn add_torrent_to_qbittorrent(
     // Determine the save path and subfolder creation logic
     let (save_path, create_subfolder) = determine_save_path(
         input_path,
-        &config.default_save_path,
+        &config.default_save_path, // Assuming default_save_path exists on config
         is_folder,
         is_single_file_torrent,
         torrent_file,
-        &paths_config.mkbrr,
+        &paths_config.mkbrr, // Assuming mkbrr exists on paths_config
     )?;
     info!("savepath set to: {}", save_path);
-    info!("createSubfolder parameter set to: {}", create_subfolder);
+    info!("createSubfolder parameter set to: {}", create_subfolder); // Keep original case maybe? Check API docs. Assuming String/bool works.
 
-    // Construct the multipart form
+    // --- Construct the multipart form (Exactly as before) ---
     let mut form = Form::new()
         .file("torrents", torrent_file)
         .map_err(|e| format!("Failed to attach torrent file: {}", e))?
-        .text("createSubfolder", create_subfolder.clone())
+        // API expects boolean as string "true" or "false"
+        .text("createSubfolder", create_subfolder.to_string()) // Convert bool to string
         .text("autoTMM", "false")
         .text("paused", "false")
         .text("skip_checking", "true")
@@ -876,19 +893,22 @@ pub fn add_torrent_to_qbittorrent(
         form = form.text("category", category.clone());
     }
 
-    // Upload the torrent file
-    info!("Injecting torrent into qBittorrent...");
-    let upload_response = client
-        .post(format!("{}/api/v2/torrents/add", config.webui_url))
+    // --- Upload the torrent file (using the SAME cookie-enabled client) ---
+    let add_url = format!("{}/api/v2/torrents/add", config.webui_url);
+    info!("Injecting torrent into qBittorrent at {}...", add_url);
+    let upload_response = client // Use the SAME client instance again
+        .post(&add_url)
         .multipart(form)
         .send()
-        .map_err(|e| format!("Failed to upload torrent to qBittorrent: {}", e))?;
+        .map_err(|e| format!("Failed to send add torrent request to qBittorrent: {}", e))?;
 
-    let status = upload_response.status();
+    // --- Check Upload Response (Exactly as before) ---
+    let status = upload_response.status();    // Read body before checking status in case body contains useful error info
     let response_body = upload_response.text().unwrap_or_else(|_| "Failed to read response body".to_string());
-    info!("qBittorrent API Response: {}", response_body);
+    info!("qBittorrent API Response [add]: {}", response_body); // Clarify log message
 
-    if !status.is_success() || response_body.to_lowercase().contains("fails") {
+    // Check status *after* reading body. Check if body contains "fail" as before.
+    if !status.is_success() || response_body.to_lowercase().contains("fail") {
         return Err(format!(
             "Failed to upload torrent to qBittorrent: {}. Response: {}",
             status, response_body
