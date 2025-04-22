@@ -4,6 +4,32 @@ use reqwest::blocking::multipart::Form;
 use seed_tools::utils::{create_torrent, add_torrent_to_all_qbittorrent_instances};
 use seed_tools::types::PathsConfig; // Import PathsConfig
 use crate::{QbittorrentConfig, SeedpoolConfig, TorrentLeechConfig, DelugeConfig};
+use std::collections::HashMap;
+
+#[allow(dead_code)]
+pub trait Tracker {
+    fn requires_screenshots(&self) -> bool;
+    fn requires_sample(&self) -> bool;
+    fn requires_tmdb_id(&self) -> bool;
+    fn requires_remote_path(&self) -> bool;
+    fn upload(
+        &self,
+        torrent_file: &str,
+        release_name: &str,
+        description: Option<&str>,
+        mediainfo: Option<&str>,
+        nfo_file: &Option<String>,
+        category_id: u32,
+        type_id: Option<u32>,
+        tmdb_id: Option<u32>,
+        imdb_id: Option<String>,
+        tvdb_id: Option<u32>,
+        season_number: Option<u32>,
+        episode_number: Option<u32>,
+        resolution_id: Option<u32>,
+    ) -> Result<(), String>;
+    fn generate_metadata(&self, torrent_file: &str) -> Result<HashMap<String, String>, String>;
+}
 
 pub fn process_custom_upload(
     input_path: &str,
