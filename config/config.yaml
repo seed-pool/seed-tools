@@ -7,6 +7,7 @@ paths:
   ffmpeg: "/home/user/seed-tools/bin/ffmpeg"
   ffprobe: "/home/user/seed-tools/bin/ffprobe"
   mkbrr: "/home/user/seed-tools/bin/mkbrr"
+  mediainfo: "/home/user/seed-tools/bin/mediainfo"
 
 qbittorrent:
   - webui_url: "http://localhost:8080"
