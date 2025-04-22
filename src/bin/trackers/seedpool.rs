@@ -8,7 +8,7 @@ use seed_tools::utils::{
     add_torrent_to_all_qbittorrent_instances,
 };
 use regex::Regex;
-use log::{info, error};
+use log::info;
 
 pub struct Seedpool {
     pub upload_url: String,
@@ -107,7 +107,6 @@ pub fn process_seedpool_release(
         &ffmpeg_path.to_string_lossy(),
         &base_name,
     )?;
-    
     let (screenshots, thumbnails) = generate_screenshots(
         &video_files[0],
         &config.paths.screenshots_dir,
