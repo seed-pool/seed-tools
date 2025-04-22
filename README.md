@@ -8,7 +8,7 @@
 2. In the **same folder**, create a `config` directory.
 3. Copy your `config.yaml` file into that `config` directory.
 4. In the `config` directory create a `trackers` folder
-5. Copy `seedpool.yaml` and `torrentlecch.yaml`files into that `trackers` folder.
+5. Copy `seedpool.yaml` and `torrentleech.yaml`files into that `trackers` folder.
 
 ### 🚀 Running the Tool
 
