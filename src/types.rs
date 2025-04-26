@@ -6,6 +6,20 @@ pub struct GeneralConfig {
     pub tmdb_api_key: String,
 }
 
+pub struct PreflightCheckResult {
+    pub release_name: String,
+    pub generated_release_name: String,
+    pub dupe_check: String,
+    pub tmdb_id: u32,
+    pub imdb_id: Option<String>,
+    pub tvdb_id: Option<u32>,
+    pub excluded_files: String,
+    pub audio_languages: Vec<String>,
+    pub release_type: String,         // New field for release type
+    pub season_number: Option<u32>,  // New field for season number
+    pub episode_number: Option<u32>, // New field for episode number
+}
+
 #[derive(Deserialize)]
 pub struct PathsConfig {
     pub torrent_dir: String,
@@ -77,6 +91,7 @@ pub struct SeedpoolConfig {
 #[derive(Deserialize)]
 pub struct SeedpoolGeneralConfig {
     pub enabled: bool,
+    pub username: String,
     pub passkey: String,
     pub api_key: String,
 }
