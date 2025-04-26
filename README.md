@@ -1,8 +1,10 @@
 # seed-tools (Linux)
 
-## 📦 Usage
+![Screenshot](images/seed-toolsv0.32.png)
 
-### 🔧 Setup
+## 📦 Setup
+
+### 🔧 Install
 
 1. Copy the `seed-tools` executable and the `seed-tools.sh` launch script somewhere on your system.
 2. In the **same folder**, create a `config` directory.
@@ -10,7 +12,14 @@
 4. In the `config` directory create a `trackers` folder
 5. Copy `seedpool.yaml` and `torrentleech.yaml`files into that `trackers` folder.
 
-### 🚀 Running the Tool
+### 🌱 Run Seed-Tools
+
+#### UI Mode:
+```
+./seed-tools
+```
+
+#### Command Line Modes:
 
 #### Video Uploads:
 This assumes a Movie or TV show upload. It will fetch tmdb/imdb/tvdb ids, create a sample, create screenshots, generate a description with all these goodies linked, and upload to the required tracker(s) 
@@ -30,3 +39,8 @@ Scans all torrents currently seeding in qBittorrent, checks Seedpool for matches
 ```
 ./seed-tools.sh -sync
 ```
+
+#### 🔄 Pre-Flight Check
+Collect TMDB/IMDB/TVDB IDs, audio track languages, and perform a dupe check on a release.
+```
+./seed-tools.sh -pre
