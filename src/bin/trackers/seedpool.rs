@@ -9,7 +9,7 @@ use seed_tools::utils::{
 };
 use regex::Regex;
 use log::info;
-
+use seed_tools::types::PreflightCheckResult;
 pub struct Seedpool {
     pub upload_url: String,
     pub api_key: String,
@@ -446,4 +446,110 @@ fn check_seedpool_dupes(
 
     info!("No duplicate found for '{}'.", name);
     Ok(None)
+}
+
+pub fn preflight_check(
+    input_path: &str,
+    config: &Config,
+    seedpool_config: &SeedpoolConfig,
+    ffmpeg_path: &Path,
+    ffprobe_path: &Path,
+    mediainfo_path: &Path,
+) -> Result<PreflightCheckResult, String> {
+    log::debug!("Running preflight check for input_path: {}", input_path);
+
+    // Step 1: Determine release type and title
+    let (release_type, title, year, season_number, episode_number) =
+        determine_release_type_and_title(input_path);
+    log::debug!(
+        "Release type: {}, Title: {}, Year: {:?}, Season: {:?}, Episode: {:?}",
+        release_type, title, year, season_number, episode_number
+    );
+
+    // Capitalize the release_type fully (e.g., "tv" -> "TV", "movie" -> "Movie")
+    let release_type = match release_type.as_str() {
+        "tv" => "TV".to_string(),
+        "movie" => "Movie".to_string(),
+        "boxset" => "Boxset".to_string(),
+        _ => release_type,
+    };
+
+    // Step 2: Generate the release name
+    let base_name = Path::new(input_path)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let generated_release_name = generate_release_name(&base_name);
+    log::debug!("Generated Release Name: {}", generated_release_name);
+
+    // Step 3: Check for duplicates
+    let dupe_check = match check_seedpool_dupes(&base_name, &seedpool_config.general.api_key)? {
+        Some(_) => "FAIL. Dupe Found".to_string(),
+        None => "PASS".to_string(),
+    };
+    log::debug!("Dupe Check Result: {}", dupe_check);
+
+    // Step 4: Fetch TMDB ID
+    let tmdb_id = fetch_tmdb_id(&title, year, &config.general.tmdb_api_key, &release_type)
+        .unwrap_or(0);
+    log::debug!("TMDB ID: {}", tmdb_id);
+
+    // Step 5: Fetch external IDs (IMDb, TVDB)
+    let (imdb_id, tvdb_id) = fetch_external_ids(tmdb_id, &release_type, &config.general.tmdb_api_key)
+        .unwrap_or((None, None));
+    log::debug!("IMDb ID: {:?}, TVDB ID: {:?}", imdb_id, tvdb_id);
+
+    // Step 6: Check the `strip_from_videos` setting
+    let excluded_files = if seedpool_config.settings.stripshit_from_videos {
+        "Yes".to_string()
+    } else {
+        "No".to_string()
+    };
+
+    // Step 7: Extract audio languages using MediaInfo
+    let mut audio_languages = Vec::new();
+    let (video_files, _) = find_video_files(input_path, &config.paths, &seedpool_config.settings)?;
+    for video_file in &video_files {
+        let mediainfo_output = generate_mediainfo(video_file, &mediainfo_path.to_string_lossy())?;
+        audio_languages.extend(extract_audio_languages(&mediainfo_output));
+    }
+    log::debug!("Audio languages: {:?}", audio_languages);
+
+    // Step 8: Return the preflight check result
+    Ok(PreflightCheckResult {
+        release_name: title,
+        generated_release_name,
+        dupe_check, // Include the dupe check result
+        tmdb_id,
+        imdb_id,
+        tvdb_id,
+        excluded_files,
+        audio_languages,
+        release_type,         // Fully capitalized release type
+        season_number,        // Populate season number
+        episode_number,       // Populate episode number
+    })
+}
+
+// Helper function to extract audio languages from MediaInfo output
+fn extract_audio_languages(mediainfo_output: &str) -> Vec<String> {
+    let mut audio_languages = Vec::new();
+    let mut in_audio_section = false;
+
+    for line in mediainfo_output.lines() {
+        if line.starts_with("Audio") {
+            in_audio_section = true; // Entering an audio section
+        } else if line.is_empty() {
+            in_audio_section = false; // Exiting the current section
+        }
+
+        if in_audio_section && line.contains("Language") {
+            if let Some(language) = line.split(':').nth(1) {
+                audio_languages.push(language.trim().to_string());
+            }
+        }
+    }
+
+    audio_languages
 }
