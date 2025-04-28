@@ -2,6 +2,8 @@
 
 ![Screenshot](images/seed-toolsv0.42.png)
 
+![Screenshot](images/seed-toolsv0.42b.png)
+
 ### Seed-Tools v0.42 brings:
 
 1. Fully clickable UI - just run ./seed-tools
