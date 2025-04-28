@@ -18,6 +18,7 @@
 3. Copy your `config.yaml` file into that `config` directory.
 4. In the `config` directory create a `trackers` folder
 5. Copy `seedpool.yaml` and `torrentleech.yaml`files into that `trackers` folder.
+6. Create `/bin` and copy your `ffmpeg/ffprobe/mediainfo/mkbrr` binaries over.
 
 ### 🌱 Run Seed-Tools
 
