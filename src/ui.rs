@@ -108,7 +108,7 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
     let mut exit_requested = false;
     let mut showing_log = false; // Flag to indicate if we're showing the log
 
-    let tracker_options = vec!["Select All", "🆂  seedpool [SP]", "🆃  TorrentLeech [TL]"];
+    let tracker_options = vec!["✔️ Select All", "🌀 seedpool [SP]", "🐛 TorrentLeech [TL]"];
     let log_output = Arc::new(Mutex::new(Vec::<String>::new()));
     let log_scroll_offset = Arc::new(Mutex::new(0)); // Shared scroll offset for logs
     let mut preflight_check_result: Option<PreflightCheckResult> = None;
@@ -343,7 +343,7 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
                         let clicked_index = tracker_scroll_offset + relative_y as usize;
                         if clicked_index < tracker_options.len() {
                             let tracker = tracker_options[clicked_index].to_string();
-                            if tracker == "Select All" {
+                            if tracker == "✔️ Select All" {
                                 // Toggle all trackers on/off
                                 if selected_trackers.len() == tracker_options.len() - 1 {
                                     selected_trackers.clear(); // Deselect all trackers
@@ -488,7 +488,7 @@ fn render_ui(
     let size = f.size();
 
     // Render a full-screen block with the background color
-    let background_block = Block::default().style(Style::default().bg(Color::Rgb(2, 2, 16))); // Background color
+    let background_block = Block::default().style(Style::default().bg(Color::Rgb(8, 8, 32))); // Background color
     f.render_widget(background_block, size);
 
     let chunks = Layout::default()
@@ -526,63 +526,93 @@ fn render_ui(
     // Input Path
     if let Some(path) = input_path {
         if let Some(file_name) = path.file_name() {
-            status_lines.push(Spans::from(Span::styled(
-                format!("Candidate: {}", file_name.to_string_lossy()),
-                Style::default().fg(Color::Green),
-            )));
+            status_lines.push(Spans::from(vec![
+                Span::styled(
+                    "Input Path: ",
+                    Style::default().fg(Color::DarkGray), // DarkGray for the label
+                ),
+                Span::styled(
+                    file_name.to_string_lossy(),
+                    Style::default().fg(Color::Green), // Green for the value
+                ),
+            ]));
         } else {
-            status_lines.push(Spans::from(Span::styled(
-                "Input Path: Invalid path",
-                Style::default().fg(Color::Red),
-            )));
+            status_lines.push(Spans::from(vec![
+                Span::styled(
+                    "Input Path: ",
+                    Style::default().fg(Color::DarkGray), // DarkGray for the label
+                ),
+                Span::styled(
+                    "Invalid path",
+                    Style::default().fg(Color::Red), // Red for invalid path
+                ),
+            ]));
         }
     } else {
-        status_lines.push(Spans::from(Span::styled(
-            "Input Path: ❌ None selected",
-            Style::default().fg(Color::DarkGray),
-        )));
+        status_lines.push(Spans::from(vec![
+            Span::styled(
+                "Input Path: ",
+                Style::default().fg(Color::DarkGray), // DarkGray for the label
+            ),
+            Span::styled(
+                "❌ None selected",
+                Style::default().fg(Color::DarkGray), // DarkGray for no selection
+            ),
+        ]));
     }
     
     // Selected Trackers
     if selected_trackers.is_empty() {
-        status_lines.push(Spans::from(Span::styled(
-            "Trackers: ❌ None selected",
-            Style::default().fg(Color::DarkGray),
-        )));
+        status_lines.push(Spans::from(vec![
+            Span::styled(
+                "Trackers: ",
+                Style::default().fg(Color::DarkGray), // DarkGray for the label
+            ),
+            Span::styled(
+                "❌ None selected",
+                Style::default().fg(Color::DarkGray), // DarkGray for no selection
+            ),
+        ]));
     } else {
-        status_lines.push(Spans::from(Span::styled(
-            format!("Trackers: {}", selected_trackers.join(", ")),
-            Style::default().fg(Color::Green),
-        )));
+        status_lines.push(Spans::from(vec![
+            Span::styled(
+                "Trackers: ",
+                Style::default().fg(Color::DarkGray), // DarkGray for the label
+            ),
+            Span::styled(
+                selected_trackers.join(", "),
+                Style::default().fg(Color::LightCyan), // LightCyan for the value
+            ),
+        ]));
     }
     
     // Render the status section in `top_chunks[0]`
     let status_paragraph = Paragraph::new(status_lines)
-        .block(Block::default().borders(Borders::ALL).title("🌱 Seed-Tools v0.32"))
-        .style(Style::default().bg(Color::Rgb(2, 2, 16))); // Background color
+        .block(Block::default().borders(Borders::ALL).title(" 🌀 Seed-Tools v0.42 "))
+        .style(Style::default().bg(Color::Rgb(8, 8, 32))); // Background color
     f.render_widget(status_paragraph, top_chunks[0]);
     
     // Render Button Section
     let button_lines = vec![
         Spans::from(vec![Span::styled(
-            "ＵＰＬＯＡＤ", // Upload button text
+            "🔺  ＵＰＬＯＡＤ ", // Upload button text
             Style::default()
-                .fg(Color::Black) // Text color
-                .bg(Color::Green) // Background color
+                .fg(Color::White) // Text color
+                .bg(Color::Red) // Background color
                 .add_modifier(Modifier::BOLD),
         )]),
         Spans::from(vec![Span::styled(
-            "ＰＲＥ-ＦＬＩＧＨＴ ＣＨＥＣＫ", // Pre-flight Check button text
+            "✅ ＰＲＥ-ＦＬＩＧＨＴ", // Pre-flight Check button text
             Style::default()
-                .fg(Color::Black) // Text color
-                .bg(Color::Yellow) // Background color
+                .fg(Color::White) // Text color
+                .bg(Color::Green) // Background color
                 .add_modifier(Modifier::BOLD),
         )]),
     ];
 
     let button_paragraph = Paragraph::new(button_lines)
-        .block(Block::default().borders(Borders::ALL).title("🕹️ Actions"))
-        .style(Style::default().bg(Color::Rgb(2, 2, 16))); // Background color
+        .block(Block::default().borders(Borders::ALL).title(" 🕹️ Actions "))
+        .style(Style::default().bg(Color::Rgb(8, 8, 32))); // Background color
 
     f.render_widget(button_paragraph, top_chunks[1]);
 
@@ -590,14 +620,14 @@ fn render_ui(
     // Render "Files" and "Logs" Buttons Section
     let files_logs_spans = Spans::from(vec![
         Span::styled(
-            "🖥️ Files",
+            " 🖥️ Files",
             Style::default()
                 .fg(if !showing_log { Color::Yellow } else { Color::White })
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("   "), // Add spacing between buttons
         Span::styled(
-            "📃 Logs",
+            " 📃 Logs",
             Style::default()
                 .fg(if showing_log { Color::Yellow } else { Color::White })
                 .add_modifier(Modifier::BOLD),
@@ -606,7 +636,7 @@ fn render_ui(
 
     let files_logs_paragraph = Paragraph::new(files_logs_spans)
         .alignment(tui::layout::Alignment::Left) // Align to the left
-        .style(Style::default().bg(Color::Rgb(2, 2, 16))); // Background color
+        .style(Style::default().bg(Color::Rgb(8, 8, 32))); // Background color
 
     // Render the buttons section in chunks[1]
     f.render_widget(files_logs_paragraph, chunks[1]);
@@ -643,13 +673,13 @@ fn render_ui(
     
         let log_widget = Paragraph::new(log_lines)
             .block(Block::default().borders(Borders::ALL))
-            .style(Style::default().bg(Color::Rgb(2, 2, 16))); // Background color
+            .style(Style::default().bg(Color::Rgb(8, 8, 32))); // Background color
         f.render_widget(log_widget, middle_chunks[0]);
     } else {
         // Render the file list
         let mut visible_files = vec!["🗂️ ..".to_string()];
         visible_files.extend(
-            file_list[1..] // Skip the first entry (which is already "🗂️ ..")
+            file_list[1..]
                 .iter()
                 .skip(scroll_offset)
                 .take((middle_chunks[0].height as usize).saturating_sub(1)) // Subtract 1 for the ".." entry
@@ -671,7 +701,7 @@ fn render_ui(
                 .collect::<Vec<_>>(),
         )
         .block(Block::default().borders(Borders::ALL))
-        .style(Style::default().bg(Color::Rgb(2, 2, 16))); // Background color
+        .style(Style::default().bg(Color::Rgb(8, 8, 32))); // Background color
         f.render_widget(file_list_widget, middle_chunks[0]);
     }
 
@@ -705,8 +735,8 @@ fn render_ui(
             ListItem::new(styled_tracker_name)
         }).collect::<Vec<_>>(),
     )
-    .block(Block::default().borders(Borders::ALL).title("🌐 Trackers"))
-    .style(Style::default().bg(Color::Rgb(2, 2, 16))); // Background color
+    .block(Block::default().borders(Borders::ALL).title("🌐 Trackers "))
+    .style(Style::default().bg(Color::Rgb(8, 8, 32))); // Background color
     f.render_widget(tracker_list_widget, middle_chunks[1]);
 
     // Render Pre-flight Check Section
@@ -724,76 +754,187 @@ fn render_ui(
             } else {
                 // Line 1: Title, Release Type, Audio Languages
                 preflight_lines.push(Spans::from(vec![
+                    // Title
                     Span::styled(
-                        log_data[0].replace("Title: ", "Title: "),
-                        Style::default().fg(Color::Green),
+                        "Title: ",
+                        Style::default().fg(Color::DarkGray), // DarkGray for the label
+                    ),
+                    Span::styled(
+                        log_data[0].replace("Title: ", ""),
+                        Style::default().fg(Color::Yellow), // Yellow for the value
                     ),
                     Span::raw(" | "),
+                    // Release Type
                     Span::styled(
-                        log_data[3].replace("Release Type: ", "Type: "),
-                        Style::default().fg(Color::Cyan),
+                        "Type: ",
+                        Style::default().fg(Color::DarkGray), // DarkGray for the label
                     ),
+                    {
+                        let release_type = log_data[3].replace("Release Type: ", ""); // Store the result of `replace`
+                        if release_type.contains("★") {
+                            let (before_star, after_star) = release_type.split_once("★").unwrap_or(("", ""));
+                            Span::styled(
+                                format!(
+                                    "{}★{}",
+                                    before_star.trim(),
+                                    after_star.trim()
+                                ),
+                                Style::default().fg(Color::Cyan), // Cyan for the text
+                            )
+                        } else {
+                            Span::styled(
+                                release_type,
+                                Style::default().fg(Color::Cyan), // Cyan for the value
+                            )
+                        }
+                    },
                     Span::raw(" | "),
+                    // Audio Languages
                     Span::styled(
-                        log_data[10].replace("Audio Languages: ", "Audio: "),
-                        Style::default().fg(Color::Magenta),
+                        "Audio: ",
+                        Style::default().fg(Color::DarkGray), // DarkGray for the label
+                    ),
+                    Span::styled(
+                        log_data[11].replace("Audio Languages: ", ""),
+                        Style::default().fg(Color::LightMagenta), // Magenta for the value
                     ),
                 ]));
     
                 // Line 2: TMDB, IMDb, TVDB IDs, Season/Episode Numbers
                 preflight_lines.push(Spans::from(vec![
+                    // TMDB ID
                     Span::styled(
-                        log_data[6].replace("TMDB ID: ", "TMDB: "),
-                        Style::default().fg(Color::Green),
+                        "TMDB: ",
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        log_data[6].replace("TMDB ID: ", ""),
+                        Style::default().fg(Color::Cyan), // Turquoise for the value
                     ),
                     Span::raw(" | "),
+                    // IMDb ID
                     Span::styled(
-                        log_data[7].replace("IMDb ID: ", "IMDb: "),
-                        Style::default().fg(Color::Green),
+                        "IMDb: ",
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        log_data[7].replace("IMDb ID: ", ""),
+                        Style::default().fg(Color::Cyan), // Turquoise for the value
                     ),
                     Span::raw(" | "),
+                    // TVDB ID
                     Span::styled(
-                        log_data[8].replace("TVDB ID: ", "TVDB: "),
-                        Style::default().fg(Color::Green),
+                        "TVDB: ",
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        log_data[8].replace("TVDB ID: ", ""),
+                        Style::default().fg(Color::Cyan), // Turquoise for the value
                     ),
                     Span::raw(" | "),
+                    // Season and Episode Numbers
                     Span::styled(
-                        format!(
-                            "Season: {} Episode: {}",
-                            log_data[4].replace("Season Number: ", ""),
-                            log_data[5].replace("Episode Number: ", "")
-                        ),
-                        Style::default().fg(Color::Yellow),
+                        "Season: ",
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        log_data[4].replace("Season Number: ", ""),
+                        Style::default().fg(Color::Cyan), // Turquoise for the value
+                    ),
+                    Span::raw(" "),
+                    Span::styled(
+                        "Episode: ",
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        log_data[5].replace("Episode Number: ", ""),
+                        Style::default().fg(Color::Cyan), // Turquoise for the value
                     ),
                 ]));
     
                 // Line 3: Release Name
-                preflight_lines.push(Spans::from(vec![Span::styled(
-                    log_data[1].replace("Release Name: ", "Release Name: "),
-                    Style::default().fg(Color::Yellow),
-                )]));
-    
-                // Line 4: Dupe Check, Strip From Videos
                 preflight_lines.push(Spans::from(vec![
+                    // Label: "Release Name:"
                     Span::styled(
-                        if log_data[2].contains("FAIL") {
-                            format!("{}", log_data[2].replace("Dupe Check: ", "Dupe Check: ❌ "))
+                        "Release Name: ",
+                        Style::default().fg(Color::DarkGray), // DarkGray for the label
+                    ),
+                    // Value: The actual release name
+                    Span::styled(
+                        log_data[1].replace("Release Name: ", ""),
+                        Style::default().fg(Color::Rgb(255, 153, 51)), // Vibrant orange for the value
+                    ),
+                ]));
+    
+                // Line 4: Dupe Check, Strip From Videos, Album Cover
+                preflight_lines.push(Spans::from(vec![
+                    // Dupe Check
+                    Span::styled(
+                        "Dupe Check: ",
+                        Style::default().fg(Color::DarkGray), // DarkGray for the label
+                    ),
+                    Span::styled(
+                        if log_data[2].contains("N/A") {
+                            "N/A" // Display N/A for music preflight checks
+                        } else if log_data[2].contains("PASS") {
+                            "✔️ PASS"
                         } else {
-                            format!("{}", log_data[2].replace("Dupe Check: ", "Dupe Check: ✔️ "))
+                            "❌ FAIL"
                         },
-                        Style::default().fg(if log_data[2].contains("PASS") {
-                            Color::Green
+                        Style::default().fg(if log_data[2].contains("N/A") {
+                            Color::DarkGray // DarkGray for N/A
+                        } else if log_data[2].contains("PASS") {
+                            Color::Green // Green for PASS
                         } else {
-                            Color::Red
+                            Color::Red // Red for FAIL
                         }),
                     ),
                     Span::raw(" | "),
+                    // Strip From Videos (Excluded Files)
                     Span::styled(
-                        log_data[9].clone(), // Clone the value to avoid moving it
-                        Style::default().fg(if log_data[9].contains("Enabled") {
-                            Color::Green
+                        "Stripshit From Videos: ",
+                        Style::default().fg(Color::DarkGray), // DarkGray for the label
+                    ),
+                    Span::styled(
+                        if log_data[10].contains("N/A") {
+                            "N/A" // Display N/A for music preflight checks
+                        } else if log_data[10].contains("Enabled") {
+                            "✔️ Enabled"
+                        } else if log_data[10].contains("Disabled") {
+                            "❌ Disabled"
                         } else {
-                            Color::Red
+                            "N/A"
+                        },
+                        Style::default().fg(if log_data[10].contains("N/A") {
+                            Color::DarkGray // DarkGray for N/A
+                        } else if log_data[10].contains("Enabled") {
+                            Color::Green // Green for Enabled
+                        } else if log_data[10].contains("Disabled") {
+                            Color::Red // Red for Disabled
+                        } else {
+                            Color::DarkGray // DarkGray for N/A
+                        }),
+                    ),
+                    Span::raw(" | "),
+                    // Album Cover
+                    Span::styled(
+                        "Album Cover: ",
+                        Style::default().fg(Color::DarkGray), // DarkGray for the label
+                    ),
+                    Span::styled(
+                        if log_data[9].contains("Available") {
+                            "✔️ Available"
+                        } else if log_data[9].contains("Not Found") {
+                            "❌ Not Found"
+                        } else {
+                            "N/A"
+                        },
+                        Style::default().fg(if log_data[9].contains("Available") {
+                            Color::Green // Green for Available
+                        } else if log_data[9].contains("Not Found") {
+                            Color::Red // Red for Not Found
+                        } else {
+                            Color::DarkGray // DarkGray for N/A
                         }),
                     ),
                 ]));
@@ -807,8 +948,8 @@ fn render_ui(
     }
     
     let preflight_paragraph = Paragraph::new(preflight_lines)
-        .block(Block::default().borders(Borders::ALL).title("✅ Pre-flight Check"))
-        .style(Style::default().bg(Color::Rgb(2, 2, 16))); // Background color
+        .block(Block::default().borders(Borders::ALL).title(" ✅ Pre-flight Check "))
+        .style(Style::default().bg(Color::Rgb(8, 8, 32))); // Background color
     f.render_widget(preflight_paragraph, chunks[3]);
 
     // Render Bottom Section
@@ -817,9 +958,9 @@ fn render_ui(
         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
     )])];
     let bottom_paragraph = Paragraph::new(bottom_lines)
-        .block(Block::default().borders(Borders::ALL).title("👆 Shortcuts"))
+        .block(Block::default().borders(Borders::ALL).title(" ⌨  Keys "))
         .alignment(tui::layout::Alignment::Center)
-        .style(Style::default().bg(Color::Rgb(2, 2, 16))); // Background color
+        .style(Style::default().bg(Color::Rgb(8, 8, 32))); // Background color
     f.render_widget(bottom_paragraph, chunks[4]);
 }
 
@@ -848,8 +989,8 @@ fn activate_upload(
 
     for tracker in selected_trackers {
         match tracker.as_str() {
-            "🆂  seedpool [SP]" => args.push("--SP".to_string()),
-            "🆃  TorrentLeech [TL]" => args.push("--TL".to_string()),
+            "🌀 seedpool [SP]" => args.push("--SP".to_string()),
+            "🐛 TorrentLeech [TL]" => args.push("--TL".to_string()),
             _ => {}
         }
     }
@@ -914,7 +1055,6 @@ fn activate_upload(
     Ok(())
 }
 
-// filepath: t:\st3\src\ui.rs
 fn help_message(on_main_screen: bool, in_tracker_selection: bool) -> String {
     if in_tracker_selection {
         "Use UP/DOWN to navigate, F to toggle trackers, ENTER to confirm.".to_string()
@@ -1043,7 +1183,7 @@ fn tracker_select(
                 }
                 KeyCode::Char('f') | KeyCode::Char('F') => {
                     let tracker = tracker_options[*selected_tracker_index].to_string();
-                    if tracker == "Select All" {
+                    if tracker == "✔️ Select All" {
                         if selected_trackers.len() == tracker_options.len() - 1 {
                             selected_trackers.clear();
                         } else {
@@ -1150,17 +1290,22 @@ fn parse_preflight_log(preflight_log_path: &Path) -> (Vec<String>, bool) {
         "TMDB ID: N/A".to_string(),
         "IMDb ID: N/A".to_string(),
         "TVDB ID: N/A".to_string(),
-        "Strip From Videos: Disabled".to_string(), // Default value
+        "Album Cover: N/A".to_string(), // Default value for Album Cover
+        "Excluded Files: N/A".to_string(), // Default value for Excluded Files
         "Audio Languages: N/A".to_string(),
     ];
 
     let mut is_pending = true; // Assume pending until we find meaningful data
+    let mut is_music_log = false; // Flag to detect music preflight logs
 
     if let Ok(file) = File::open(preflight_log_path) {
         let reader = BufReader::new(file);
         for line in reader.lines().filter_map(|line| line.ok()) {
             is_pending = false; // Mark as not pending if we find any data
-            if line.starts_with("Title:") {
+
+            if line.starts_with("Log Type: Music") {
+                is_music_log = true; // Identify this as a music preflight log
+            } else if line.starts_with("Title:") && !line.contains("Pre-flight Check Results:") {
                 log_data[0] = line;
             } else if line.starts_with("Release Name:") {
                 log_data[1] = line;
@@ -1178,20 +1323,45 @@ fn parse_preflight_log(preflight_log_path: &Path) -> (Vec<String>, bool) {
                 log_data[7] = line;
             } else if line.starts_with("TVDB ID:") {
                 log_data[8] = line;
-            } else if line.starts_with("Excluded Files:") {
-                // Replace "Excluded Files:" with "Strip From Videos:" and map values
-                let value = if line.contains("Yes") {
-                    "✔️ Enabled"
+            } else if line.starts_with("Album Cover:") {
+                // Handle "Album Cover:" field for both music and non-music logs
+                let cleaned_line = line.replace("Album Cover: ", "").trim().to_string(); // Remove redundant prefix and trim whitespace
+                let value = if cleaned_line.eq_ignore_ascii_case("Available") {
+                    "Album Cover: ✔️ Available".to_string()
+                } else if cleaned_line.eq_ignore_ascii_case("Not Available")
+                    || cleaned_line.eq_ignore_ascii_case("Not Found")
+                {
+                    "Album Cover: ❌ Not Found".to_string() // Use "Not Found" for music logs
                 } else {
-                    "❌ Disabled"
+                    "Album Cover: N/A".to_string() // Use "N/A" for non-music logs
                 };
-                log_data[9] = format!("Stripshit From Videos: {}", value);
+                log_data[9] = value; // Store Album Cover in index 9
+            } else if line.starts_with("Excluded Files:") {
+                // Handle "Excluded Files:" field for both music and non-music logs
+                let value = if is_music_log {
+                    "Strip From Videos: N/A".to_string() // Set to N/A for music logs
+                } else if line.contains("Yes") {
+                    "Strip From Videos: ✔️ Enabled".to_string()
+                } else {
+                    "Strip From Videos: ❌ Disabled".to_string()
+                };
+                log_data[10] = value; // Store Excluded Files in index 10
             } else if line.starts_with("Audio Languages:") {
-                log_data[10] = line;
+                // Parse the audio languages field and remove brackets/quotes
+                let audio_line = line.replace("Audio Languages: ", "");
+                let audio_cleaned = audio_line
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .replace('"', "");
+                log_data[11] = format!("Audio Languages: {}", audio_cleaned);
             }
         }
     }
 
+    // If it's a music log but no Album Cover field was found, set it to "Not Found"
+    if is_music_log && log_data[9] == "Album Cover: N/A" {
+        log_data[9] = "Album Cover: ❌ Not Found".to_string();
+    }
+
     (log_data, is_pending)
 }
-
