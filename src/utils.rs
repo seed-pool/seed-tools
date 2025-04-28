@@ -649,7 +649,7 @@ fn upload_to_cdn(file_path: &str, remote_path: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn default_non_video_description() -> String {
+pub fn default_non_video_description() -> String {
     format!(
         "[b][size=12][color=#757575]Created with mkbrr, ffmpeg, and mediainfo. Posted to this fine tracker with seed-tools.[/color][/size][/b]
         
