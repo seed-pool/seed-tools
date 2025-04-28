@@ -14,10 +14,11 @@ pub struct PreflightCheckResult {
     pub imdb_id: Option<String>,
     pub tvdb_id: Option<u32>,
     pub excluded_files: String,
+    pub album_cover: String,
     pub audio_languages: Vec<String>,
-    pub release_type: String,         // New field for release type
-    pub season_number: Option<u32>,  // New field for season number
-    pub episode_number: Option<u32>, // New field for episode number
+    pub release_type: String,
+    pub season_number: Option<u32>,
+    pub episode_number: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -27,7 +28,7 @@ pub struct PathsConfig {
     pub ffmpeg: String,
     pub ffprobe: String,
     pub mkbrr: String,
-    pub mediainfo: String, // Added this field
+    pub mediainfo: String,
 }
 
 #[derive(Deserialize)]
