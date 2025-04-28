@@ -1,12 +1,19 @@
 use reqwest::blocking::multipart::Form;
 use std::collections::HashMap;
 use std::path::Path;
+use std::ffi::OsStr;
+use std::process::Command;
+use std::os::unix::fs::PermissionsExt;
+use std::fs;
 use crate::{Config, Client, SeedpoolConfig, Tracker};
 use seed_tools::utils::{
     generate_release_name, find_video_files, create_torrent, generate_mediainfo, generate_sample,
-    generate_screenshots, fetch_tmdb_id, fetch_external_ids, generate_description,
+    generate_screenshots, fetch_tmdb_id, default_non_video_description, fetch_external_ids, generate_description,
     add_torrent_to_all_qbittorrent_instances,
 };
+use tui::text::Spans;
+use tui::text::Span;
+use tui::style::{Color, Style};
 use regex::Regex;
 use log::info;
 use seed_tools::types::PreflightCheckResult;
@@ -14,7 +21,7 @@ pub struct Seedpool {
     pub upload_url: String,
     pub api_key: String,
 }
-
+use walkdir::WalkDir;
 pub fn process_seedpool_release(
     input_path: &str,
     _sanitized_name: &str,
@@ -27,7 +34,35 @@ pub fn process_seedpool_release(
 ) -> Result<(), String> {
     log::debug!("Processing release for input_path: {}", input_path);
 
-    // determine release type and title
+    // Check for music files early
+    let music_extensions = ["mp3", "flac"];
+    let mut type_id = 0;
+    let mut found_music_file = false;
+
+    for entry in WalkDir::new(input_path).into_iter().filter_map(|e| e.ok()) {
+        if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
+            if music_extensions.contains(&ext.to_lowercase().as_str()) {
+                found_music_file = true;
+                match ext.to_lowercase().as_str() {
+                    "mp3" => {
+                        type_id = 13; // MP3 type
+                    }
+                    "flac" => {
+                        type_id = 11; // FLAC type
+                    }
+                    _ => {}
+                }
+                break; // Exit the loop once a valid music file is found
+            }
+        }
+    }
+
+    if found_music_file {
+        log::debug!("Music release detected: {}", input_path);
+        return process_music_release(input_path, config, seedpool_config, mkbrr_path, ffmpeg_path);
+    }
+
+    // Determine release type and title
     let (mut release_type, title, year, season_number, mut episode_number) =
         determine_release_type_and_title(input_path);
     let base_name = Path::new(input_path)
@@ -36,7 +71,7 @@ pub fn process_seedpool_release(
         .to_string_lossy()
         .to_string();
 
-    // check for duplicates
+    // Check for duplicates
     if let Some(download_link) = check_seedpool_dupes(&base_name, &seedpool_config.general.api_key)? {
         log::info!("Duplicate found for '{}'. Downloading and adding to clients.", base_name);
 
@@ -66,13 +101,13 @@ pub fn process_seedpool_release(
         return Ok(());
     }
 
-    // adjust episode number if none
+    // Adjust episode number if none
     if episode_number.is_none() {
         log::warn!("Episode number is None. Adjusting to 0.");
         episode_number = Some(0);
     }
 
-    // determine category and type ids
+    // Determine category and type IDs
     let (mut category_id, mut type_id) = match release_type.as_str() {
         "tv" => (2, 24),
         "movie" => (1, 22),
@@ -84,14 +119,14 @@ pub fn process_seedpool_release(
         type_id = 26;
     }
 
-    // fetch tmdb id and find video files
+    // Fetch TMDB ID and find video files
     let tmdb_id = fetch_tmdb_id(&title, year, &config.general.tmdb_api_key, &release_type)?;
     let (video_files, nfo_file) = find_video_files(input_path, &config.paths, &seedpool_config.settings)?;
     if video_files.is_empty() {
         return Err("No valid video files detected.".to_string());
     }
 
-    // create torrent and generate metadata
+    // Create torrent and generate metadata
     let torrent_files = vec![create_torrent(
         &video_files,
         &config.paths.torrent_dir,
@@ -120,7 +155,7 @@ pub fn process_seedpool_release(
         .unwrap_or((None, None));
     let resolution_id = get_seedpool_resolution_id(input_path);
 
-    // generate description
+    // Generate description
     let description = generate_description(
         &screenshots,
         &thumbnails,
@@ -132,7 +167,7 @@ pub fn process_seedpool_release(
         &generate_release_name(&base_name),
     );
 
-    // upload to seedpool
+    // Upload to Seedpool
     Seedpool {
         upload_url: seedpool_config.settings.upload_url.clone(),
         api_key: seedpool_config.general.api_key.clone(),
@@ -153,7 +188,7 @@ pub fn process_seedpool_release(
         Some(resolution_id),
     )?;
 
-    // add torrent to clients
+    // Add torrent to clients
     add_torrent_to_all_qbittorrent_instances(
         &torrent_files,
         &config.qbittorrent,
@@ -213,7 +248,7 @@ fn determine_release_type_and_title(input_path: &str) -> (String, String, Option
         base_name.trim().to_string()
     };
 
-    let cleaned_title = title.replace('.', " ").replace('_', " ");
+    let cleaned_title = title.replace('.', " ").replace('_', " ").trim().to_string();
 
     let year = year_regex
         .captures(&base_name)
@@ -225,6 +260,429 @@ fn determine_release_type_and_title(input_path: &str) -> (String, String, Option
     );
 
     (release_type, cleaned_title, year, season_number, episode_number)
+}
+
+pub fn process_music_release(
+    input_path: &str,
+    config: &Config,
+    seedpool_config: &SeedpoolConfig,
+    mkbrr_path: &Path,
+    ffmpeg_path: &Path,
+) -> Result<(), String> {
+    log::debug!("Processing music release for input_path: {}", input_path);
+
+    // Determine category_id and type_id
+    let mut category_id = 5; // Music category
+    let mut type_id = 0;
+
+    let music_extensions = ["mp3", "flac"];
+    let mut found_music_file = false;
+
+    // Use WalkDir to recursively search for music files
+    for entry in WalkDir::new(input_path).into_iter().filter_map(|e| e.ok()) {
+        if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
+            if music_extensions.contains(&ext.to_lowercase().as_str()) {
+                found_music_file = true;
+                match ext.to_lowercase().as_str() {
+                    "mp3" => {
+                        type_id = 13; // MP3 type
+                    }
+                    "flac" => {
+                        type_id = 11; // FLAC type
+                    }
+                    _ => {}
+                }
+                break; // Exit the loop once a valid music file is found
+            }
+        }
+    }
+
+    if !found_music_file {
+        return Err("No valid music files detected (mp3 or flac).".to_string());
+    }
+
+    // Find the first audio file in the folder or subfolders
+    let first_file = WalkDir::new(input_path)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path().to_path_buf())
+        .find(|path| {
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                ext.eq_ignore_ascii_case("mp3") || ext.eq_ignore_ascii_case("flac")
+            } else {
+                false
+            }
+        })
+        .ok_or_else(|| "No valid music files found in the folder.".to_string())?;
+
+    // Extract metadata from the first file
+    let metadata = parse_mediainfo_log(&first_file);
+
+    let artist_global = metadata.get("Performer").cloned().unwrap_or_else(|| "Unknown Artist".to_string());
+    let album_meta = metadata.get("Album").cloned().unwrap_or_else(|| "Unknown Album".to_string());
+    let genre = metadata.get("Genre").cloned().unwrap_or_else(|| "Unknown Genre".to_string());
+
+    let recorded_date = metadata.get("Recorded date").cloned().unwrap_or_default();
+    let extracted_year = recorded_date
+        .chars()
+        .filter(|c| c.is_numeric())
+        .collect::<String>()
+        .get(0..4)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    let audio_format = metadata.get("Format").cloned().unwrap_or_else(|| "Unknown Format".to_string());
+    let bit_depth = metadata.get("Bit depth").cloned().unwrap_or_else(|| "Unknown".to_string());
+    let sampling_rate = metadata.get("Sampling rate").cloned().unwrap_or_else(|| "Unknown".to_string());
+
+    let sampling_rate_khz = if sampling_rate.ends_with("kHz") {
+        sampling_rate.clone() // Already in kHz format
+    } else if let Ok(rate) = sampling_rate.parse::<f64>() {
+        format!("{:.1} kHz", rate / 1000.0) // Convert Hz to kHz
+    } else {
+        "Unknown".to_string()
+    };
+
+    let audio_info = if bit_depth == "Unknown" || sampling_rate_khz == "Unknown" {
+        format!("{} / {}", audio_format, sampling_rate_khz)
+    } else {
+        format!("{} {} bit / {}", audio_format, bit_depth, sampling_rate_khz)
+    };
+
+    // Find the largest image in the folder or subfolders
+    let largest_image = WalkDir::new(input_path)
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
+                ext.eq_ignore_ascii_case("jpg") || ext.eq_ignore_ascii_case("png")
+            } else {
+                false
+            }
+        })
+        .max_by_key(|entry| entry.metadata().map(|m| m.len()).unwrap_or(0));
+
+    let (album_cover_path, album_cover_url) = if let Some(image) = largest_image {
+        // Sanitize the input folder/file name to make it URL-friendly
+        let sanitized_name = Path::new(input_path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .replace(' ', "_")
+            .replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '_', "");
+
+        let album_cover_name = format!("{}.jpg", sanitized_name);
+        let album_cover_path = Path::new(input_path).join(&album_cover_name);
+        fs::copy(image.path(), &album_cover_path)
+            .map_err(|e| format!("Failed to copy album cover: {}", e))?;
+
+        // Set permissions to 777 for the album cover
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            fs::set_permissions(&album_cover_path, fs::Permissions::from_mode(0o777))
+                .map_err(|e| format!("Failed to set permissions for album cover '{}': {}", album_cover_path.display(), e))?;
+        }
+
+        // Upload the album cover via SCP
+        let scp_command = Command::new("scp")
+            .arg(album_cover_path.to_str().expect("Failed to convert album cover path to string"))
+            .arg(&seedpool_config.screenshots.remote_path)
+            .output()
+            .map_err(|e| format!("Failed to upload album cover via SCP: {}", e))?;
+
+        if !scp_command.status.success() {
+            log::warn!("Failed to upload album cover via SCP.");
+        }
+
+        // Generate the public-facing URL for the album cover
+        let album_cover_url = format!(
+            "{}/{}",
+            seedpool_config.screenshots.image_path, // Base URL
+            album_cover_name
+        );
+
+        (Some(album_cover_path), Some(album_cover_url))
+    } else {
+        log::warn!("No valid album cover found in the folder.");
+        (None, None) // Proceed without an album cover
+    };
+
+    // Generate the torrent file
+    let base_name = Path::new(input_path)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let torrent_file = create_torrent(
+        &[Path::new(input_path).to_string_lossy().to_string()], // Convert PathBuf to String
+        &config.paths.torrent_dir,
+        &seedpool_config.settings.announce_url,
+        &mkbrr_path.to_string_lossy(),
+    )?;
+
+    // Generate the BBCode description
+    let description = generate_music_bbcode_description(
+        input_path,
+        &artist_global,
+        &album_meta,
+        &extracted_year,
+        &genre,
+        &audio_info,
+        album_cover_url.as_deref(),
+        Some(seedpool_config.settings.custom_description.as_str()), // Pass the custom description
+    )?;
+
+    // Prepare the upload form
+    let client = reqwest::blocking::Client::new();
+    let mut form = Form::new()
+        .file("torrent", &torrent_file)
+        .map_err(|e| format!("Failed to attach torrent file: {}", e))?
+        .text("name", base_name.clone()) // Clone base_name to satisfy the 'static lifetime
+        .text("category_id", category_id.to_string())
+        .text("type_id", type_id.to_string())
+        .text("tmdb", "0")
+        .text("imdb", "0")
+        .text("tvdb", "0")
+        .text("anonymous", "0")
+        .text("description", description) // Add the generated BBCode description
+        .text("mal", "0") // Add default value for mal
+        .text("igdb", "0") // Add default value for igdb
+        .text("stream", "0") // Add default value for stream
+        .text("sd", "0"); // Add default value for sd
+
+    // Send the upload request
+    let response = client
+        .post(&seedpool_config.settings.upload_url)
+        .header("Authorization", format!("Bearer {}", seedpool_config.general.api_key))
+        .multipart(form)
+        .send()
+        .map_err(|e| format!("Failed to send request to Seedpool: {}", e))?;
+
+    let status = response.status();
+    let response_text = response.text().unwrap_or_else(|_| "Failed to read response body".to_string());
+    info!("Seedpool API Response: {}", response_text);
+
+    if !status.is_success() {
+        return Err(format!(
+            "Failed to upload to Seedpool. HTTP Status: {}. Response: {}",
+            status, response_text
+        ));
+    }
+
+    // Extract the torrent ID from the response
+    let torrent_id = extract_torrent_id(&response_text)?;
+
+    // Create a torrent cover using FFmpeg
+    if let Some(album_cover_path) = album_cover_path {
+        let torrent_cover_path = album_cover_path.with_file_name(format!("torrent-cover_{}.jpg", torrent_id));
+        let ffmpeg_command = Command::new(ffmpeg_path)
+            .args([
+                "-y",
+                "-i",
+                album_cover_path.to_str().expect("Failed to convert album cover path to string"),
+                "-vf",
+                "scale=320:-1",
+                "-q:v",
+                "1",
+                torrent_cover_path.to_str().expect("Failed to convert torrent cover path to string"),
+            ])
+            .output()
+            .map_err(|e| format!("Failed to create torrent cover with FFmpeg: {}", e))?;
+
+        if !ffmpeg_command.status.success() {
+            return Err("Failed to create torrent cover with FFmpeg.".to_string());
+        }
+
+        // Set permissions to 777 for the torrent cover
+        #[cfg(unix)]
+        {
+            fs::set_permissions(&torrent_cover_path, fs::Permissions::from_mode(0o777))
+                .map_err(|e| format!("Failed to set permissions for torrent cover '{}': {}", torrent_cover_path.display(), e))?;
+        }
+
+        // Upload the torrent cover via SCP
+        let remote_albumcovers_path = format!("{}/albumcovers", seedpool_config.screenshots.remote_path);
+        let scp_command = Command::new("scp")
+            .arg(&torrent_cover_path)
+            .arg(&remote_albumcovers_path)
+            .output()
+            .map_err(|e| format!("Failed to upload torrent cover via SCP: {}", e))?;
+
+        if !scp_command.status.success() {
+            return Err("Failed to upload torrent cover via SCP.".to_string());
+        }
+    } else {
+        log::warn!("No album cover path provided. Skipping torrent cover creation.");
+    }
+
+    log::info!("Music release successfully uploaded: {}", base_name);
+
+    // Add torrent to all qBittorrent instances
+    add_torrent_to_all_qbittorrent_instances(
+        &[torrent_file.clone()], // Use the torrent_file directly
+        &config.qbittorrent,
+        &config.deluge,
+        input_path,
+        &config.paths,
+    )?;
+
+    Ok(())
+}
+
+// Helper function to extract the torrent ID from the response
+fn extract_torrent_id(response_text: &str) -> Result<String, String> {
+    // Unescape any escaped slashes
+    let response_text = response_text.replace(r"\/", "/");
+
+    // Updated regex to match the numeric ID followed by a dot and a 32-character hash
+    let re = regex::Regex::new(r#"/download/(\d+)\.[a-fA-F0-9]{32}"#).map_err(|e| format!("Failed to compile regex: {}", e))?;
+    if let Some(captures) = re.captures(&response_text) {
+        if let Some(torrent_id) = captures.get(1) {
+            return Ok(torrent_id.as_str().to_string());
+        }
+    }
+    Err("Failed to extract torrent ID from response.".to_string())
+}
+
+pub fn generate_music_bbcode_description(
+    input_path: &str,
+    artist_global: &str,
+    album_meta: &str,
+    extracted_year: &str,
+    genre: &str,
+    audio_info: &str,
+    album_cover_url: Option<&str>,
+    custom_description: Option<&str>, 
+) -> Result<String, String> {
+    let mut description = String::new();
+
+    // Add the input folder/file name as the first line
+    let base_name = Path::new(input_path)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    description.push_str(&format!("[b]{}[/b]\n", base_name));
+
+    // Add artist, album, year, genre, and audio info
+    description.push_str(&format!(
+        "[b]Artist:[/b] {}\n[b]Album:[/b] {}\n[b]Year:[/b] {}\n[b]Genre:[/b] {}\n[b]Audio:[/b] {}\n",
+        artist_global, album_meta, extracted_year, genre, audio_info
+    ));
+
+    // Start the table with the new "kHz" column
+    description.push_str("[table]\n[tr][th]Nr.[/th][th]Artist[/th][th]Title[/th][th]Duration[/th][th]Size[/th][th]Format[/th][th]Bitrate[/th][th]kHz[/th][/tr]\n");
+
+    // Loop through files in the folder and subfolders
+    let mut track_number = 1;
+    for entry in WalkDir::new(input_path)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|entry| {
+            if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
+                ext.eq_ignore_ascii_case("mp3") || ext.eq_ignore_ascii_case("flac")
+            } else {
+                false
+            }
+        })
+    {
+        let path = entry.path();
+
+        // Parse the mediainfo log
+        let metadata = parse_mediainfo_log(&path);
+
+        // Extract fields from the metadata
+        let title = metadata.get("Track name").cloned().unwrap_or_else(|| "Unknown Title".to_string());
+        let artist = metadata.get("Performer").cloned().unwrap_or_else(|| artist_global.to_string());
+        let duration = metadata.get("Duration").cloned().unwrap_or_else(|| "Unknown".to_string());
+        let size = metadata.get("File size").cloned().unwrap_or_else(|| "Unknown".to_string());
+        let format = metadata.get("Format").cloned().unwrap_or_else(|| {
+            path.extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("Unknown")
+                .to_uppercase()
+        });
+        let bitrate = metadata.get("Overall bit rate").cloned().unwrap_or_else(|| "Unknown".to_string());
+        let sampling_rate = metadata.get("Sampling rate").cloned().unwrap_or_else(|| "Unknown".to_string());
+
+        // Add track details to the table
+        description.push_str(&format!(
+            "[tr][td]{}[/td][td]{}[/td][td]{}[/td][td]{}[/td][td]{}[/td][td]{}[/td][td]{}[/td][td]{}[/td][/tr]\n",
+            track_number, artist, title, duration, size, format, bitrate, sampling_rate
+        ));
+
+        track_number += 1;
+    }
+
+    // Close the table
+    description.push_str("[/table]\n");
+
+    // Add album cover if provided
+    if let Some(cover_url) = album_cover_url {
+        description.push_str(&format!("\n[img]{}[/img]\n", cover_url));
+    }
+
+    if let Some(custom_desc) = custom_description {
+        description.push_str(custom_desc);
+        description.push_str("\n\n");
+    }
+
+    // Append the default non-video description wrapped in [note] (not centered)
+    description.push_str(&default_non_video_description());
+
+    Ok(description)
+}
+
+pub fn parse_metadata(folder: &str) -> Result<(String, String, String, String, String), String> {
+    // Find the first audio file in the folder
+    let first_file = std::fs::read_dir(folder)
+        .map_err(|e| format!("Failed to read directory: {}", e))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .find(|path| {
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                ext.eq_ignore_ascii_case("mp3") || ext.eq_ignore_ascii_case("flac")
+            } else {
+                false
+            }
+        })
+        .ok_or_else(|| "No valid audio files found in the folder.".to_string())?;
+
+    // Parse the mediainfo log for the first file
+    let metadata = parse_mediainfo_log(&first_file);
+
+    // Extract fields from the metadata
+    let artist_global = metadata.get("Performer").cloned().unwrap_or_else(|| "Unknown Artist".to_string());
+    let album_meta = metadata.get("Album").cloned().unwrap_or_else(|| "Unknown Album".to_string());
+    let audio_format = metadata.get("Format").cloned().unwrap_or_else(|| "Unknown Format".to_string());
+    let bit_depth = metadata.get("Bit depth").cloned().unwrap_or_else(|| "Unknown".to_string());
+    let sampling_rate = metadata.get("Sampling rate").cloned().unwrap_or_else(|| "0".to_string());
+
+    // Return the extracted metadata
+    Ok((artist_global, album_meta, audio_format, bit_depth, sampling_rate))
+}
+
+fn parse_mediainfo_log(file_path: &Path) -> HashMap<String, String> {
+    let output = Command::new("mediainfo")
+        .arg(file_path)
+        .output();
+
+    let mut metadata = HashMap::new();
+
+    if let Ok(output) = output {
+        if output.status.success() {
+            let log = String::from_utf8_lossy(&output.stdout);
+            for line in log.lines() {
+                if let Some((key, value)) = line.split_once(':') {
+                    metadata.insert(key.trim().to_string(), value.trim().to_string());
+                }
+            }
+        }
+    }
+
+    metadata
 }
 
 fn get_seedpool_resolution_id(input_path: &str) -> u32 {
@@ -373,32 +831,15 @@ fn check_seedpool_dupes(
 
     info!("Checking Seedpool for existing torrent with name: '{}'", name);
 
-    let normalized_name = generate_release_name(name);
-    info!("Normalized Name for Seedpool Query: '{}'", normalized_name);
+    // Use the full input name as the search term
+    let search_term = generate_release_name(name);
+    info!("Search Term for Seedpool Query: '{}'", search_term);
 
-    let season_episode_regex = Regex::new(r"S(\d{2})E(\d{2})").unwrap();
-    let season_episode = season_episode_regex.captures(name).map(|caps| {
-        (
-            caps.get(1).unwrap().as_str().parse::<u32>().unwrap_or(0),
-            caps.get(2).unwrap().as_str().parse::<u32>().unwrap_or(0),
-        )
-    });
-    if let Some((season, episode)) = &season_episode {
-        info!("Detected Season/Episode: S{}E{}", season, episode);
-    }
-
-    let mut query_url = format!(
+    let query_url = format!(
         "https://seedpool.org/api/torrents/filter?name={}&perPage=10&sortField=name&sortDirection=asc&api_token={}",
-        urlencoding::encode(&normalized_name),
+        urlencoding::encode(&search_term),
         seedpool_api_key
     );
-
-    if let Some((season, episode)) = &season_episode {
-        query_url = format!(
-            "{}&seasonNumber={}&episodeNumber={}",
-            query_url, season, episode
-        );
-    }
 
     info!("Seedpool API Query URL: {}", query_url);
 
@@ -426,19 +867,17 @@ fn check_seedpool_dupes(
 
     for result in data {
         if let Some(attributes) = result["attributes"].as_object() {
-            if let Some(title) = attributes.get("name").and_then(|t| t.as_str()) {
-                info!("Checking result title: {}", title);
+            if let Some(result_title) = attributes.get("name").and_then(|t| t.as_str()) {
+                info!("Checking result title: {}", result_title);
 
-                if let Some((season, episode)) = &season_episode {
-                    if !title.contains(&format!("S{:02}E{:02}", season, episode)) {
-                        info!("Skipping result due to mismatched season/episode: {}", title);
-                        continue;
+                // Check for an exact match with the search term
+                if result_title == search_term {
+                    if let Some(download_link) = attributes.get("download_link").and_then(|d| d.as_str()) {
+                        info!("Duplicate found for '{}'. Download link: {}", name, download_link);
+                        return Ok(Some(download_link.to_string()));
                     }
-                }
-
-                if let Some(download_link) = attributes.get("download_link").and_then(|d| d.as_str()) {
-                    info!("Duplicate found for '{}'. Download link: {}", name, download_link);
-                    return Ok(Some(download_link.to_string()));
+                } else {
+                    info!("Skipping result due to mismatched title: {}", result_title);
                 }
             }
         }
@@ -456,47 +895,206 @@ pub fn preflight_check(
     ffprobe_path: &Path,
     mediainfo_path: &Path,
 ) -> Result<PreflightCheckResult, String> {
-    log::debug!("Running preflight check for input_path: {}", input_path);
+    log::debug!("Processing release for input_path: {}", input_path);
+
+    // Step 0: Check for music files
+    let music_extensions = ["mp3", "flac"];
+    let mut found_music_file = false;
+    let mut music_type = None;
+
+    for entry in WalkDir::new(input_path).into_iter().filter_map(|e| e.ok()) {
+        if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
+            if music_extensions.contains(&ext.to_lowercase().as_str()) {
+                found_music_file = true;
+                music_type = Some(match ext.to_lowercase().as_str() {
+                    "mp3" => "🎧 MP3".to_string(), // Add 🎧 icon for MP3
+                    "flac" => "🎧 FLAC".to_string(), // Add 🎧 icon for FLAC
+                    _ => ext.to_uppercase(),
+                });
+                break; // Exit the loop once a valid music file is found
+            }
+        }
+    }
+
+    // If music files are found, process as a music release
+    if found_music_file {
+        log::debug!("Music files detected in input path: {}", input_path);
+
+        // Extract metadata from the first music file
+        let first_file = WalkDir::new(input_path)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path().to_path_buf())
+            .find(|path| {
+                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                    ext.eq_ignore_ascii_case("mp3") || ext.eq_ignore_ascii_case("flac")
+                } else {
+                    false
+                }
+            })
+            .ok_or_else(|| "No valid music files found in the folder.".to_string())?;
+
+        let metadata = parse_mediainfo_log(&first_file);
+
+        let artist = metadata.get("Performer").cloned().unwrap_or_else(|| "Unknown Artist".to_string());
+        let album = metadata.get("Album").cloned().unwrap_or_else(|| "Unknown Album".to_string());
+        let audio_format = metadata.get("Format").cloned().unwrap_or_else(|| "Unknown Format".to_string());
+        let bit_depth = metadata.get("Bit depth").cloned().unwrap_or_else(|| "Unknown".to_string());
+        let sampling_rate = metadata.get("Sampling rate").cloned().unwrap_or_else(|| "Unknown".to_string());
+
+        let sampling_rate_khz = if sampling_rate.ends_with("kHz") {
+            sampling_rate.clone()
+        } else if let Ok(rate) = sampling_rate.parse::<f64>() {
+            format!("{:.1} kHz", rate / 1000.0)
+        } else {
+            "Unknown".to_string()
+        };
+
+        let audio_info = if bit_depth == "Unknown" || sampling_rate_khz == "Unknown" {
+            format!("{} / {}", audio_format, sampling_rate_khz)
+        } else {
+            format!("{} {} / {}", audio_format, bit_depth, sampling_rate_khz)
+        };
+
+        let title = format!("{} - {}", artist, album);
+        let generated_release_name = Path::new(input_path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+
+        // Check for album cover (image file) in the input path or subfolders
+        let album_cover_available = WalkDir::new(input_path)
+            .into_iter()
+            .filter_map(|entry| entry.ok())
+            .any(|entry| {
+                if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
+                    ext.eq_ignore_ascii_case("jpg") || ext.eq_ignore_ascii_case("png")
+                } else {
+                    false
+                }
+            });
+
+        let album_cover_status = if album_cover_available {
+            "Available".to_string()
+        } else {
+            "Not Available".to_string()
+        };
+
+        // Generate and print the log
+        println!("Pre-flight Check Results:");
+        println!("Title: {}", title);
+        println!("Release Name: {}", generated_release_name);
+        println!("Dupe Check: N/A");
+        println!("Release Type: {}", music_type.as_ref().unwrap());
+        println!("Season Number: N/A");
+        println!("Episode Number: N/A");
+        println!("TMDB ID: 0");
+        println!("IMDb ID: N/A");
+        println!("TVDB ID: N/A");
+        println!("Excluded Files: N/A");
+        println!("Album Cover: {}", album_cover_status);
+        println!("Audio Languages: [{}]", audio_info);
+
+        return Ok(PreflightCheckResult {
+            release_name: title,
+            generated_release_name,
+            dupe_check: "N/A".to_string(),
+            tmdb_id: 0,
+            imdb_id: None,
+            tvdb_id: None,
+            excluded_files: "N/A".to_string(),
+            album_cover: album_cover_status,
+            audio_languages: vec![audio_info],
+            release_type: format!("{} Music", music_type.as_ref().unwrap().to_uppercase()),
+            season_number: None,
+            episode_number: None,
+        });
+    }
 
     // Step 1: Determine release type and title
-    let (release_type, title, year, season_number, episode_number) =
+    let (release_type_raw, title, year, season_number, episode_number) =
         determine_release_type_and_title(input_path);
     log::debug!(
         "Release type: {}, Title: {}, Year: {:?}, Season: {:?}, Episode: {:?}",
-        release_type, title, year, season_number, episode_number
+        release_type_raw, title, year, season_number, episode_number
     );
 
-    // Capitalize the release_type fully (e.g., "tv" -> "TV", "movie" -> "Movie")
-    let release_type = match release_type.as_str() {
-        "tv" => "TV".to_string(),
-        "movie" => "Movie".to_string(),
-        "boxset" => "Boxset".to_string(),
-        _ => release_type,
+    // Add icons for display purposes, but keep the raw release_type for logic
+    let release_type_display = if release_type_raw == "tv" && episode_number.is_none() {
+        "📺 Boxset".to_string() // Return plain string
+    } else {
+        match release_type_raw.as_str() {
+            "tv" => format!("★  📺 TV Show"), // Include the star as plain text
+            "movie" => "🎥 Movie".to_string(),
+            "boxset" => "📺 Boxset".to_string(),
+            _ => release_type_raw.clone(),
+        }
     };
 
-    // Step 2: Generate the release name
+    // Step 2: Generate release name using `generate_release_name`
     let base_name = Path::new(input_path)
         .file_name()
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
     let generated_release_name = generate_release_name(&base_name);
-    log::debug!("Generated Release Name: {}", generated_release_name);
-
     // Step 3: Check for duplicates
-    let dupe_check = match check_seedpool_dupes(&base_name, &seedpool_config.general.api_key)? {
-        Some(_) => "FAIL. Dupe Found".to_string(),
-        None => "PASS".to_string(),
-    };
-    log::debug!("Dupe Check Result: {}", dupe_check);
+    if let Some(download_link) = check_seedpool_dupes(&title, &seedpool_config.general.api_key)? {
+        log::info!("Duplicate found for '{}'. Downloading and adding to clients.", title);
+
+        let client = reqwest::blocking::Client::new();
+        let response = client
+            .get(&download_link)
+            .send()
+            .map_err(|e| format!("Failed to download torrent: {}", e))?;
+        if !response.status().is_success() {
+            return Err(format!("Failed to download torrent. HTTP Status: {}", response.status()));
+        }
+
+        let torrent_data = response
+            .bytes()
+            .map_err(|e| format!("Failed to read torrent data: {}", e))?;
+        let torrent_file_path = Path::new(&config.paths.torrent_dir).join(format!("{}.torrent", title));
+        std::fs::write(&torrent_file_path, &torrent_data)
+            .map_err(|e| format!("Failed to save torrent file: {}", e))?;
+
+        add_torrent_to_all_qbittorrent_instances(
+            &[torrent_file_path.to_string_lossy().to_string()],
+            &config.qbittorrent,
+            &config.deluge,
+            input_path,
+            &config.paths,
+        )?;
+
+        return Ok(PreflightCheckResult {
+            release_name: title.clone(),
+            generated_release_name: generated_release_name.clone(),
+            dupe_check: "FAIL".to_string(),
+            tmdb_id: 0,
+            imdb_id: None,
+            tvdb_id: None,
+            excluded_files: "N/A".to_string(),
+            album_cover: "N/A".to_string(),
+            audio_languages: vec![],
+            release_type: release_type_display,
+            season_number,
+            episode_number,
+        });
+    }
 
     // Step 4: Fetch TMDB ID
-    let tmdb_id = fetch_tmdb_id(&title, year, &config.general.tmdb_api_key, &release_type)
-        .unwrap_or(0);
+    log::info!(
+        "Fetching TMDB ID with title: '{}', year: {:?}, release_type: '{}'",
+        title,
+        year,
+        release_type_raw
+    );
+    let tmdb_id = fetch_tmdb_id(&title, year, &config.general.tmdb_api_key, &release_type_raw)?;
     log::debug!("TMDB ID: {}", tmdb_id);
 
     // Step 5: Fetch external IDs (IMDb, TVDB)
-    let (imdb_id, tvdb_id) = fetch_external_ids(tmdb_id, &release_type, &config.general.tmdb_api_key)
+    let (imdb_id, tvdb_id) = fetch_external_ids(tmdb_id, &release_type_raw, &config.general.tmdb_api_key)
         .unwrap_or((None, None));
     log::debug!("IMDb ID: {:?}, TVDB ID: {:?}", imdb_id, tvdb_id);
 
@@ -516,19 +1114,35 @@ pub fn preflight_check(
     }
     log::debug!("Audio languages: {:?}", audio_languages);
 
+    // Generate and print the log
+    println!("Pre-flight Check Results:");
+    println!("Title: {}", title);
+    println!("Release Name: {}", generated_release_name); // Use the generated release name
+    println!("Dupe Check: ✔️ PASS");
+    println!("Release Type: {}", release_type_display);
+    println!("Season Number: {}", season_number.map_or("N/A".to_string(), |s| s.to_string()));
+    println!("Episode Number: {}", episode_number.map_or("N/A".to_string(), |e| e.to_string()));
+    println!("TMDB ID: {}", tmdb_id);
+    println!("IMDb ID: {}", imdb_id.clone().unwrap_or_else(|| "N/A".to_string()));
+    println!("TVDB ID: {}", tvdb_id.map_or("N/A".to_string(), |id| id.to_string()));
+    println!("Excluded Files: {}", excluded_files);
+    println!("Album Cover: N/A");
+    println!("Audio Languages: [{}]", audio_languages.join(", "));
+
     // Step 8: Return the preflight check result
     Ok(PreflightCheckResult {
-        release_name: title,
-        generated_release_name,
-        dupe_check, // Include the dupe check result
+        release_name: title.clone(),
+        generated_release_name, // Use the generated release name
+        dupe_check: "✔️ PASS".to_string(),
         tmdb_id,
         imdb_id,
         tvdb_id,
         excluded_files,
+        album_cover: "N/A".to_string(),
         audio_languages,
-        release_type,         // Fully capitalized release type
-        season_number,        // Populate season number
-        episode_number,       // Populate episode number
+        release_type: release_type_display,
+        season_number,
+        episode_number,
     })
 }
 
