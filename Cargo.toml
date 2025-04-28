@@ -25,7 +25,14 @@ simplelog = "0.12"
 bencode = "0.1.16"
 bendy = "0.3.3"
 clap = { version = "4.4", features = ["derive"] }
-
+irc = "1.1.0"
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+tui = "0.19"
+walkdir = "2.3.3"
+tail = "0.3"
+notify = "5.1"
+winnow = "0.5"
 [profile.release]
 lto = true
 
