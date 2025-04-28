@@ -1,57 +1,35 @@
 use std::{
     fs,
     env,
-    path::Path,
+    path::{Path, PathBuf},
     collections::HashMap,
-    thread,
-    time::Duration,
 };
-use regex::Regex;
 use serde::Deserialize;
-use serde_yaml;
-use log::{info, error};
-use simplelog::{Config as SimpleLogConfig, CombinedLogger, WriteLogger, LevelFilter};
+use log::{info, error, debug, LevelFilter};
+use simplelog::{Config as SimpleLogConfig, CombinedLogger, WriteLogger};
 use std::fs::File;
-use seed_tools::utils::generate_release_name;
-use seed_tools::types::{Config, SeedpoolConfig, TorrentLeechConfig, QbittorrentConfig, DelugeConfig};
-use trackers::common::process_custom_upload;
+use std::error::Error;
 use reqwest::blocking::Client;
-use seed_tools::sync; 
-
+use seed_tools::utils::generate_release_name;use seed_tools::types::{Config, SeedpoolConfig, TorrentLeechConfig, QbittorrentConfig, DelugeConfig};
+use seed_tools::sync;
+use seed_tools::irc::launch_irc_client;
+use seed_tools::types::PreflightCheckResult;
+use trackers::seedpool::preflight_check;
+use seed_tools::ui;
+use tokio::main;
 mod trackers {
     pub mod seedpool;
     pub mod torrentleech;
     pub mod common;
 }
-
+use std::fs::OpenOptions;
+use trackers::common::{process_custom_upload, Tracker};
+use clap::{Parser, CommandFactory};
 #[derive(Deserialize)]
 struct GeneralConfig {
     pub tmdb_api_key: String,
 }
 
-trait Tracker {
-    fn requires_screenshots(&self) -> bool;
-    fn requires_sample(&self) -> bool;
-    fn requires_tmdb_id(&self) -> bool;
-    fn requires_remote_path(&self) -> bool;
-    fn upload(
-        &self,
-        torrent_file: &str,
-        release_name: &str,
-        description: Option<&str>,
-        mediainfo: Option<&str>,
-        nfo_file: &Option<String>,
-        category_id: u32,
-        type_id: Option<u32>,
-        tmdb_id: Option<u32>,
-        imdb_id: Option<String>,
-        tvdb_id: Option<u32>,
-        season_number: Option<u32>,
-        episode_number: Option<u32>,
-        resolution_id: Option<u32>,
-    ) -> Result<(), String>;
-    fn generate_metadata(&self, torrent_file: &str) -> Result<HashMap<String, String>, String>;
-}
 
 fn load_yaml_config<T: serde::de::DeserializeOwned>(path: &str) -> T {
     serde_yaml::from_str(&fs::read_to_string(path).expect("Failed to read config file"))
@@ -59,36 +37,25 @@ fn load_yaml_config<T: serde::de::DeserializeOwned>(path: &str) -> T {
 }
 
 fn extract_binaries(config_path: &str) -> Result<String, String> {
-    // Load the configuration file
     let config: serde_yaml::Value = serde_yaml::from_str(
         &fs::read_to_string(config_path).map_err(|e| format!("Failed to read config file: {}", e))?,
     )
     .map_err(|e| format!("Failed to parse config file: {}", e))?;
-
-    // Extract the paths field
     let paths = config["paths"]
         .as_mapping()
         .ok_or("Missing or invalid 'paths' field in config")?;
-
-    // Define the required binaries
     let required_binaries = ["ffmpeg", "ffprobe", "mkbrr", "mediainfo"];
-
-    // Check if all required binaries exist in the paths
     for binary in &required_binaries {
         if !paths.contains_key(binary) {
             return Err(format!("Missing '{}' in 'paths' field of config", binary));
         }
-
         let binary_path = paths[binary]
             .as_str()
             .ok_or(format!("Invalid path for '{}'", binary))?;
-
         if !Path::new(binary_path).exists() {
             return Err(format!("Binary '{}' not found at '{}'", binary, binary_path));
         }
     }
-
-    // Return the bin directory path (assumes binaries are in the same directory)
     let bin_dir = Path::new(
         paths["ffmpeg"]
             .as_str()
@@ -98,23 +65,103 @@ fn extract_binaries(config_path: &str) -> Result<String, String> {
     .ok_or("Failed to determine bin directory")?
     .to_string_lossy()
     .to_string();
-
     Ok(bin_dir)
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[derive(Parser, Debug)]
+#[command(author, version, about = "Automated tool for processing and uploading releases to trackers.", long_about = None)]
+struct Cli {
+    #[arg(long, conflicts_with_all = ["sp", "tl", "custom_cat_type", "command", "irc"])]
+    sync: bool,
+
+    #[arg(long = "SP", requires = "input_path")]
+    sp: bool,
+
+    #[arg(long = "TL", requires = "input_path")]
+    tl: bool,
+
+    #[arg(short = 'c', long, value_name = "CAT_TYPE", requires = "input_path")]
+    custom_cat_type: Option<String>,
+
+    #[arg(long, conflicts_with_all = ["sync", "sp", "tl", "custom_cat_type", "command", "irc"])]
+    ui: bool, // Add the `ui` argument
+
+    #[arg(long, conflicts_with_all = ["sync", "sp", "tl", "custom_cat_type", "command", "ui"])]
+    irc: bool, // Add the `irc` argument
+
+    #[arg(long, conflicts_with_all = ["sync", "sp", "tl", "custom_cat_type", "command"])]
+    pre: bool, // Add the `pre` argument
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+
+    #[arg(index = 1)]
+    input_path: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+enum Commands {
+    /// Check for duplicates in Seedpool
+    Check {
+        /// The name of the release to check for duplicates
+        #[arg(index = 1)]
+        name: String,
+    },
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    // --- Initialize Logging ---
+    let log_path = Path::new("seed-tools.log");
     CombinedLogger::init(vec![WriteLogger::new(
         LevelFilter::Debug,
         SimpleLogConfig::default(),
-        File::create("seed-tools.log")?,
+        OpenOptions::new()
+            .create(true) // Create the file if it doesn't exist
+            .append(true) // Append to the file instead of truncating it
+            .open(&log_path)?,
     )])?;
+    info!("Logging initialized.");
 
-    let args: Vec<String> = env::args().collect();
+    // Determine the executable directory
+    let exe_dir = std::env::current_exe()
+        .map_err(|e| format!("Failed to get executable path: {}", e))?
+        .parent()
+        .ok_or("Failed to determine executable directory")?
+        .to_path_buf();
+    info!("Executable directory determined as: {:?}", exe_dir);
 
-    // Provide the path to the configuration file
-    let config_path = "config/config.yaml";
-    let binaries_dir = extract_binaries(config_path).unwrap_or_else(|e| {
-        error!("Failed to extract binaries: {}", e);
+    // Parse CLI arguments
+    info!("Parsing arguments...");
+    let cli = Cli::parse();
+    debug!("Parsed arguments: {:?}", cli);
+
+    // --- Handle IRC Mode ---
+    if cli.irc {
+        info!("Launching IRC mode...");
+        return launch_irc_client().await;
+    }    
+
+    // --- Handle UI Mode (Default) ---
+    if cli.ui || (cli.command.is_none() && cli.input_path.is_none() && !cli.sync && !cli.pre) {
+        info!("Launching UI mode...");
+        return ui::launch_ui();
+    }
+
+    // --- Build Configuration Paths ---
+    info!("Building configuration paths...");
+    let config_dir = exe_dir.join("config");
+    let main_config_path = config_dir.join("config.yaml");
+    let seedpool_config_path = config_dir.join("trackers/seedpool.yaml");
+    let torrentleech_config_path = config_dir.join("trackers/torrentleech.yaml");
+    info!("Configuration paths built.");
+
+    // --- Load Configurations ---
+    info!("Loading configurations...");
+    let main_config_path_str = main_config_path.to_str()
+        .ok_or_else(|| format!("Invalid non-UTF8 path for main config: {:?}", main_config_path))?;
+    let binaries_dir = extract_binaries(main_config_path_str).unwrap_or_else(|e| {
+        error!("Failed to extract binaries using config {:?}: {}", main_config_path, e);
         std::process::exit(1);
     });
 
@@ -122,104 +169,215 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ffprobe_path = Path::new(&binaries_dir).join("ffprobe");
     let mkbrr_path = Path::new(&binaries_dir).join("mkbrr");
     let mediainfo_path = Path::new(&binaries_dir).join("mediainfo");
-
-    // Load configurations
-    let mut main_config: Config = load_yaml_config(config_path);
-    let seedpool_config: SeedpoolConfig = load_yaml_config("config/trackers/seedpool.yaml");
-    let torrentleech_config: TorrentLeechConfig = load_yaml_config("config/trackers/torrentleech.yaml");
-
-    if args.len() < 2 {
-        error!("Usage: seedtool <input_path> or seedtool -sync or seedtool <input_path> -SP/-TL");
-        return Ok(());
-    }
-
-    log::debug!("Raw command-line arguments: {:?}", args);
-    let input_path = &args[1];
-    let sanitized_name = generate_release_name(
-        &Path::new(input_path)
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string(),
+    debug!(
+        "Binary paths: ffmpeg={:?}, ffprobe={:?}, mkbrr={:?}, mediainfo={:?}",
+        ffmpeg_path, ffprobe_path, mkbrr_path, mediainfo_path
     );
 
-    if args.len() == 2 && args[1] == "-sync" {
-        // Delegate sync functionality to sync.rs
+    let seedpool_config_path_str = seedpool_config_path.to_str()
+        .ok_or_else(|| format!("Invalid non-UTF8 path for seedpool config: {:?}", seedpool_config_path))?;
+    let torrentleech_config_path_str = torrentleech_config_path.to_str()
+        .ok_or_else(|| format!("Invalid non-UTF8 path for torrentleech config: {:?}", torrentleech_config_path))?;
+
+    let mut main_config: Config = load_yaml_config::<Config>(main_config_path_str);
+    let seedpool_config: SeedpoolConfig = load_yaml_config(seedpool_config_path_str);
+    let torrentleech_config: TorrentLeechConfig = load_yaml_config(torrentleech_config_path_str);
+    info!("Configurations loaded.");
+
+    if cli.pre {
+        info!("Running pre-flight check...");
+        if let Some(input_path) = cli.input_path {
+            let input_path_str = input_path.to_str().ok_or("Invalid input path string")?;
+            info!("Input path for pre-flight check: {}", input_path_str);
+    
+            match preflight_check(
+                input_path_str,
+                &main_config,
+                &seedpool_config,
+                &ffmpeg_path,
+                &ffprobe_path,
+                &mediainfo_path,
+            ) {
+                Ok(result) => {
+                    println!("Pre-flight Check Results:");
+                    println!("Title: {}", result.release_name);
+                    println!("Release Name: {}", result.generated_release_name);
+                    println!("Dupe Check: {}", result.dupe_check);
+                    println!("Release Type: {}", result.release_type); // New line
+                    println!(
+                        "Season Number: {}",
+                        result.season_number.map_or("N/A".to_string(), |s| s.to_string())
+                    ); // New line
+                    println!(
+                        "Episode Number: {}",
+                        result.episode_number.map_or("N/A".to_string(), |e| e.to_string())
+                    ); // New line
+                    println!("TMDB ID: {}", result.tmdb_id);
+                    println!("IMDb ID: {}", result.imdb_id.unwrap_or_else(|| "N/A".to_string()));
+                    println!("TVDB ID: {}", result.tvdb_id.map_or("N/A".to_string(), |id| id.to_string()));
+                    println!("Excluded Files: {}", result.excluded_files);
+                    println!("Audio Languages: {:?}", result.audio_languages);
+                }
+                Err(e) => {
+                    error!("Pre-flight check failed: {}", e);
+                    println!("Pre-flight check failed: {}", e);
+                }
+            }
+        } else {
+            error!("No input path provided for pre-flight check.");
+            println!("Error: No input path provided for pre-flight check.");
+        }
+        return Ok(()); // Exit after running pre-flight check
+    }
+
+    // --- Handle Sync Mode ---
+    if cli.sync {
+        info!("Running in --sync mode.");
         if let Err(e) = sync::sync_qbittorrent(&main_config.qbittorrent, &seedpool_config.general.api_key) {
             error!("Error syncing qBittorrent: {}", e);
-        }
-        return Ok(());
-    }
-
-    let mut errors = Vec::new();
-
-    if args.iter().any(|arg| arg.starts_with('-') && arg.len() == 5 && arg[1..].chars().all(|c| c.is_digit(10))) {
-        let category_type_arg = args.iter().find(|arg| arg.starts_with('-') && arg.len() == 5).unwrap();
-        let category_id: u32 = category_type_arg[1..3].trim_start_matches('0').parse().unwrap_or(0);
-        let type_id: u32 = category_type_arg[3..5].trim_start_matches('0').parse().unwrap_or(0);
-
-        let tracker = if args.contains(&"-SP".to_string()) {
-            "seedpool"
-        } else if args.contains(&"-TL".to_string()) {
-            "torrentleech"
         } else {
-            error!("No valid tracker specified for custom upload");
-            return Ok(());
-        };
-
-        if let Err(e) = process_custom_upload(
-            input_path,
-            category_id,
-            type_id,
-            &main_config.qbittorrent,
-            &main_config.deluge,
-            tracker,
-            Some(&seedpool_config),
-            Some(&torrentleech_config),
-            mkbrr_path.to_str().ok_or("Invalid mkbrr_path")?,
-            &main_config.paths,
-        ) {
-            error!("Error processing custom upload: {}", e);
+            info!("Sync operation completed.");
         }
-        return Ok(());
+        return Ok(()); // Exit after sync
     }
 
-    if args.contains(&"-SP".to_string()) {
-        log::debug!("Input path passed to process_seedpool_release: {}", input_path);
-        if let Err(e) = trackers::seedpool::process_seedpool_release(
-            input_path,
-            &sanitized_name,
-            &mut main_config,
-            &seedpool_config,
-            &ffmpeg_path,
-            &ffprobe_path,
-            &mkbrr_path,
-            &mediainfo_path,
-        ) {
-            error!("Error processing Seedpool release: {}", e);
-            errors.push(format!("Seedpool: {}", e));
+    // --- Handle Commands ---
+    if let Some(command) = cli.command {
+        match command {
+            Commands::Check { name } => {
+                info!("Running check for duplicates with name: {}", name);
+
+                // Call check_seedpool
+                match sync::check_seedpool(&name, &seedpool_config.general.api_key) {
+                    Ok(Some(download_link)) => {
+                        println!("Duplicate found for '{}'. Download link: {}", name, download_link);
+                        std::process::exit(1); // Exit with non-zero code if duplicate is found
+                    }
+                    Ok(None) => {
+                        println!("No duplicate found for '{}'.", name);
+                        std::process::exit(0); // Exit with zero code if no duplicate is found
+                    }
+                    Err(e) => {
+                        error!("Error checking for duplicate: {}", e);
+                        std::process::exit(2); // Exit with a different non-zero code for errors
+                    }
+                }
+            }
         }
     }
 
-    if args.contains(&"-TL".to_string()) {
-        if let Err(e) = trackers::torrentleech::process_torrentleech_release(
-            input_path,
-            &sanitized_name,
-            &mut main_config,
-            &torrentleech_config,
-            &mkbrr_path,
-            &mediainfo_path,
-        ) {
-            error!("Error processing TorrentLeech release: {}", e);
-            errors.push(format!("TorrentLeech: {}", e));
-        }
-    }
+    // --- Handle Input Path Dependent Modes ---
+    if let Some(input_path) = cli.input_path {
+        let input_path_str = input_path.to_str().ok_or("Invalid input path string")?;
+        info!("Processing input path: {}", input_path_str);
 
-    if errors.is_empty() {
-        info!("Upload completed successfully for all specified trackers.");
+        // Generate release name
+        let sanitized_name = generate_release_name(
+            &input_path
+                .file_name()
+                .ok_or("Could not get filename from input path")?
+                .to_string_lossy()
+                .to_string(),
+        );
+        info!("Generated sanitized release name: {}", sanitized_name);
+
+        let mut errors = Vec::new();
+
+        // --- Custom Upload Mode ---
+        if let Some(category_type_arg) = cli.custom_cat_type {
+            info!("Running in custom upload mode with category/type: {}", category_type_arg);
+
+            // Validate and process custom upload
+            if !cli.sp && !cli.tl {
+                error!("Custom upload (-c/--custom-cat-type) requires either --SP or --TL to be specified.");
+                return Ok(()); // Exit cleanly
+            }
+
+            if category_type_arg.len() != 4 || !category_type_arg.chars().all(|c| c.is_digit(10)) {
+                error!("Invalid format for custom upload specifier (-c/--custom-cat-type). Expected 4 digits (e.g., 0819), got: {}", category_type_arg);
+                return Ok(()); // Exit cleanly
+            }
+
+            let category_id: u32 = category_type_arg[0..2].parse()?;
+            let type_id: u32 = category_type_arg[2..4].parse()?;
+            info!("Parsed Category ID: {}, Type ID: {}", category_id, type_id);
+
+            let target_tracker = if cli.sp {
+                "seedpool"
+            } else {
+                "torrentleech"
+            };
+
+            if let Err(e) = process_custom_upload(
+                input_path_str,
+                category_id,
+                type_id,
+                &main_config.qbittorrent,
+                &main_config.deluge,
+                target_tracker,
+                Some(&seedpool_config),
+                Some(&torrentleech_config),
+                mkbrr_path.to_str().ok_or("Invalid mkbrr_path")?,
+                &main_config.paths,
+            ) {
+                error!("Error processing custom upload for {}: {}", target_tracker, e);
+            } else {
+                info!("Successfully processed custom upload for {}.", target_tracker);
+            }
+            return Ok(()); // Exit after custom upload
+        }
+
+        // --- Standard Upload Mode ---
+        info!("Running in standard upload mode.");
+        if cli.sp {
+            if let Err(e) = trackers::seedpool::process_seedpool_release(
+                input_path_str,
+                &sanitized_name,
+                &mut main_config,
+                &seedpool_config,
+                &ffmpeg_path,
+                &ffprobe_path,
+                &mkbrr_path,
+                &mediainfo_path,
+            ) {
+                error!("Error processing Seedpool release: {}", e);
+                errors.push(format!("Seedpool: {}", e));
+            } else {
+                info!("Successfully processed Seedpool release for: {}", sanitized_name);
+            }
+        }
+
+        if cli.tl {
+            if let Err(e) = trackers::torrentleech::process_torrentleech_release(
+                input_path_str,
+                &sanitized_name,
+                &mut main_config,
+                &torrentleech_config,
+                &mkbrr_path,
+                &mediainfo_path,
+            ) {
+                error!("Error processing TorrentLeech release: {}", e);
+                errors.push(format!("TorrentLeech: {}", e));
+            } else {
+                info!("Successfully processed TorrentLeech release for: {}", sanitized_name);
+            }
+        }
+
+        if !cli.sp && !cli.tl {
+            error!("No tracker specified for upload (--SP or --TL required for standard upload).");
+        }
+
+        if errors.is_empty() {
+            info!("Upload completed successfully for all specified trackers.");
+        } else {
+            error!("Upload completed with errors: {:?}", errors);
+        }
     } else {
-        error!("Upload completed with errors: {:?}", errors);
+        error!("Usage error: An input path is required unless using --sync.");
+        Cli::command().print_help()?;
+        return Ok(()); // Exit cleanly
     }
 
+    info!("Seed Tools finished.");
     Ok(())
 }
