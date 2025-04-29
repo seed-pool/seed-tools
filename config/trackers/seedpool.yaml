@@ -1,5 +1,6 @@
 general:
   enabled: true
+  username: "username"
   passkey: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
   api_key: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
