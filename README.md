@@ -21,6 +21,7 @@
 4. In the `config` directory create a `trackers` folder
 5. Copy `seedpool.yaml` and `torrentleech.yaml`files into that `trackers` folder.
 6. Create `/bin` and copy your `ffmpeg/ffprobe/mediainfo/mkbrr` binaries over.
+7. You may or may not have to create `/torrents` and `/screenshots` directories in the app's working dir.
 
 ### 🌀 Run Seed-Tools
 
