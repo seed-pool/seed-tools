@@ -109,6 +109,12 @@ pub struct Config {
     pub paths: PathsConfig,
     pub qbittorrent: Vec<QbittorrentConfig>,
     pub deluge: DelugeConfig,
+    pub imgbb: Option<ImgBBConfig>, // Add this field
+}
+
+#[derive(Deserialize)]
+pub struct ImgBBConfig {
+    pub imgbb_api_key: String,
 }
 
 pub trait VideoSettings {
