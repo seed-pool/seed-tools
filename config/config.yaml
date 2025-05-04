@@ -33,4 +33,7 @@ deluge:
     username: "user"
     password: "xxxxxxxxxxxxxxxxxxxxx"
     label: ""
-    default_save_path: "/home/user/files"    
+    default_save_path: "/home/user/files"
+
+imgbb:
+  imgbb_api_key: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
