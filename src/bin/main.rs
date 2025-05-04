@@ -30,7 +30,6 @@ struct GeneralConfig {
     pub tmdb_api_key: String,
 }
 
-
 fn load_yaml_config<T: serde::de::DeserializeOwned>(path: &str) -> T {
     serde_yaml::from_str(&fs::read_to_string(path).expect("Failed to read config file"))
         .expect("Failed to parse YAML config")
@@ -329,6 +328,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         // --- Standard Upload Mode ---
         info!("Running in standard upload mode.");
+        let imgbb_api_key = main_config.imgbb.as_ref().map(|imgbb| imgbb.imgbb_api_key.clone());
+        debug!("Loaded imgbb API key: {:?}", imgbb_api_key);
+        
+        // Pass the imgbb_api_key to the relevant functions
         if cli.sp {
             if let Err(e) = trackers::seedpool::process_seedpool_release(
                 input_path_str,
@@ -339,6 +342,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 &ffprobe_path,
                 &mkbrr_path,
                 &mediainfo_path,
+                imgbb_api_key.as_deref(), // Pass the imgbb API key
             ) {
                 error!("Error processing Seedpool release: {}", e);
                 errors.push(format!("Seedpool: {}", e));
