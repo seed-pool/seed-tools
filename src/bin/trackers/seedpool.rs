@@ -8,7 +8,7 @@ use std::fs;
 use crate::{Config, Client, SeedpoolConfig, Tracker};
 use seed_tools::utils::{
     generate_release_name, find_video_files, create_torrent, generate_mediainfo, generate_sample,
-    generate_screenshots, fetch_tmdb_id, default_non_video_description, fetch_external_ids, generate_description,
+    generate_screenshots, fetch_tmdb_id, generate_screenshots_imgbb, default_non_video_description, fetch_external_ids, generate_description,
     add_torrent_to_all_qbittorrent_instances,
 };
 use tui::text::Spans;
@@ -31,6 +31,7 @@ pub fn process_seedpool_release(
     ffprobe_path: &Path,
     mkbrr_path: &Path,
     mediainfo_path: &Path,
+    imgbb_api_key: Option<&str>, // Optional ImgBB API key
 ) -> Result<(), String> {
     log::debug!("Processing release for input_path: {}", input_path);
 
@@ -126,31 +127,62 @@ pub fn process_seedpool_release(
         return Err("No valid video files detected.".to_string());
     }
 
-    // Create torrent and generate metadata
+    let stripshit_from_videos = seedpool_config.settings.stripshit_from_videos;
+
+    // Generate torrent file
     let torrent_files = vec![create_torrent(
-        &video_files,
+        input_path,
         &config.paths.torrent_dir,
         &seedpool_config.settings.announce_url,
         &mkbrr_path.to_string_lossy(),
+        stripshit_from_videos,
     )?];
+
+    // Generate mediainfo
     let mediainfo_output = generate_mediainfo(&video_files[0], &mediainfo_path.to_string_lossy())?;
-    let sample_url = generate_sample(
-        &video_files[0],
-        &config.paths.screenshots_dir,
-        &seedpool_config.screenshots.remote_path,
-        &seedpool_config.screenshots.image_path,
-        &ffmpeg_path.to_string_lossy(),
-        &base_name,
-    )?;
-    let (screenshots, thumbnails) = generate_screenshots(
-        &video_files[0],
-        &config.paths.screenshots_dir,
-        &ffmpeg_path.to_string_lossy(),
-        &ffprobe_path.to_string_lossy(),
-        &seedpool_config.screenshots.remote_path,
-        &seedpool_config.screenshots.image_path,
-        &base_name,
-    )?;
+
+    // Generate screenshots using ImgBB or Seedpool CDN
+    let (screenshots, thumbnails) = if let Some(api_key) = imgbb_api_key {
+        if api_key.is_empty() {
+            log::warn!("ImgBB API key is empty. Falling back to Seedpool CDN for screenshots.");
+            generate_screenshots(
+                &video_files[0],
+                &config.paths.screenshots_dir,
+                &ffmpeg_path.to_string_lossy(),
+                &ffprobe_path.to_string_lossy(),
+                &seedpool_config.screenshots.remote_path,
+                &seedpool_config.screenshots.image_path,
+                &_sanitized_name,
+            )?
+        } else {
+            generate_screenshots_imgbb(&video_files[0], ffmpeg_path, ffprobe_path, api_key)?
+        }
+    } else {
+        generate_screenshots(
+            &video_files[0],
+            &config.paths.screenshots_dir,
+            &ffmpeg_path.to_string_lossy(),
+            &ffprobe_path.to_string_lossy(),
+            &seedpool_config.screenshots.remote_path,
+            &seedpool_config.screenshots.image_path,
+            &_sanitized_name,
+        )?
+    };
+
+    let sample_url = if imgbb_api_key.is_some() && !imgbb_api_key.unwrap_or("").is_empty() {
+        String::new()
+    } else {
+        generate_sample(
+            &video_files[0],
+            &config.paths.screenshots_dir,
+            &seedpool_config.screenshots.remote_path,
+            &seedpool_config.screenshots.image_path,
+            &ffmpeg_path.to_string_lossy(),
+            &base_name,
+        )?
+    };
+
+    // Fetch external IDs
     let (imdb_id, tvdb_id) = fetch_external_ids(tmdb_id, &release_type, &config.general.tmdb_api_key)
         .unwrap_or((None, None));
     let resolution_id = get_seedpool_resolution_id(input_path);
@@ -416,10 +448,11 @@ pub fn process_music_release(
         .to_string_lossy()
         .to_string();
     let torrent_file = create_torrent(
-        &[Path::new(input_path).to_string_lossy().to_string()], // Convert PathBuf to String
+        input_path, // Pass the input path directly
         &config.paths.torrent_dir,
         &seedpool_config.settings.announce_url,
         &mkbrr_path.to_string_lossy(),
+        true, // Enable filtering for Standard Upload Mode
     )?;
 
     // Generate the BBCode description
