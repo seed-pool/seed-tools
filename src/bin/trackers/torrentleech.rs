@@ -97,10 +97,11 @@ pub fn process_torrentleech_release(
     }
 
     let torrent_file = create_torrent(
-        &video_files,
+        &video_files[0], // Use the first video file as a &str
         &config.paths.torrent_dir,
         &torrentleech_config.general.announce_url_1,
         &mkbrr_path.to_string_lossy(),
+        false, // Disable filtering for non-Standard Upload Mode
     )?;
 
     let nfo_path = format!("{}/{}.nfo", config.paths.torrent_dir, release_name);
