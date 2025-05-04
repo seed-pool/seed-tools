@@ -1,6 +1,6 @@
 [package]
 name = "seed-tools"
-version = "0.3.5"
+version = "0.4.4"
 edition = "2024"
 
 [dependencies]
@@ -33,6 +33,13 @@ walkdir = "2.3.3"
 tail = "0.3"
 notify = "5.1"
 winnow = "0.5"
+vte = "0.11"
+ctrlc = "3.2"
+cargo-bundle = "0.6"
+
+[package.metadata.bundle]
+resources = ["binaries/"]
+
 [profile.release]
 lto = true
 
