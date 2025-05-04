@@ -1,11 +1,12 @@
-# Seed-Tools v0.42 (Linux)
+# Seed-Tools v0.44 (Linux)
 
 ![Screenshot](images/seed-toolsv0.42.png)
 
 ![Screenshot](images/seed-toolsv0.42b.png)
 
-### Seed-Tools v0.42 brings:
+### Seed-Tools v0.44 brings:
 
+1. imgbb screenshot uploads
 1. Fully clickable UI - just run ./seed-tools
 1. Music album uploads with album covers uploaded to seedpool CDN
 1. Automatic upload type detection for Movies/TV Shows/Boxsets/Music Albums
