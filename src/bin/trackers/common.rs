@@ -67,12 +67,12 @@ pub fn process_custom_upload(
         _ => return Err("Invalid tracker specified".to_string()),
     };
 
-    // Create the torrent file using mkbrr
     let torrent_file = create_torrent(
-        &[input_path.to_string()],
+        input_path, // Pass the input path directly as a &str
         "./torrents", // Output directory for torrents
         &announce_url,
         mkbrr_path, // Path to mkbrr binary
+        false, // Disable filtering for non-Standard Upload Mode
     )?;
 
     // Check for an .nfo file
