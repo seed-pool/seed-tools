@@ -29,6 +29,7 @@ use std::{
     thread,
     time::Duration,
 };
+use vte::{Parser, Perform};
 use crate::types::PreflightCheckResult;
 use crate::utils;
 use std::fs::OpenOptions;
@@ -76,6 +77,31 @@ impl<'a> UIContent<'a> {
     }
 }
 
+struct TerminalEmulator {
+    buffer: Arc<Mutex<Vec<String>>>,
+}
+
+impl TerminalEmulator {
+    fn new() -> Self {
+        Self {
+            buffer: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn feed(&self, data: &str) {
+        let mut buffer = self.buffer.lock().unwrap();
+        buffer.push(data.to_string());
+        if buffer.len() > 100 {
+            buffer.remove(0); // Keep the buffer size manageable
+        }
+    }
+
+    fn render(&self) -> Vec<String> {
+        let buffer = self.buffer.lock().unwrap();
+        buffer.clone()
+    }
+}
+
 pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
     // Set up a panic hook to restore the terminal state on panic
     let original_hook = std::panic::take_hook();
@@ -108,15 +134,18 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
     let mut exit_requested = false;
     let mut showing_log = false; // Flag to indicate if we're showing the log
 
-    let tracker_options = vec!["✔️ Select All", "🌀 seedpool [SP]", "🐛 TorrentLeech [TL]"];
+    let tracker_options = vec!["✔️ Select All", "🐳 seedpool [SP]", "🐛 TorrentLeech [TL]"];
     let log_output = Arc::new(Mutex::new(Vec::<String>::new()));
     let log_scroll_offset = Arc::new(Mutex::new(0)); // Shared scroll offset for logs
     let mut preflight_check_result: Option<PreflightCheckResult> = None;
     let mut upload_running = false; // Tracks if the upload process is running
     let mut preflight_check_running = false;
+    let terminal_emulator = Arc::new(TerminalEmulator::new());
+    let log_file_path = "seed-tools.log";
+    start_log_tail(Arc::clone(&terminal_emulator), log_file_path);
     // Channel for notifying the main loop of log updates
     let (tx, rx) = mpsc::channel::<()>();
-
+    let mut terminal_scroll_offset = 0; 
     // Initial UI render
     terminal.draw(|f| {
         render_ui(
@@ -129,11 +158,11 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
             tracker_scroll_offset,
             &tracker_options,
             showing_log,
-            &log_output,
-            &log_scroll_offset,
+            &terminal_emulator, // Pass the terminal emulator for logs
+            &log_scroll_offset, // Add the missing argument
             &preflight_check_result,
             upload_running,
-            preflight_check_running, // Pass the new variables
+            preflight_check_running,
         );
     })?;
 
@@ -156,11 +185,11 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
                     tracker_scroll_offset,
                     &tracker_options,
                     showing_log,
-                    &log_output,
-                    &log_scroll_offset,
+                    &terminal_emulator, // Pass the terminal emulator for logs
+                    &log_scroll_offset, // Add the missing argument
                     &preflight_check_result,
                     upload_running,
-                    preflight_check_running, // Pass the new variables
+                    preflight_check_running,
                 );
             })?;
         }
@@ -178,7 +207,7 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
                         .constraints([
                             Constraint::Length(5),  // Top section (Status + Buttons)
                             Constraint::Length(1),  // Section for "Files" and "Logs" buttons
-                            Constraint::Min(1),     // Middle section (File List + Tracker or Log Output)
+                            Constraint::Min(1),     // Middle section (File List or Terminal + Tracker List)
                             Constraint::Length(5),  // Pre-flight Check section
                             Constraint::Length(3),  // Bottom section (Quit message)
                         ])
@@ -195,20 +224,21 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
                     let middle_chunks = Layout::default()
                         .direction(Direction::Horizontal)
                         .constraints([
-                            Constraint::Percentage(80), // File List or Log content
+                            Constraint::Percentage(80), // File List or Terminal content
                             Constraint::Percentage(20), // Tracker List
                         ])
                         .split(chunks[2]);
         
                     let files_logs_section = chunks[1]; // Section for "Files" and "Logs" buttons
-                    let buttons_y = files_logs_section.y - 1; // Fixed Y position for the buttons
-                        
+                    let buttons_y = files_logs_section.y -1; // Fixed Y position for the buttons
+        
                     // Define the X ranges for the buttons
                     let files_button_start_x = files_logs_section.x + 2; // Start X position of "🖥️ Files" button
                     let files_button_end_x = files_button_start_x + 5;  // End X position of "🖥️ Files" button
                     let logs_button_start_x = files_button_end_x + 5;   // Start X position of "📃 Logs" button
                     let logs_button_end_x = logs_button_start_x + 8;    // End X position of "📃 Logs" button
-                        
+        
+                    // Handle "Files" and "Logs" button clicks
                     if y == buttons_y {
                         if x >= files_button_start_x && x < files_button_end_x {
                             // "Files" button clicked
@@ -216,6 +246,10 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
                         } else if x >= logs_button_start_x && x < logs_button_end_x {
                             // "Logs" button clicked
                             showing_log = true;
+        
+                            // Start tailing the log file in the terminal emulator
+                            let log_file_path = "seed-tools.log";
+                            start_log_tail(Arc::clone(&terminal_emulator), log_file_path);
                         }
                     }
         
@@ -227,21 +261,14 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
                             if input_path.is_some() && !selected_trackers.is_empty() {
                                 showing_log = true; // Switch to log view
                                 upload_running = true; // Set spinner state to true
-                        
-                                // Define the log file path
-                                let log_file_path = PathBuf::from("seed-tools.log");
-                        
-                                start_log_refresh(
-                                    log_file_path.clone(),
-                                    Arc::clone(&log_output),
-                                    tx.clone(),
-                                    Arc::clone(&log_scroll_offset), // Pass the log_scroll_offset
-                                );
-                        
+        
+                                // Start tailing the log file in the terminal emulator
+                                let log_file_path = "seed-tools.log";
+                                start_log_tail(Arc::clone(&terminal_emulator), log_file_path);
+        
                                 // Start the upload process in a separate thread
                                 let input_path = input_path.clone();
                                 let selected_trackers = selected_trackers.clone();
-                                let tx = tx.clone();
                                 thread::spawn({
                                     let log_output = Arc::clone(&log_output);
                                     move || {
@@ -251,10 +278,9 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
                                             &None,
                                             log_output,
                                         );
-                        
+        
                                         // Reset spinner state and notify the main loop
                                         upload_running = false;
-                                        let _ = tx.send(());
                                     }
                                 });
                             } else {
@@ -264,37 +290,13 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
                             if let Some(input_path) = &input_path {
                                 let input_path = input_path.clone();
                                 let log_output = Arc::clone(&log_output);
-                                let tx = tx.clone();
-                            
-                                // Set spinner state to true
-                                let spinner_running = Arc::new(Mutex::new(true));
-                                let spinner_running_clone = Arc::clone(&spinner_running);
-                            
+        
                                 thread::spawn(move || {
                                     log_output.lock().unwrap().push("Running Pre-flight Check...".to_string());
-                            
+        
                                     // Define the pre-flight log file path
                                     let preflight_log_path = PathBuf::from("pre-flight.log");
-                            
-                                    // Start a spinner animation in a separate thread
-                                    let spinner_tx = tx.clone();
-                                    thread::spawn(move || {
-                                        let spinner_frames = vec!["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-                                        let mut frame_index = 0;
-                            
-                                        while *spinner_running_clone.lock().unwrap() {
-                                            // Update the spinner frame
-                                            let spinner_frame = spinner_frames[frame_index];
-                                            frame_index = (frame_index + 1) % spinner_frames.len();
-                            
-                                            // Notify the main loop to redraw the UI with the updated spinner
-                                            let _ = spinner_tx.send(());
-                            
-                                            // Sleep briefly before updating the spinner
-                                            thread::sleep(Duration::from_millis(100));
-                                        }
-                                    });
-                            
+        
                                     // Run the seed-tools command with --pre and redirect output to pre-flight.log
                                     let status = Command::new("./seed-tools")
                                         .arg("--pre")
@@ -306,7 +308,7 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
                                             File::create(&preflight_log_path).expect("Failed to create pre-flight.log"),
                                         ))
                                         .status();
-                            
+        
                                     match status {
                                         Ok(status) if status.success() => {
                                             log_output.lock().unwrap().push("Pre-flight Check completed.".to_string());
@@ -321,15 +323,6 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
                                             log_output.lock().unwrap().push(format!("Failed to run Pre-flight Check: {}", err));
                                         }
                                     }
-                            
-                                    // Stop the spinner animation
-                                    *spinner_running.lock().unwrap() = false;
-                            
-                                    // Parse the pre-flight log and update the result
-                                    let log_data = parse_preflight_log(&preflight_log_path);
-                            
-                                    // Notify the main loop to update the UI
-                                    let _ = tx.send(());
                                 });
                             } else {
                                 log_output.lock().unwrap().push("Error: No input path selected.".to_string());
@@ -344,7 +337,6 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
                         if clicked_index < tracker_options.len() {
                             let tracker = tracker_options[clicked_index].to_string();
                             if tracker == "✔️ Select All" {
-                                // Toggle all trackers on/off
                                 if selected_trackers.len() == tracker_options.len() - 1 {
                                     selected_trackers.clear(); // Deselect all trackers
                                 } else {
@@ -399,19 +391,18 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
                             tracker_scroll_offset,
                             &tracker_options,
                             showing_log,
-                            &log_output,
-                            &log_scroll_offset,
+                            &terminal_emulator, // Pass the terminal emulator for logs
+                            &log_scroll_offset, // Add the missing argument
                             &preflight_check_result,
                             upload_running,
-                            preflight_check_running, // Pass the new variables
+                            preflight_check_running,
                         );
                     })?;
                 }
                 crossterm::event::MouseEventKind::ScrollUp => {
                     if showing_log {
-                        let mut log_scroll_offset = log_scroll_offset.lock().unwrap();
-                        if *log_scroll_offset > 0 {
-                            *log_scroll_offset -= 1; // Scroll up
+                        if terminal_scroll_offset > 0 {
+                            terminal_scroll_offset -= 1; // Scroll up in the terminal window
                         }
                     } else if scroll_offset > 0 {
                         scroll_offset -= 1; // Scroll up in the file list
@@ -419,10 +410,9 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 crossterm::event::MouseEventKind::ScrollDown => {
                     if showing_log {
-                        let log_content = log_output.lock().unwrap();
-                        let mut log_scroll_offset = log_scroll_offset.lock().unwrap();
-                        if *log_scroll_offset + 1 < log_content.len() {
-                            *log_scroll_offset += 1; // Scroll down
+                        let terminal_output = terminal_emulator.render();
+                        if terminal_scroll_offset + 1 < terminal_output.len() {
+                            terminal_scroll_offset += 1; // Scroll down in the terminal window
                         }
                     } else if scroll_offset + 1 < file_list.len() {
                         scroll_offset += 1; // Scroll down in the file list
@@ -443,11 +433,11 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
                     tracker_scroll_offset,
                     &tracker_options,
                     showing_log,
-                    &log_output,
-                    &log_scroll_offset,
+                    &terminal_emulator, // Pass the terminal emulator for logs
+                    &log_scroll_offset, // Add the missing argument
                     &preflight_check_result,
                     upload_running,
-                    preflight_check_running, // Pass the new variables
+                    preflight_check_running,
                 );
             })?;
         } else if let Event::Key(key) = event::read()? {
@@ -477,12 +467,11 @@ fn render_ui(
     tracker_scroll_offset: usize,
     tracker_options: &[&str],
     showing_log: bool,
-    log_output: &Arc<Mutex<Vec<String>>>,
+    terminal_emulator: &Arc<TerminalEmulator>, // Pass terminal_emulator instead of log_output
     log_scroll_offset: &Arc<Mutex<usize>>,
     preflight_check_result: &Option<PreflightCheckResult>,
     upload_running: bool,
     preflight_check_running: bool,
-    
 ) {
     // Define the layout
     let size = f.size();
@@ -643,38 +632,20 @@ fn render_ui(
 
     // Render File List or Log Section
     if showing_log {
-        let log_content = log_output.lock().unwrap();
-        let mut log_scroll_offset = log_scroll_offset.lock().unwrap();
-    
-        let visible_lines = middle_chunks[0].height as usize; // Full height for logs
-        let total_lines = log_content.len();
-    
-        // Automatically scroll to the bottom if the user hasn't manually scrolled up
-        if *log_scroll_offset >= total_lines.saturating_sub(visible_lines) {
-            *log_scroll_offset = total_lines.saturating_sub(visible_lines);
-        }
-    
-        // Ensure the scroll offset is clamped to valid values
-        *log_scroll_offset = (*log_scroll_offset).max(0);
-    
-        // Always display the latest entries unless manually scrolled up
-        let start_line = if *log_scroll_offset >= total_lines.saturating_sub(visible_lines) {
-            total_lines.saturating_sub(visible_lines)
-        } else {
-            *log_scroll_offset
-        };
-    
-        let log_lines: Vec<Spans> = log_content
-            .iter()
-            .skip(start_line)
-            .take(visible_lines)
-            .map(|line| Spans::from(Span::raw(line)))
-            .collect();
-    
-        let log_widget = Paragraph::new(log_lines)
-            .block(Block::default().borders(Borders::ALL))
-            .style(Style::default().bg(Color::Rgb(8, 8, 32))); // Background color
-        f.render_widget(log_widget, middle_chunks[0]);
+        // Render the terminal emulator
+        let mut terminal_scroll_offset = 0; 
+    let terminal_output = terminal_emulator.render();
+    let visible_lines = terminal_output
+        .iter()
+        .skip(terminal_scroll_offset) // Skip lines based on the scroll offset
+        .take(middle_chunks[0].height as usize) // Take only the visible lines
+        .map(|line| Spans::from(Span::raw(line.clone())))
+        .collect::<Vec<_>>();
+
+    let terminal_widget = Paragraph::new(visible_lines)
+        .block(Block::default().borders(Borders::ALL)) // Remove the title
+        .style(Style::default().bg(Color::Black).fg(Color::White));
+    f.render_widget(terminal_widget, middle_chunks[0]);
     } else {
         // Render the file list
         let mut visible_files = vec!["🗂️ ..".to_string()];
@@ -989,7 +960,7 @@ fn activate_upload(
 
     for tracker in selected_trackers {
         match tracker.as_str() {
-            "🌀 seedpool [SP]" => args.push("--SP".to_string()),
+            "🐳 seedpool [SP]" => args.push("--SP".to_string()),
             "🐛 TorrentLeech [TL]" => args.push("--TL".to_string()),
             _ => {}
         }
@@ -1364,4 +1335,25 @@ fn parse_preflight_log(preflight_log_path: &Path) -> (Vec<String>, bool) {
     }
 
     (log_data, is_pending)
+}
+
+fn start_log_tail(terminal_emulator: Arc<TerminalEmulator>, log_file_path: &str) {
+    let log_file_path = log_file_path.to_string(); // Clone the path into a String
+    thread::spawn(move || {
+        let mut child = Command::new("tail")
+            .arg("-f")
+            .arg(log_file_path) // Use the cloned String
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("Failed to start tail process");
+
+        if let Some(stdout) = child.stdout.take() {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines() {
+                if let Ok(line) = line {
+                    terminal_emulator.feed(&line);
+                }
+            }
+        }
+    });
 }
