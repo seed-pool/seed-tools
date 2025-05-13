@@ -109,7 +109,7 @@ pub struct Config {
     pub paths: PathsConfig,
     pub qbittorrent: Vec<QbittorrentConfig>,
     pub deluge: DelugeConfig,
-    pub imgbb: Option<ImgBBConfig>,
+    pub imgbb: Option<ImgBBConfig>, // Add this field
 }
 
 #[derive(Deserialize)]
