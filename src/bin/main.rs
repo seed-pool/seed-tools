@@ -10,7 +10,9 @@ use simplelog::{Config as SimpleLogConfig, CombinedLogger, WriteLogger};
 use std::fs::File;
 use std::error::Error;
 use reqwest::blocking::Client;
-use seed_tools::utils::generate_release_name;use seed_tools::types::{Config, SeedpoolConfig, TorrentLeechConfig, QbittorrentConfig, DelugeConfig};
+use seed_tools::utils;
+use seed_tools::utils::generate_release_name;
+use seed_tools::types::{Config, SeedpoolConfig, TorrentLeechConfig, QbittorrentConfig, DelugeConfig};
 use seed_tools::sync;
 use seed_tools::irc::launch_irc_client;
 use seed_tools::types::PreflightCheckResult;
@@ -290,6 +292,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
             if !cli.sp && !cli.tl {
                 error!("Custom upload (-c/--custom-cat-type) requires either --SP or --TL to be specified.");
                 return Ok(()); // Exit cleanly
+            }
+
+            if category_type_arg == "0720" {
+                info!("Detected eBook upload mode with argument: {}", category_type_arg);
+            
+                // Assuming `config` and `seedpool_config` are already initialized
+                if let Err(e) = utils::process_ebook_upload(input_path_str, &main_config, &seedpool_config) {
+                    error!("Error processing eBook upload: {}", e);
+                } else {
+                    info!("Successfully processed eBook upload.");
+                }
+                return Ok(()); // Exit after eBook upload
             }
 
             if category_type_arg.len() != 4 || !category_type_arg.chars().all(|c| c.is_digit(10)) {
