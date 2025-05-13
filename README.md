@@ -1,4 +1,4 @@
-# Seed-Tools v0.44 (Linux)
+# Seed-Tools v0.49 (Linux)
 
 ![Screenshot](images/seed-toolsv0.42.png)
 
@@ -43,16 +43,22 @@ This assumes a Movie or TV show upload. It will fetch tmdb/imdb/tvdb ids, create
 #### 📤 Non-Video Upload (Skip All Checks)
 Non-video upload, skip all filechecks and processing. The -0000 argument will be used as category id and type id for upload. i.e pass -1614 to uploads a PC game.
 ```
-./seed-tools.sh <input_path> -SP -0000
+./seed-tools <input_path> --SP -c 0000
+```
+
+#### 📤 E-Book Upload
+E-Book upload, fetch cover art, book details, and About the Author via Open Library API.
+```
+./seed-tools <input_path> --SP -c 0720
 ```
 
 #### 🔄 Sync Mode (Cross-seeding)
 Scans all torrents currently seeding in qBittorrent, checks Seedpool for matches, and adds any matches back to qBittorrent for cross-seeding.
 ```
-./seed-tools.sh -sync
+./seed-tools -sync
 ```
 
 #### 🔄 Pre-Flight Check
 Collect TMDB/IMDB/TVDB IDs, audio track languages, and perform a dupe check on a release.
 ```
-./seed-tools.sh -pre
+./seed-tools -pre
