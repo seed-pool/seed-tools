@@ -1,41 +1,56 @@
 use reqwest::blocking::{multipart::Form, Client};
 use reqwest::blocking::ClientBuilder;
 use reqwest::cookie::Jar;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use regex::Regex;
-use log::{info, error};
+use epub::doc::EpubDoc;
+use log::{info, error, warn};
 use std::process::Command;
+use std::collections::HashSet;
 use serde_json::{Value, json};
 use rand::Rng;
 use std::os::unix::fs::PermissionsExt;
 use std::fs::{self, Permissions};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use crate::types::{PathsConfig, QbittorrentConfig, VideoSettings, DelugeConfig};
+use crate::types::{PathsConfig, SeedpoolConfig, Config, QbittorrentConfig, VideoSettings, DelugeConfig};
+
 pub fn generate_release_name(base_name: &str) -> String {
     let mut release_name = base_name.to_string();
-    release_name = Regex::new(r"\.(mkv|mp4|m4b|avi|mov|flv|wmv|ts)$")
+
+    // Remove file extensions
+    release_name = Regex::new(r"\.(epub|mobi|pdf|txt|mkv|mp4|m4b|avi|mov|flv|wmv|ts)$")
         .unwrap()
         .replace(&release_name, "")
-        .to_string(); // Remove file extensions
+        .to_string();
+
+    // Replace non-alphanumeric characters with dots
     release_name = Regex::new(r"[^A-Za-z0-9+\-]")
         .unwrap()
         .replace_all(&release_name, ".")
-        .to_string(); // Replace non-alphanumeric characters with dots
+        .to_string();
+
+    // Replace multiple dots with a single dot
     release_name = Regex::new(r"\.\.+")
         .unwrap()
         .replace_all(&release_name, ".")
-        .to_string(); // Replace multiple dots with a single dot
+        .to_string();
+
+    // Replace mixed dot-dash patterns
     release_name = Regex::new(r"-\.+|\.-+")
         .unwrap()
         .replace_all(&release_name, "-")
-        .to_string(); // Replace mixed dot-dash patterns
+        .to_string();
+
+    // Remove trailing dots
     release_name = Regex::new(r"\.$")
         .unwrap()
         .replace(&release_name, "")
-        .to_string(); // Remove trailing dots
-    release_name.trim_start_matches('.').to_string() // Remove leading dots
+        .to_string();
+
+    // Remove leading dots
+    release_name.trim_start_matches('.').to_string()
 }
 
 pub fn find_video_files<T>(
@@ -651,8 +666,8 @@ pub fn default_non_video_description() -> String {
     format!(
         "[b][size=12][color=#757575]Created with mkbrr, ffmpeg, and mediainfo. Posted to this fine tracker with seed-tools.[/color][/size][/b]
         
-        [url=https://seedpool.org][img]https://cdn.seedpool.org/sp.png[/img][/url]  \
-        [url=https://github.com/autobrr][img]https://cdn.seedpool.org/autobrr.png[/img][/url]  \
+        [url=https://github.com/seed-pool/seed-tools][img]https://cdn.seedpool.org/sp.png[/img][/url]  \
+        [url=https://github.com/autobrr/mkbrr][img]https://cdn.seedpool.org/mkbrr.png[/img][/url]  \
         [url=https://www.rust-lang.org][img]https://cdn.seedpool.org/rust.png[/img][/url]"
     )
 }
@@ -952,4 +967,473 @@ pub fn generate_screenshots_imgbb(
     }
 
     Ok((screenshots, thumbnails))
+}
+
+pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: &SeedpoolConfig) -> Result<(), String> {
+    use reqwest::blocking::Client;
+    use std::fs;
+
+    // Check if the input path is a directory
+    let input_path = if Path::new(input_path).is_dir() {
+        // Search for the first .epub file in the directory
+        let epub_file = fs::read_dir(input_path)
+            .map_err(|e| format!("Failed to read directory '{}': {}", input_path, e))?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .find(|path| path.extension().map_or(false, |ext| ext.eq_ignore_ascii_case("epub")))
+            .ok_or_else(|| format!("No .epub files found in directory '{}'", input_path))?;
+
+        epub_file.to_string_lossy().to_string()
+    } else {
+        input_path.to_string()
+    };
+
+    // Extract metadata from the EPUB file
+    let (mut title, mut author) = extract_metadata_from_epub(&input_path)?;
+    if title.is_none() && author.is_none() {
+        return Err("Failed to extract title and author from EPUB metadata.".to_string());
+    }
+
+    let mut title = title.unwrap_or_else(|| "Unknown Title".to_string());
+    let mut author = author.unwrap_or_else(|| "Unknown Author".to_string());
+
+    info!("Processing eBook upload for title: '{}' and author: '{}'", title, author);
+
+    // Fetch book and author details from Open Library
+    let query = format!(
+        "https://openlibrary.org/search.json?title={}&author={}",
+        urlencoding::encode(&title),
+        urlencoding::encode(&author)
+    );
+
+    info!("Querying Open Library API: {}", query);
+
+    let client = Client::new();
+    let response = client
+        .get(&query)
+        .send()
+        .map_err(|e| format!("Failed to query Open Library API: {}", e))?;
+
+    let mut open_library_work_key = String::new();
+    let mut open_library_author_key = String::new();
+    let mut cover_id: Option<u64> = None;
+
+    if response.status().is_success() {
+        let json: serde_json::Value = response
+            .json()
+            .map_err(|e| format!("Failed to parse Open Library API response: {}", e))?;
+
+        // Attempt to extract the first result
+        if let Some(first_result) = json["docs"]
+            .as_array()
+            .and_then(|docs| docs.get(0))
+        {
+            // Use Open Library's title and author if available
+            let ol_title = first_result["title"]
+                .as_str()
+                .unwrap_or(&title)
+                .to_string();
+            let ol_author = first_result["author_name"]
+                .as_array()
+                .and_then(|authors| authors.get(0))
+                .and_then(|author| author.as_str())
+                .unwrap_or(&author)
+                .to_string();
+            
+            info!("Using title: '{}' and author: '{}'", ol_title, ol_author);
+
+            // Update title and author with Open Library values
+            title = ol_title;
+            author = ol_author;
+
+            // Extract Open Library work and author keys
+            open_library_work_key = first_result["key"]
+                .as_str()
+                .unwrap_or("")
+                .trim_start_matches("/works/")
+                .to_string();
+            open_library_author_key = first_result["author_key"]
+                .as_array()
+                .and_then(|keys| keys.get(0))
+                .and_then(|key| key.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            // Extract cover ID
+            cover_id = first_result["cover_i"].as_u64();
+        }
+    }
+
+    // Generate the BBCode description and fetch subjects
+    let (description, subjects) = generate_ebook_bbcode_description(
+        &title,
+        &author,
+        &open_library_work_key,
+        &open_library_author_key,
+        &client,
+    )?;
+    
+    // Convert subjects to a comma-separated string for keywords
+    let keywords = subjects.join(", "); // Convert subjects to a comma-separated string
+    info!("Final keywords for upload: {}", keywords);
+
+    // Sanitize the file name and rename the .epub file
+    let sanitized_author = {
+        let parts: Vec<&str> = author.split_whitespace().collect();
+        if parts.len() > 1 {
+            format!("{}, {}", parts.last().unwrap(), parts[..parts.len() - 1].join(" "))
+        } else {
+            author.to_string()
+        }
+    };
+    let sanitized_title = title
+    .replace(".", " ") // Replace dots with spaces
+    .replace(":", " ") // Replace colons with spaces
+    .replace("'", "")  // Remove apostrophes
+    .replace("/", " ") // Replace slashes with spaces
+    .replace("\\", " ") // Replace backslashes with spaces
+    .replace("&", "and") // Replace ampersands with "and"
+    .replace("?", "") // Remove question marks
+    .replace("*", ""); // Remove asterisks
+    let new_epub_name = format!("{} - {}.epub", sanitized_author, sanitized_title);
+    let new_epub_path = Path::new(&input_path).with_file_name(new_epub_name);
+
+    fs::rename(&input_path, &new_epub_path)
+        .map_err(|e| format!("Failed to rename EPUB file: {}", e))?;
+
+    info!(
+        "Renamed EPUB file to: {}",
+        new_epub_path.file_name().unwrap_or_default().to_string_lossy()
+    );
+
+    // Generate the torrent file
+    let base_name = new_epub_path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let torrent_file = create_torrent(
+        new_epub_path.to_str().unwrap(),
+        &config.paths.torrent_dir,
+        &seedpool_config.settings.announce_url,
+        &config.paths.mkbrr,
+        true, // Enable filtering for Standard Upload Mode
+    )?;
+
+    // Prepare the upload form
+    let mut form = Form::new()
+        .file("torrent", &torrent_file)
+        .map_err(|e| format!("Failed to attach torrent file: {}", e))?
+        .text("name", base_name.clone())
+        .text("category_id", "7") // eBooks category
+        .text("type_id", "20") // Default type for eBooks
+        .text("tmdb", "0")
+        .text("imdb", "0")
+        .text("tvdb", "0")
+        .text("anonymous", "0")
+        .text("description", description)
+        .text("keywords", keywords) // Add the keywords field
+        .text("mal", "0")
+        .text("igdb", "0")
+        .text("stream", "0")
+        .text("sd", "0");
+
+    // Send the upload request
+    let response = client
+        .post(&seedpool_config.settings.upload_url)
+        .header("Authorization", format!("Bearer {}", seedpool_config.general.api_key))
+        .multipart(form)
+        .send()
+        .map_err(|e| format!("Failed to send request to Seedpool: {}", e))?;
+
+    let status = response.status();
+    let response_text = response.text().unwrap_or_else(|_| "Failed to read response body".to_string());
+    info!("Seedpool API Response: {}", response_text);
+
+    if !status.is_success() {
+        return Err(format!(
+            "Failed to upload to Seedpool. HTTP Status: {}. Response: {}",
+            status, response_text
+        ));
+    }
+
+    // Extract the torrent ID from the response
+    let torrent_id = extract_torrent_id(&response_text)?;
+
+    // Fetch the cover image using the cover ID from Open Library
+    if let Some(cover_id) = cover_id {
+        let cover_url = format!("https://covers.openlibrary.org/b/id/{}-L.jpg", cover_id);
+        info!("Fetching cover image from: {}", cover_url);
+
+        let cover_response = client
+            .get(&cover_url)
+            .send()
+            .map_err(|e| format!("Failed to fetch cover image: {}", e))?;
+
+        if cover_response.status().is_success() {
+            // Save the cover image locally
+            let cover_path = new_epub_path.with_extension("jpg");
+            std::fs::write(&cover_path, cover_response.bytes().map_err(|e| format!("Failed to read cover image bytes: {}", e))?)
+                .map_err(|e| format!("Failed to save cover image: {}", e))?;
+
+            info!("Saved cover image to: {}", cover_path.display());
+
+            // Rename the cover image to include the torrent ID
+            let renamed_cover_path = cover_path.with_file_name(format!("torrent-cover_{}.jpg", torrent_id));
+            std::fs::rename(&cover_path, &renamed_cover_path)
+                .map_err(|e| format!("Failed to rename cover image: {}", e))?;
+
+            // Set permissions to 777 for the renamed cover image
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+
+                info!("Setting permissions to 777 for cover image: {}", renamed_cover_path.display());
+                fs::set_permissions(&renamed_cover_path, fs::Permissions::from_mode(0o777))
+                    .map_err(|e| format!("Failed to set permissions for cover image '{}': {}", renamed_cover_path.display(), e))?;
+                info!("Successfully set permissions to 777 for cover image: {}", renamed_cover_path.display());
+            }
+
+            // Upload the cover image to the CDN using SCP
+            let remote_covers_path = format!(
+                "{}/albumcovers",
+                seedpool_config.screenshots.remote_path.trim_end_matches('/')
+            );
+            let scp_command = Command::new("scp")
+                .arg(&renamed_cover_path)
+                .arg(&remote_covers_path)
+                .output()
+                .map_err(|e| format!("Failed to upload cover image via SCP: {}", e))?;
+
+            if !scp_command.status.success() {
+                return Err(format!(
+                    "Failed to upload cover image via SCP. Error: {}",
+                    String::from_utf8_lossy(&scp_command.stderr)
+                ));
+            }
+
+            info!("Successfully uploaded cover image to CDN: {}", remote_covers_path);
+        } else {
+            warn!("Failed to fetch cover image with status: {}. Skipping cover image fetch.", cover_response.status());
+        }
+    }
+
+    // Add torrent to all qBittorrent instances
+    add_torrent_to_all_qbittorrent_instances(
+        &[torrent_file.clone()],
+        &config.qbittorrent,
+        &config.deluge,
+        new_epub_path.to_str().unwrap(),
+        &config.paths,
+    )?;
+
+    Ok(())
+}
+
+fn extract_torrent_id(response_text: &str) -> Result<String, String> {
+    // Unescape any escaped slashes
+    let response_text = response_text.replace(r"\/", "/");
+
+    // Updated regex to match the numeric ID followed by a dot and a 32-character hash
+    let re = regex::Regex::new(r#"/download/(\d+)\.[a-fA-F0-9]{32}"#).map_err(|e| format!("Failed to compile regex: {}", e))?;
+    if let Some(captures) = re.captures(&response_text) {
+        if let Some(torrent_id) = captures.get(1) {
+            return Ok(torrent_id.as_str().to_string());
+        }
+    }
+    Err("Failed to extract torrent ID from response.".to_string())
+}
+
+fn extract_metadata_from_epub(epub_path: &str) -> Result<(Option<String>, Option<String>), String> {
+    let mut epub = EpubDoc::new(epub_path)
+        .map_err(|e| format!("Failed to open EPUB file '{}': {}", epub_path, e))?;
+
+    // Extract title from metadata
+    let title = epub.metadata.get("title").and_then(|titles| titles.get(0).cloned());
+
+    // Extract author from metadata
+    let author = epub.metadata.get("creator").and_then(|creators| creators.get(0).cloned());
+
+    Ok((title, author))
+}
+
+pub fn generate_ebook_bbcode_description(
+    title: &str,
+    author: &str,
+    open_library_work_key: &str,
+    open_library_author_key: &str,
+    client: &reqwest::blocking::Client,
+) -> Result<(String, Vec<String>), String> {
+    let mut description = String::new();
+    let mut subjects = Vec::new();
+
+    // Fetch book details from Open Library
+    let work_url = format!("https://openlibrary.org/works/{}.json", open_library_work_key);
+    let work_response = client
+        .get(&work_url)
+        .send()
+        .map_err(|e| format!("Failed to fetch book details: {}", e))?;
+    let work_json: Value = work_response
+        .json()
+        .map_err(|e| format!("Failed to parse book details: {}", e))?;
+
+    // Extract subjects (categories) but do not add them to the description
+    if let Some(subjects_array) = work_json["subjects"].as_array() {
+        subjects = subjects_array
+            .iter()
+            .filter_map(|s| s.as_str().map(|s| s.to_string()))
+            .collect();
+    }
+
+    // Fetch author details from Open Library
+    let author_url = format!("https://openlibrary.org/authors/{}.json", open_library_author_key);
+    let author_response = client
+        .get(&author_url)
+        .send()
+        .map_err(|e| format!("Failed to fetch author details: {}", e))?;
+    let author_json: Value = author_response
+        .json()
+        .map_err(|e| format!("Failed to parse author details: {}", e))?;
+
+    // Add book title and author
+    description.push_str(&format!(
+        "[center][b][size=32][color=#2E86C1]{}[/color][/size][/b][/center]\n\n",
+        work_json["title"].as_str().unwrap_or(title)
+    ));
+    description.push_str(&format!(
+        "[center][b][size=16][color=#117A65]By:[/color][/size][/b] [i]{}[/i][/center]\n\n",
+        author_json["name"].as_str().unwrap_or(author)
+    ));
+
+    // Add book description
+    if let Some(book_description) = work_json["description"]
+        .as_str()
+        .or_else(|| work_json["description"]["value"].as_str())
+    {
+        // Detect and extract links from the description
+        let link_regex = regex::Regex::new(r#"https?://[^\s\]]+"#).unwrap();
+        let mut extracted_links = Vec::new();
+
+        for capture in link_regex.captures_iter(book_description) {
+            if let Some(link) = capture.get(0) {
+                extracted_links.push(link.as_str().to_string());
+            }
+        }
+
+        // Remove links and lines containing "Contain" or brackets "[]" from the description
+        let sanitized_description: String = link_regex
+            .replace_all(book_description, "")
+            .to_string()
+            .lines()
+            .filter(|line| !line.contains("Contain") && !line.contains('[') && !line.contains(']'))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Add the sanitized description to the quote block
+        description.push_str("[b][size=15][color=#6C3483]Synopsis:[/color][/size][/b]\n");
+        description.push_str("[quote]\n");
+        description.push_str(&sanitized_description.trim());
+        description.push_str("\n[/quote]\n\n");
+
+        // Append the extracted links below the quote block
+        if !extracted_links.is_empty() {
+            description.push_str("[b][size=14][color=#2874A6]Additional Editions:[/color][/size][/b]\n");
+            for link in extracted_links {
+                description.push_str(&format!("- [url={}][color=#1ABC9C]{}[/color][/url]\n", link.trim_end_matches(')'), link.trim_end_matches(')')));
+            }
+            description.push_str("\n");
+        }
+    }
+
+
+    // Add author bio
+    if let Some(author_bio) = author_json["bio"]
+        .as_str()
+        .or_else(|| author_json["bio"]["value"].as_str())
+    {
+        // Remove the "([Source][1])" line and trim extra blank lines
+        let source_regex = regex::Regex::new(r"\(\[Source\]\[\d+\]\)").unwrap();
+        let sanitized_bio = source_regex
+            .replace_all(author_bio, "")
+            .to_string()
+            .replace("on Wikipedia", "")
+            .replace("*", "") // Remove asterisks
+            .trim() // Remove leading/trailing whitespace
+            .lines()
+            .filter(|line| !line.trim().is_empty()) // Remove empty lines
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        description.push_str("[b][size=15][color=#AF601A]About the Author:[/color][/size][/b]\n");
+        description.push_str(&format!("[quote]{}\n\n", sanitized_bio)); // Add one blank line before the link
+
+        // Extract the Wikipedia link from the bio using a regex
+        let wikipedia_link_regex = regex::Regex::new(r#"href="([^"]+)""#).unwrap();
+        if let Some(captures) = wikipedia_link_regex.captures(author_bio) {
+            if let Some(wikipedia_link) = captures.get(1) {
+                let sanitized_link = wikipedia_link.as_str();
+                description.push_str(&format!(
+                    "\n[b]Source:[/b] [url={}][color=#1ABC9C]Wikipedia[/color][/url]",
+                    sanitized_link
+                ));
+            }
+        }
+
+       description.push_str("[/quote]\n\n");
+    }
+
+    // Fetch and list other books by the author
+    let author_works_url = format!(
+        "https://openlibrary.org/authors/{}/works.json",
+        open_library_author_key
+    );
+    let author_works_response = client
+        .get(&author_works_url)
+        .send()
+        .map_err(|e| format!("Failed to fetch author's other works: {}", e))?;
+    let author_works_json: Value = author_works_response
+        .json()
+        .map_err(|e| format!("Failed to parse author's other works: {}", e))?;
+
+    if let Some(entries) = author_works_json["entries"].as_array() {
+        let mut other_books = HashSet::new();
+        for entry in entries {
+            if let Some(book_title) = entry["title"].as_str() {
+                if book_title != title {
+                    other_books.insert(book_title.to_string());
+                }
+            }
+        }
+
+        if !other_books.is_empty() {
+            description.push_str(&format!(
+                "[b][size=15][color=#1F618D]More by {}:[/color][/size][/b]\n",
+                author
+            ));
+            description.push_str("[list]\n");
+            for book in other_books {
+                description.push_str(&format!("[*] {}\n", book));
+            }
+            description.push_str("[/list]\n\n");
+        }
+    }
+
+    // Add Open Library links
+    description.push_str("[b][size=14][color=#2874A6]Links:[/color][/size][/b]\n");
+    description.push_str(&format!(
+        "- [url=https://openlibrary.org/works/{}][color=#1ABC9C]View this book on Open Library[/color][/url]\n",
+        open_library_work_key
+    ));
+    description.push_str(&format!(
+        "- [url=https://openlibrary.org/authors/{}][color=#1ABC9C]View author on Open Library[/color][/url]\n\n",
+        open_library_author_key
+    ));
+
+    // Append the default non-video description
+    description.push_str(&format!(
+        "[center]{}[/center]",
+        default_non_video_description()
+    ));
+
+    Ok((description, subjects))
 }
