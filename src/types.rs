@@ -4,6 +4,8 @@ use std::collections::HashMap;
 #[derive(Deserialize)]
 pub struct GeneralConfig {
     pub tmdb_api_key: String,
+    pub igdb_client_id: String,
+    pub igdb_bearer_token: String,
 }
 
 pub struct PreflightCheckResult {
