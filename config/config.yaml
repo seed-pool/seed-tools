@@ -1,5 +1,7 @@
 general:
-  tmdb_api_key: "xxxxxxxxxxxxxxxxxxxxxxxxxx"
+  tmdb_api_key: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  igdb_client_id: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  igdb_bearer_token: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
 paths:
   torrent_dir: "/home/user/seed-tools/torrents"
@@ -10,28 +12,27 @@ paths:
   mediainfo: "/home/user/seed-tools/bin/mediainfo"
 
 qbittorrent:
-  - webui_url: "http://localhost:8080"
+  - webui_url: "http://localhost:21540"
     username: "user"
-    password: "xxxxxxxxxxxxx"
+    password: "xxxxxxxxxxxxxxxxxxxxxxx"
     category: ""
     default_save_path: "/home/user/files"
     executable: "/usr/bin/qbittorrent-nox"
     fastresumes: "/home/user/.local/share/qBittorrent/BT_backup"
 
-
-  - webui_url: "http://localhost:8081"
-    username: "user"
-    password: "xxxxxxxxxxxxxx"
+  - webui_url: "http://localhost:36518"
+    username: "xxxxxx"
+    password: "xxxxxxxxxxxxxxxxx"
     category: ""
     default_save_path: "/home/user/files"
     executable: "/usr/bin/qbittorrent-nox"
     fastresumes: "/home/user/.local/share/qBittorrent/BT_backup"
 
 deluge:
-    webui_url: "https://localhost:52345"
+    webui_url: "https://deluge.fastpanther.box.ca"
     daemon_port: 19148
     username: "user"
-    password: "xxxxxxxxxxxxxxxxxxxxx"
+    password: "xxxxxxxxxxxxxxxxx"
     label: ""
     default_save_path: "/home/user/files"
 
