@@ -7,7 +7,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::fs;
 use crate::{Config, Client, SeedpoolConfig, Tracker};
 use seed_tools::utils::{
-    generate_release_name, find_video_files, create_torrent, generate_mediainfo, generate_sample,
+    generate_release_name, extract_rar_archives, find_video_files, create_torrent, generate_mediainfo, generate_sample,
     generate_screenshots, fetch_tmdb_id, generate_screenshots_imgbb, default_non_video_description, fetch_external_ids, generate_description,
     add_torrent_to_all_qbittorrent_instances,
 };
@@ -61,6 +61,16 @@ pub fn process_seedpool_release(
     if found_music_file {
         log::debug!("Music release detected: {}", input_path);
         return process_music_release(input_path, config, seedpool_config, mkbrr_path, ffmpeg_path);
+    }
+
+    if Path::new(input_path).is_dir() {
+        if let Some(extracted_path) = extract_rar_archives(input_path)? {
+            log::info!("RAR archives extracted to: {}", extracted_path);
+        } else {
+            log::info!("No RAR archives found in the input path.");
+        }
+    } else {
+        log::info!("Input path is not a directory. Skipping RAR extraction.");
     }
 
     // Determine release type and title
