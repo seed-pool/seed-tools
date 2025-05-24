@@ -25,7 +25,7 @@ mod trackers {
     pub mod common;
 }
 use std::fs::OpenOptions;
-use trackers::common::{process_custom_upload, Tracker};
+use trackers::common::{process_custom_upload, sanitize_game_title, process_game_upload, Tracker};
 use clap::{Parser, CommandFactory};
 #[derive(Deserialize)]
 struct GeneralConfig {
@@ -294,7 +294,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 return Ok(()); // Exit cleanly
             }
 
-            if category_type_arg == "0720" {
+            if category_type_arg == "0720" || category_type_arg == "0740" || category_type_arg == "0741" {
                 info!("Detected eBook upload mode with argument: {}", category_type_arg);
             
                 // Assuming `config` and `seedpool_config` are already initialized
@@ -306,6 +306,59 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 return Ok(()); // Exit after eBook upload
             }
 
+            if category_type_arg == "0742" {
+                info!("Detected Newspaper upload mode with argument: {}", category_type_arg);
+
+                if let Err(e) = utils::process_newspaper_upload(input_path_str, &main_config, &seedpool_config) {
+                    error!("Error processing Newspaper upload: {}", e);
+                } else {
+                    info!("Successfully processed Newspaper upload.");
+                }
+                return Ok(()); // Exit after Newspaper upload
+            }
+
+            let category_id: u32 = category_type_arg[0..2].parse()?;
+            let type_id: u32 = category_type_arg[2..4].parse()?;
+            info!("Parsed Category ID: {}, Type ID: {}", category_id, type_id);
+
+            let target_tracker = if cli.sp {
+                "seedpool"
+            } else {
+                "torrentleech"
+            };
+
+            let base_name = input_path
+                .file_name()
+                .ok_or("Could not get filename from input path")?
+                .to_string_lossy()
+                .to_string();
+
+            if category_type_arg == "1416" || category_type_arg == "1915" {
+                let igdb_client_id = &main_config.general.igdb_client_id;
+                let igdb_bearer_token = &main_config.general.igdb_bearer_token;
+                let game_title = &sanitize_game_title(&base_name);
+
+                if let Err(e) = process_game_upload(
+                    input_path_str,
+                    category_id,
+                    type_id,
+                    &main_config.qbittorrent,
+                    &main_config.deluge,
+                    target_tracker,
+                    Some(&seedpool_config),
+                    Some(&torrentleech_config),
+                    mkbrr_path.to_str().ok_or("Invalid mkbrr_path")?,
+                    &main_config.paths,
+                    igdb_client_id,
+                    igdb_bearer_token,
+                ) {
+                    error!("Error processing game upload for {}: {}", target_tracker, e);
+                } else {
+                    info!("Successfully processed game upload for {}.", target_tracker);
+                }
+                return Ok(());
+            }            
+            
             if category_type_arg.len() != 4 || !category_type_arg.chars().all(|c| c.is_digit(10)) {
                 error!("Invalid format for custom upload specifier (-c/--custom-cat-type). Expected 4 digits (e.g., 0819), got: {}", category_type_arg);
                 return Ok(()); // Exit cleanly
