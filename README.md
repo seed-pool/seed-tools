@@ -1,4 +1,4 @@
-# Seed-Tools v0.52 (Linux)
+# Seed-Tools v0.53(Linux)
 
 ![Screenshot](images/seed-toolsv0.42.png)
 
