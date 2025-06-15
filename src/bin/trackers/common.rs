@@ -6,7 +6,6 @@ use seed_tools::types::PathsConfig; // Import PathsConfig
 use crate::{QbittorrentConfig, SeedpoolConfig, TorrentLeechConfig, DelugeConfig};
 use std::collections::HashMap;
 use reqwest::blocking::Client;
-use serde_json::Value;
 use regex::Regex;
 
 #[allow(dead_code)]

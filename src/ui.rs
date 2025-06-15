@@ -8,16 +8,13 @@ use tui::{
     Terminal,
 };
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers, EnableMouseCapture},
+    event::{self, Event, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use tui::layout::Rect;
 use walkdir::WalkDir;
-use simplelog::*;
 use std::sync::mpsc;
-use std::sync::mpsc::channel;
-use notify::{Config as NotifyConfig, Watcher, RecursiveMode, RecommendedWatcher, Event as NotifyEvent, EventKind};
+use notify::Watcher;
 use serde::Deserialize;
 // --- Standard Library ---
 use std::{
@@ -29,10 +26,7 @@ use std::{
     thread,
     time::Duration,
 };
-use vte::{Parser, Perform};
 use crate::types::PreflightCheckResult;
-use crate::utils;
-use std::fs::OpenOptions;
 // --- Static Variables ---
 static INIT_LOGGER: Once = Once::new();
 #[derive(Deserialize)]
@@ -128,7 +122,7 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
     let mut file_list = get_files_in_dir(&current_dir);
     let mut selected_file_index = 0;
     let mut scroll_offset = 0;
-    let mut tracker_scroll_offset = 0;
+    let tracker_scroll_offset = 0;
     let mut selected_trackers = Vec::<String>::new();
     let mut input_path = None::<PathBuf>;
     let mut exit_requested = false;
@@ -137,9 +131,9 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
     let tracker_options = vec!["✔️ Select All", "🐳 seedpool [SP]", "🐛 TorrentLeech [TL]"];
     let log_output = Arc::new(Mutex::new(Vec::<String>::new()));
     let log_scroll_offset = Arc::new(Mutex::new(0)); // Shared scroll offset for logs
-    let mut preflight_check_result: Option<PreflightCheckResult> = None;
+    let preflight_check_result: Option<PreflightCheckResult> = None;
     let mut upload_running = false; // Tracks if the upload process is running
-    let mut preflight_check_running = false;
+    let preflight_check_running = false;
     let terminal_emulator = Arc::new(TerminalEmulator::new());
     let log_file_path = "seed-tools.log";
     start_log_tail(Arc::clone(&terminal_emulator), log_file_path);
@@ -353,9 +347,23 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
         
-                    // Handle file list clicks
-                    if !showing_log && x < middle_chunks[0].x + middle_chunks[0].width && y >= middle_chunks[0].y && y < middle_chunks[0].y + middle_chunks[0].height {
-                        let relative_y = y - middle_chunks[0].y;
+                    // Handle file list and letter clicks
+                    let file_chunks = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([Constraint::Percentage(90), Constraint::Percentage(10)])
+                        .split(middle_chunks[0]);
+
+                    if !showing_log && x >= file_chunks[1].x && x < file_chunks[1].x + file_chunks[1].width && y >= file_chunks[1].y && y < file_chunks[1].y + file_chunks[1].height {
+                        let letter_positions = get_letter_positions(&file_list);
+                        let relative_y = y - file_chunks[1].y;
+                        let idx = relative_y as usize;
+                        if idx < letter_positions.len() {
+                            let (_, target_index) = letter_positions[idx];
+                            scroll_offset = target_index;
+                            selected_file_index = target_index;
+                        }
+                    } else if !showing_log && x < file_chunks[0].x + file_chunks[0].width && y >= file_chunks[0].y && y < file_chunks[0].y + file_chunks[0].height {
+                        let relative_y = y - file_chunks[0].y;
                         let clicked_index = scroll_offset + relative_y as usize;
                         if clicked_index < file_list.len() {
                             selected_file_index = clicked_index;
@@ -577,7 +585,11 @@ fn render_ui(
     
     // Render the status section in `top_chunks[0]`
     let status_paragraph = Paragraph::new(status_lines)
-        .block(Block::default().borders(Borders::ALL).title(" 🌀 Seed-Tools v0.42 "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(concat!(" 🌀 Seed-Tools v", env!("CARGO_PKG_VERSION"), " ")),
+        )
         .style(Style::default().bg(Color::Rgb(8, 8, 32))); // Background color
     f.render_widget(status_paragraph, top_chunks[0]);
     
@@ -633,7 +645,7 @@ fn render_ui(
     // Render File List or Log Section
     if showing_log {
         // Render the terminal emulator
-        let mut terminal_scroll_offset = 0; 
+        let terminal_scroll_offset = 0; 
     let terminal_output = terminal_emulator.render();
     let visible_lines = terminal_output
         .iter()
@@ -647,13 +659,21 @@ fn render_ui(
         .style(Style::default().bg(Color::Black).fg(Color::White));
     f.render_widget(terminal_widget, middle_chunks[0]);
     } else {
-        // Render the file list
+        // Render the file list with letter shortcuts
+        let letter_positions = get_letter_positions(file_list);
+        let letters: Vec<String> = letter_positions.iter().map(|(c, _)| c.to_string()).collect();
+
+        let file_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(90), Constraint::Percentage(10)])
+            .split(middle_chunks[0]);
+
         let mut visible_files = vec!["🗂️ ..".to_string()];
         visible_files.extend(
             file_list[1..]
                 .iter()
                 .skip(scroll_offset)
-                .take((middle_chunks[0].height as usize).saturating_sub(1)) // Subtract 1 for the ".." entry
+                .take((file_chunks[0].height as usize).saturating_sub(1))
                 .cloned(),
         );
 
@@ -673,7 +693,17 @@ fn render_ui(
         )
         .block(Block::default().borders(Borders::ALL))
         .style(Style::default().bg(Color::Rgb(8, 8, 32))); // Background color
-        f.render_widget(file_list_widget, middle_chunks[0]);
+        f.render_widget(file_list_widget, file_chunks[0]);
+
+        let letter_list_widget = List::new(
+            letters
+                .iter()
+                .map(|l| ListItem::new(Span::styled(l, Style::default().fg(Color::Cyan))))
+                .collect::<Vec<_>>(),
+        )
+        .block(Block::default().borders(Borders::ALL).title("🔠 A-Z "))
+        .style(Style::default().bg(Color::Rgb(8, 8, 32)));
+        f.render_widget(letter_list_widget, file_chunks[1]);
     }
 
     // Render Tracker List Section
@@ -1078,6 +1108,19 @@ fn get_files_in_dir(dir: &Path) -> Vec<String> {
     }
 
     entries
+}
+
+fn get_letter_positions(file_list: &[String]) -> Vec<(char, usize)> {
+    let mut letters = Vec::new();
+    for (idx, name) in file_list.iter().enumerate().skip(1) {
+        if let Some(ch) = name.chars().next() {
+            let letter = ch.to_ascii_uppercase();
+            if !letters.iter().any(|(c, _)| *c == letter) {
+                letters.push((letter, idx));
+            }
+        }
+    }
+    letters
 }
 
 fn tracker_select(

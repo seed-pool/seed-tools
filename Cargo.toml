@@ -1,6 +1,6 @@
 [package]
 name = "seed-tools"
-version = "0.3.5"
+version = "0.52.0"
 edition = "2024"
 
 [dependencies]

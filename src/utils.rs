@@ -1,7 +1,7 @@
 use reqwest::blocking::{multipart::Form, Client};
 use reqwest::blocking::ClientBuilder;
 use reqwest::cookie::Jar;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use regex::Regex;
 use epub::doc::EpubDoc;
@@ -11,14 +11,10 @@ use std::collections::HashSet;
 use serde_json::{Value, json};
 use rand::Rng;
 use std::os::unix::fs::PermissionsExt;
-use std::fs::{self, Permissions};
+use std::fs::{self};
 use zip::ZipArchive;
 use std::fs::File;
-use std::io::Write;
-use base64::engine::general_purpose::STANDARD;
-use base64::Engine;
 use walkdir::WalkDir;
-use rand::seq::IteratorRandom;
 use crate::types::{PathsConfig, SeedpoolConfig, Config, QbittorrentConfig, VideoSettings, DelugeConfig};
 
 pub fn generate_release_name(base_name: &str) -> String {
@@ -202,6 +198,90 @@ pub fn generate_mediainfo(video_file: &str, mediainfo_path: &str) -> Result<Stri
     Ok(result)
 }
 
+fn extract_subtitle_languages(mediainfo_output: &str) -> Vec<String> {
+    let mut languages = Vec::new();
+    let mut in_text_section = false;
+    for line in mediainfo_output.lines() {
+        if line.starts_with("Text") {
+            in_text_section = true;
+        } else if line.trim().is_empty() {
+            in_text_section = false;
+        }
+        if in_text_section && line.contains("Language") {
+            if let Some(lang) = line.split(':').nth(1) {
+                languages.push(lang.trim().to_string());
+            }
+        }
+    }
+    languages
+}
+
+fn natural_sort_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use regex::Regex;
+    use std::cmp::Ordering;
+
+    let re = Regex::new(r"(\d+|\D+)").unwrap();
+    let a_parts: Vec<&str> = re.find_iter(a).map(|m| m.as_str()).collect();
+    let b_parts: Vec<&str> = re.find_iter(b).map(|m| m.as_str()).collect();
+
+    let max_len = a_parts.len().max(b_parts.len());
+    for i in 0..max_len {
+        let a_part = a_parts.get(i).unwrap_or(&"");
+        let b_part = b_parts.get(i).unwrap_or(&"");
+
+        let a_is_num = a_part.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false);
+        let b_is_num = b_part.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false);
+
+        if a_is_num && b_is_num {
+            let a_num: u64 = a_part.parse().unwrap_or(0);
+            let b_num: u64 = b_part.parse().unwrap_or(0);
+            match a_num.cmp(&b_num) {
+                Ordering::Equal => {},
+                ord => return ord,
+            }
+        } else {
+            match a_part.to_lowercase().cmp(&b_part.to_lowercase()) {
+                Ordering::Equal => {},
+                ord => return ord,
+            }
+        }
+    }
+    a_parts.len().cmp(&b_parts.len())
+}
+
+fn sort_files_naturally(files: &mut Vec<String>) {
+    files.sort_by(|a, b| {
+        let a_name = std::path::Path::new(a)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let b_name = std::path::Path::new(b)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        natural_sort_cmp(&a_name, &b_name)
+    });
+}
+
+pub fn generate_subtitle_list(video_files: &[String], mediainfo_path: &str) -> Result<String, String> {
+    let mut entries = Vec::new();
+    let mut files = video_files.to_vec();
+    sort_files_naturally(&mut files);
+    for file in files {
+        let info = generate_mediainfo(&file, mediainfo_path)?;
+        let mut langs = extract_subtitle_languages(&info);
+        if !langs.is_empty() {
+            langs.sort();
+            let file_name = Path::new(&file).file_name().unwrap_or_default().to_string_lossy();
+            entries.push(format!("Name: {}\n└─ {}", file_name, langs.join(", ")));
+        }
+    }
+    if entries.is_empty() {
+        return Ok(String::new());
+    }
+    Ok(format!("[spoiler=Subtitles]\n{}\n[/spoiler]\n", entries.join("\n")))
+}
+
 pub fn add_torrent_to_all_qbittorrent_instances(
     torrent_files: &[String],
     qbittorrent_configs: &[QbittorrentConfig],
@@ -258,6 +338,32 @@ pub fn add_torrent_to_all_qbittorrent_instances(
     }
 
     Ok(())
+}
+
+pub fn extract_ids_from_mediainfo(mediainfo_output: &str) -> (Option<u32>, Option<String>) {
+    let tmdb_re = Regex::new(r"(?i)TMDB\s*:\s*https?://(?:www\.)?themoviedb\.org/(?:movie|tv)/(\d+)").unwrap();
+    let imdb_re = Regex::new(r"(?i)IMDB\s*:\s*https?://(?:www\.)?imdb\.com/title/tt(\d+)").unwrap();
+
+    let mut tmdb_id = None;
+    let mut imdb_id = None;
+
+    for line in mediainfo_output.lines().take(20) {
+        if tmdb_id.is_none() {
+            if let Some(cap) = tmdb_re.captures(line) {
+                tmdb_id = cap.get(1).and_then(|m| m.as_str().parse::<u32>().ok());
+            }
+        }
+        if imdb_id.is_none() {
+            if let Some(cap) = imdb_re.captures(line) {
+                imdb_id = Some(cap[1].to_string());
+            }
+        }
+        if tmdb_id.is_some() && imdb_id.is_some() {
+            break;
+        }
+    }
+
+    (tmdb_id, imdb_id)
 }
 
 pub fn process_file(
@@ -1066,7 +1172,7 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
     };
 
     // 4. Extract metadata and cover
-    let (mut title, mut author) = if is_pdf {
+    let (title, author) = if is_pdf {
         extract_metadata_from_pdf(&ebook_path)?
     } else {
         extract_metadata_from_epub(&ebook_path)?
@@ -1111,8 +1217,8 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
 
         if is_pdf {
             // Remove all .epub and .zip files, but NEVER remove the found PDF
-            if (path.extension().map(|ext| ext.eq_ignore_ascii_case("epub")).unwrap_or(false)
-                || path.extension().map(|ext| ext.eq_ignore_ascii_case("zip")).unwrap_or(false))
+            if path.extension().map(|ext| ext.eq_ignore_ascii_case("epub")).unwrap_or(false)
+                || path.extension().map(|ext| ext.eq_ignore_ascii_case("zip")).unwrap_or(false)
             {
                 fs::remove_file(&path)
                     .map_err(|e| format!("Failed to remove file '{}': {}", path.display(), e))?;
@@ -1170,7 +1276,7 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
         });
 
     // --- SKIP OPEN LIBRARY FOR COMICS & MAGAZINES ---
-    let (mut description, mut keywords);
+    let (description, keywords);
     let mut cover_id: Option<u64> = None;
     if is_pdf && (type_id == "40" || type_id == "41") {
         let torrent_name = generate_release_name(&base_name);
@@ -1531,7 +1637,7 @@ fn extract_torrent_id(response_text: &str) -> Result<String, String> {
 }
 
 fn extract_metadata_from_epub(epub_path: &str) -> Result<(Option<String>, Option<String>), String> {
-    let mut epub = EpubDoc::new(epub_path)
+    let epub = EpubDoc::new(epub_path)
         .map_err(|e| format!("Failed to open EPUB file '{}': {}", epub_path, e))?;
 
     // Extract title from metadata

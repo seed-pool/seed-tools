@@ -2,7 +2,7 @@ use std::fs;
 use std::{path::Path, thread, time::Duration};
 use log::{info, error};
 use regex::Regex;
-use bendy::decoding::{FromBencode, Object};
+use bendy::decoding::Object;
 use reqwest::blocking::Client;
 use serde_json;
 use crate::utils::generate_release_name;

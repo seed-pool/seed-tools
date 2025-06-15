@@ -1,13 +1,10 @@
 use std::{
     fs,
-    env,
     path::{Path, PathBuf},
-    collections::HashMap,
 };
 use serde::Deserialize;
 use log::{info, error, debug, LevelFilter};
 use simplelog::{Config as SimpleLogConfig, CombinedLogger, WriteLogger};
-use std::fs::File;
 use std::error::Error;
 use reqwest::blocking::Client;
 use seed_tools::utils;
@@ -15,10 +12,8 @@ use seed_tools::utils::generate_release_name;
 use seed_tools::types::{Config, SeedpoolConfig, TorrentLeechConfig, QbittorrentConfig, DelugeConfig};
 use seed_tools::sync;
 use seed_tools::irc::launch_irc_client;
-use seed_tools::types::PreflightCheckResult;
 use trackers::seedpool::preflight_check;
 use seed_tools::ui;
-use tokio::main;
 mod trackers {
     pub mod seedpool;
     pub mod torrentleech;
@@ -92,6 +87,18 @@ struct Cli {
 
     #[arg(long, conflicts_with_all = ["sync", "sp", "tl", "custom_cat_type", "command"])]
     pre: bool, // Add the `pre` argument
+
+    /// Override TMDB ID instead of auto-detection
+    #[arg(long)]
+    tmdb_id: Option<u32>,
+
+    /// Override IMDb ID instead of auto-detection
+    #[arg(long)]
+    imdb_id: Option<String>,
+
+    /// Override TVDB ID instead of auto-detection
+    #[arg(long)]
+    tvdb_id: Option<u32>,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -198,6 +205,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 &ffmpeg_path,
                 &ffprobe_path,
                 &mediainfo_path,
+                cli.tmdb_id,
+                cli.imdb_id.clone(),
+                cli.tvdb_id,
             ) {
                 Ok(result) => {
                     println!("Pre-flight Check Results:");
@@ -410,6 +420,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 &mkbrr_path,
                 &mediainfo_path,
                 imgbb_api_key.as_deref(), // Pass the imgbb API key
+                cli.tmdb_id,
+                cli.imdb_id.clone(),
+                cli.tvdb_id,
             ) {
                 error!("Error processing Seedpool release: {}", e);
                 errors.push(format!("Seedpool: {}", e));

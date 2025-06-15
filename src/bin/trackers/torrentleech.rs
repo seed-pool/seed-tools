@@ -3,7 +3,7 @@ use std::process::Command;
 use crate::{Config, TorrentLeechConfig};
 use log::{info, error};
 use std::collections::HashMap;
-use seed_tools::utils::{generate_release_name, find_video_files, create_torrent, generate_mediainfo};
+use seed_tools::utils::{generate_release_name, find_video_files, create_torrent, generate_mediainfo, generate_subtitle_list};
 use regex::Regex;
 
 pub fn determine_tl_category(meta: &HashMap<String, String>, categories: &HashMap<String, u32>) -> Result<u32, String> {
@@ -106,7 +106,13 @@ pub fn process_torrentleech_release(
 
     let nfo_path = format!("{}/{}.nfo", config.paths.torrent_dir, release_name);
     let mediainfo_output = generate_mediainfo(&video_files[0], &mediainfo_path.to_string_lossy())?;
-    std::fs::write(&nfo_path, mediainfo_output).map_err(|e| format!("Failed to write NFO file: {}", e))?;
+    let subtitle_list = generate_subtitle_list(&video_files, &mediainfo_path.to_string_lossy())?;
+    let combined_nfo = if subtitle_list.is_empty() {
+        mediainfo_output.clone()
+    } else {
+        format!("{}\n{}", mediainfo_output, subtitle_list)
+    };
+    std::fs::write(&nfo_path, combined_nfo).map_err(|e| format!("Failed to write NFO file: {}", e))?;
 
     // Determine metadata
     let meta = HashMap::from([

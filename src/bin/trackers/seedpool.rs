@@ -1,19 +1,17 @@
 use reqwest::blocking::multipart::Form;
 use std::collections::HashMap;
 use std::path::Path;
-use std::ffi::OsStr;
 use std::process::Command;
 use std::os::unix::fs::PermissionsExt;
 use std::fs;
 use crate::{Config, Client, SeedpoolConfig, Tracker};
+
 use seed_tools::utils::{
     generate_release_name, extract_rar_archives, find_video_files, create_torrent, generate_mediainfo, generate_sample,
     generate_screenshots, fetch_tmdb_id, generate_screenshots_imgbb, default_non_video_description, fetch_external_ids, generate_description,
+    generate_subtitle_list, extract_ids_from_mediainfo,
     add_torrent_to_all_qbittorrent_instances,
 };
-use tui::text::Spans;
-use tui::text::Span;
-use tui::style::{Color, Style};
 use regex::Regex;
 use log::info;
 use seed_tools::types::PreflightCheckResult;
@@ -32,6 +30,9 @@ pub fn process_seedpool_release(
     mkbrr_path: &Path,
     mediainfo_path: &Path,
     imgbb_api_key: Option<&str>, // Optional ImgBB API key
+    tmdb_id_override: Option<u32>,
+    imdb_id_override: Option<String>,
+    tvdb_id_override: Option<u32>,
 ) -> Result<(), String> {
     log::debug!("Processing release for input_path: {}", input_path);
 
@@ -74,7 +75,7 @@ pub fn process_seedpool_release(
     }
 
     // Determine release type and title
-    let (mut release_type, title, year, season_number, mut episode_number) =
+    let (release_type, title, year, season_number, mut episode_number) =
         determine_release_type_and_title(input_path);
     let base_name = Path::new(input_path)
         .file_name()
@@ -131,7 +132,12 @@ pub fn process_seedpool_release(
     }
 
     // Fetch TMDB ID and find video files
-    let tmdb_id = fetch_tmdb_id(&title, year, &config.general.tmdb_api_key, &release_type)?;
+    let tmdb_id = if let Some(id) = tmdb_id_override {
+        log::info!("Using provided TMDB ID: {}", id);
+        id
+    } else {
+        fetch_tmdb_id(&title, year, &config.general.tmdb_api_key, &release_type)?
+    };
     let (video_files, nfo_file) = find_video_files(input_path, &config.paths, &seedpool_config.settings)?;
     if video_files.is_empty() {
         return Err("No valid video files detected.".to_string());
@@ -148,8 +154,10 @@ pub fn process_seedpool_release(
         stripshit_from_videos,
     )?];
 
-    // Generate mediainfo
+    // Generate mediainfo for the first file
     let mediainfo_output = generate_mediainfo(&video_files[0], &mediainfo_path.to_string_lossy())?;
+    // Generate subtitle list for all files
+    let subtitle_list = generate_subtitle_list(&video_files, &mediainfo_path.to_string_lossy())?;
 
     // Generate screenshots using ImgBB or Seedpool CDN
     let (screenshots, thumbnails) = if let Some(api_key) = imgbb_api_key {
@@ -193,9 +201,18 @@ pub fn process_seedpool_release(
     };
 
     // Fetch external IDs
-    let (imdb_id, tvdb_id) = fetch_external_ids(tmdb_id, &release_type, &config.general.tmdb_api_key)
+    let (mut imdb_id, mut tvdb_id) = fetch_external_ids(tmdb_id, &release_type, &config.general.tmdb_api_key)
         .unwrap_or((None, None));
+    if let Some(id) = imdb_id_override { imdb_id = Some(id); }
+    if let Some(id) = tvdb_id_override { tvdb_id = Some(id); }
     let resolution_id = get_seedpool_resolution_id(input_path);
+
+    // Combine subtitle list with custom description
+    let combined_desc = if subtitle_list.is_empty() {
+        seedpool_config.settings.custom_description.clone()
+    } else {
+        format!("{}\n{}", subtitle_list, seedpool_config.settings.custom_description)
+    };
 
     // Generate description
     let description = generate_description(
@@ -203,7 +220,7 @@ pub fn process_seedpool_release(
         &thumbnails,
         &sample_url,
         &chrono::Utc::now().to_string(),
-        Some(&seedpool_config.settings.custom_description),
+        Some(&combined_desc),
         None,
         &seedpool_config.screenshots.image_path,
         &generate_release_name(&base_name),
@@ -314,7 +331,7 @@ pub fn process_music_release(
     log::debug!("Processing music release for input_path: {}", input_path);
 
     // Determine category_id and type_id
-    let mut category_id = 5; // Music category
+    let category_id = 5; // Music category
     let mut type_id = 0;
 
     let music_extensions = ["mp3", "flac"];
@@ -479,7 +496,7 @@ pub fn process_music_release(
 
     // Prepare the upload form
     let client = reqwest::blocking::Client::new();
-    let mut form = Form::new()
+    let form = Form::new()
         .file("torrent", &torrent_file)
         .map_err(|e| format!("Failed to attach torrent file: {}", e))?
         .text("name", base_name.clone()) // Clone base_name to satisfy the 'static lifetime
@@ -937,6 +954,9 @@ pub fn preflight_check(
     ffmpeg_path: &Path,
     ffprobe_path: &Path,
     mediainfo_path: &Path,
+    tmdb_id_override: Option<u32>,
+    imdb_id_override: Option<String>,
+    tvdb_id_override: Option<u32>,
 ) -> Result<PreflightCheckResult, String> {
     log::debug!("Processing release for input_path: {}", input_path);
 
@@ -1127,18 +1147,47 @@ pub fn preflight_check(
     }
 
     // Step 4: Fetch TMDB ID
-    log::info!(
-        "Fetching TMDB ID with title: '{}', year: {:?}, release_type: '{}'",
-        title,
-        year,
-        release_type_raw
-    );
-    let tmdb_id = fetch_tmdb_id(&title, year, &config.general.tmdb_api_key, &release_type_raw)?;
+    let mut tmdb_id = if let Some(id) = tmdb_id_override {
+        log::info!("Using provided TMDB ID: {}", id);
+        id
+    } else {
+        log::info!(
+            "Fetching TMDB ID with title: '{}', year: {:?}, release_type: '{}'",
+            title,
+            year,
+            release_type_raw
+        );
+        fetch_tmdb_id(&title, year, &config.general.tmdb_api_key, &release_type_raw)?
+    };
     log::debug!("TMDB ID: {}", tmdb_id);
 
+    // Attempt to extract IDs from MediaInfo if TMDB ID wasn't found
+    let mut mediainfo_imdb_id: Option<String> = None;
+    if tmdb_id == 0 || imdb_id_override.is_none() {
+        if let Ok((video_files, _)) = find_video_files(input_path, &config.paths, &seedpool_config.settings) {
+            if let Some(video_file) = video_files.get(0) {
+                if let Ok(mi_output) = generate_mediainfo(video_file, &mediainfo_path.to_string_lossy()) {
+                    let (mi_tmdb, mi_imdb) = extract_ids_from_mediainfo(&mi_output);
+                    if tmdb_id == 0 {
+                        if let Some(id) = mi_tmdb {
+                            log::info!("Found TMDB ID {} in MediaInfo", id);
+                            tmdb_id = id;
+                        }
+                    }
+                    mediainfo_imdb_id = mi_imdb;
+                }
+            }
+        }
+    }
+
     // Step 5: Fetch external IDs (IMDb, TVDB)
-    let (imdb_id, tvdb_id) = fetch_external_ids(tmdb_id, &release_type_raw, &config.general.tmdb_api_key)
+    let (mut imdb_id, mut tvdb_id) = fetch_external_ids(tmdb_id, &release_type_raw, &config.general.tmdb_api_key)
         .unwrap_or((None, None));
+    if let Some(id) = imdb_id_override { imdb_id = Some(id); }
+    if let Some(id) = tvdb_id_override { tvdb_id = Some(id); }
+    if imdb_id.is_none() {
+        imdb_id = mediainfo_imdb_id.clone();
+    }
     log::debug!("IMDb ID: {:?}, TVDB ID: {:?}", imdb_id, tvdb_id);
 
     // Step 6: Check the `strip_from_videos` setting
@@ -1150,10 +1199,21 @@ pub fn preflight_check(
 
     // Step 7: Extract audio languages using MediaInfo
     let mut audio_languages = Vec::new();
-    let (video_files, _) = find_video_files(input_path, &config.paths, &seedpool_config.settings)?;
+    let (video_files, _) =
+        find_video_files(input_path, &config.paths, &seedpool_config.settings)?;
     for video_file in &video_files {
-        let mediainfo_output = generate_mediainfo(video_file, &mediainfo_path.to_string_lossy())?;
-        audio_languages.extend(extract_audio_languages(&mediainfo_output));
+        match generate_mediainfo(video_file, &mediainfo_path.to_string_lossy()) {
+            Ok(mediainfo_output) => {
+                audio_languages.extend(extract_audio_languages(&mediainfo_output));
+            }
+            Err(err) => {
+                // Log the error but do not fail the entire pre-flight check
+                log::warn!(
+                    "Failed to run mediainfo on '{}': {}. Skipping audio language extraction for this file.",
+                    video_file, err
+                );
+            }
+        }
     }
     log::debug!("Audio languages: {:?}", audio_languages);
 

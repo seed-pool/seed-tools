@@ -1,6 +1,6 @@
 use irc::client::Client;
 use irc::client::prelude::*;
-use std::io::{self, Write}; // Use `std::io` for synchronous I/O
+use std::io::Write; // Use `std::io` for synchronous I/O
 use futures_util::stream::StreamExt;
 use tokio::sync::{mpsc, Mutex};
 use tui::{
@@ -12,7 +12,7 @@ use tui::{
     Terminal,
 };
 use crossterm::{
-    event::{self, Event, KeyCode},
+    event::{Event, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode},
 };
