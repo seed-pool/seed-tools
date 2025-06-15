@@ -317,6 +317,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 return Ok(()); // Exit after Newspaper upload
             }
 
+            if category_type_arg == "0921" {
+                info!("Detected Audiobook upload mode with argument: {}", category_type_arg);
+
+                if let Err(e) = trackers::seedpool::process_audiobook_upload(
+                    input_path_str,
+                    &main_config,
+                    &seedpool_config,
+                    &mkbrr_path,
+                    &mediainfo_path,
+                ) {
+                    error!("Error processing Audiobook upload: {}", e);
+                } else {
+                    info!("Successfully processed Audiobook upload.");
+                }
+                return Ok(()); // Exit after Audiobook upload
+            }            
+
             let category_id: u32 = category_type_arg[0..2].parse()?;
             let type_id: u32 = category_type_arg[2..4].parse()?;
             info!("Parsed Category ID: {}, Type ID: {}", category_id, type_id);
@@ -333,7 +350,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .to_string_lossy()
                 .to_string();
 
-            if category_type_arg == "1416" || category_type_arg == "1915" {
+            if category_type_arg == "0316" || category_type_arg == "0415" || category_type_arg == "0334" || category_type_arg == "0333" {
                 let igdb_client_id = &main_config.general.igdb_client_id;
                 let igdb_bearer_token = &main_config.general.igdb_bearer_token;
                 let game_title = &sanitize_game_title(&base_name);
