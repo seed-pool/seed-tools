@@ -4,7 +4,7 @@
 
 ![Screenshot](images/seed-toolsv0.42b.png)
 
-### Seed-Tools v0.52 brings:
+### Seed-Tools v0.54 brings:
 
 1. E-book handling (beta)
 1. imgbb screenshot uploads
