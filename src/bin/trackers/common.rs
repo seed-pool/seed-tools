@@ -340,7 +340,7 @@ pub fn process_game_upload(
                     let file_name = Path::new(local_path).file_name().unwrap().to_string_lossy();
                     let remote_file = format!("{}/screenshots/{}", remote_path, file_name);
                     upload_to_cdn(local_path, &remote_file)?;
-                    let cdn_url = format!("{}/screenshots/{}", image_path, file_name);
+                    let cdn_url = format!("{}/{}", image_path, file_name);
                     screenshot_urls.push(cdn_url);
                 }
             }
