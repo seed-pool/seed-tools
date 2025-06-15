@@ -30,6 +30,7 @@ pub trait Tracker {
         season_number: Option<u32>,
         episode_number: Option<u32>,
         resolution_id: Option<u32>,
+        is_dated_tv: bool,
     ) -> Result<(), String>;
     fn generate_metadata(&self, torrent_file: &str) -> Result<HashMap<String, String>, String>;
 }
@@ -189,7 +190,7 @@ pub fn igdb_lookup_id(game_title: &str, client_id: &str, bearer_token: &str) -> 
                 return igdb_lookup_id(shorter.trim(), client_id, bearer_token);
             }
         }
-        return Ok(Some(14591)); // Default to 1 if no results and nothing left to strip
+        return Ok(Some(0)); // Default to 1 if no results and nothing left to strip
     }
 
     // ...rest of your function unchanged...
@@ -255,7 +256,7 @@ pub fn igdb_lookup_id(game_title: &str, client_id: &str, bearer_token: &str) -> 
     if best_match.is_none() {
         best_match = games.get(0).and_then(|game| game.get("id").and_then(|v| v.as_u64()));
     }
-    Ok(best_match.or(Some(14591)))
+    Ok(best_match.or(Some(0)))
 }
 
 pub fn process_game_upload(
@@ -334,12 +335,12 @@ pub fn process_game_upload(
 
                 // 3. Download screenshots, set permissions, upload to CDN, collect CDN URLs
                 let safe_base_name = url_safe_filename(&base_name);
-                let local_paths = download_igdb_screenshots(&image_ids, &safe_base_name, "./screenshots")?;
+                let local_paths = download_igdb_screenshots(&image_ids, &safe_base_name, "./screenshots/")?;
                 for (i, local_path) in local_paths.iter().enumerate() {
                     let file_name = Path::new(local_path).file_name().unwrap().to_string_lossy();
-                    let remote_file = format!("{}/{}", remote_path, file_name);
+                    let remote_file = format!("{}/screenshots/{}", remote_path, file_name);
                     upload_to_cdn(local_path, &remote_file)?;
-                    let cdn_url = format!("{}/{}", image_path, file_name);
+                    let cdn_url = format!("{}/screenshots/{}", image_path, file_name);
                     screenshot_urls.push(cdn_url);
                 }
             }
