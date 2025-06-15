@@ -329,7 +329,10 @@ pub fn generate_sample(
     }
 
     // Upload the sample file
-    upload_to_cdn(&sample_file, remote_path)?;
+    upload_to_cdn(
+        &sample_file,
+        &format!("{}/previews/", remote_path.trim_end_matches('/'))
+    )?;
 
     // Return the public-facing URL for the sample
     Ok(format!("{}/{}.sample.mkv", image_path, sanitized_input_name))
@@ -583,8 +586,8 @@ pub fn generate_screenshots(
         }
 
         // Upload files to the CDN
-        upload_to_cdn(&screenshot_file, remote_path)?;
-        upload_to_cdn(&thumbnail_file, remote_path)?;
+        upload_to_cdn(&screenshot_file, &format!("{}/screenshots/", remote_path.trim_end_matches('/')))?;
+        upload_to_cdn(&thumbnail_file, &format!("{}/screenshots/", remote_path.trim_end_matches('/')))?;
 
         // Add public-facing URLs to the lists
         screenshots_list.push(format!("{}/{}", image_path, Path::new(&screenshot_file).file_name().unwrap().to_string_lossy()));
@@ -1000,46 +1003,48 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
     let mut working_dir = input_path.to_string();
 
     // If input is a file, get its parent directory for extraction
-    if Path::new(&working_dir).is_file() {
-        if let Some(parent) = Path::new(&working_dir).parent() {
-            working_dir = parent.to_string_lossy().to_string();
-        }
+    let path = Path::new(&working_dir);
+    let is_file = path.is_file();
+    if !is_file && !path.is_dir() {
+        return Err(format!("Input path '{}' is neither a file nor a directory.", working_dir));
     }
 
     // 1. Extract all ZIP files in the directory
-    let zip_files: Vec<_> = fs::read_dir(&working_dir)
-        .map_err(|e| format!("Failed to read directory '{}': {}", working_dir, e))?
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            let path = entry.path();
-            if path.extension().map_or(false, |ext| ext.eq_ignore_ascii_case("zip")) {
-                Some(path)
-            } else {
-                None
+    if !is_file {
+        let zip_files: Vec<_> = fs::read_dir(&working_dir)
+            .map_err(|e| format!("Failed to read directory '{}': {}", working_dir, e))?
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let path = entry.path();
+                if path.extension().map_or(false, |ext| ext.eq_ignore_ascii_case("zip")) {
+                    Some(path)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for zip_file in &zip_files {
+            log::info!("Extracting ZIP archive: {}", zip_file.display());
+            let output = std::process::Command::new("unzip")
+                .arg("-o")
+                .arg(zip_file)
+                .arg("-d")
+                .arg(&working_dir)
+                .output()
+                .map_err(|e| format!("Failed to execute unzip: {}", e))?;
+            if !output.status.success() {
+                return Err(format!(
+                    "Failed to extract ZIP archive: {}. Error: {}",
+                    zip_file.display(),
+                    String::from_utf8_lossy(&output.stderr)
+                ));
             }
-        })
-        .collect();
-
-    for zip_file in &zip_files {
-        log::info!("Extracting ZIP archive: {}", zip_file.display());
-        let output = std::process::Command::new("unzip")
-            .arg("-o")
-            .arg(zip_file)
-            .arg("-d")
-            .arg(&working_dir)
-            .output()
-            .map_err(|e| format!("Failed to execute unzip: {}", e))?;
-        if !output.status.success() {
-            return Err(format!(
-                "Failed to extract ZIP archive: {}. Error: {}",
-                zip_file.display(),
-                String::from_utf8_lossy(&output.stderr)
-            ));
         }
-    }
 
-    // 2. Extract all RAR files in the directory (using your existing function)
-    extract_rar_archives(&working_dir)?;
+        // 2. Extract all RAR files in the directory (using your existing function)
+        extract_rar_archives(&working_dir)?;
+    }
 
     // 3. Find the main ebook file (prefer .epub, fallback to .pdf)
     let mut found_pdf: Option<String> = None;
@@ -1380,7 +1385,7 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
 
                 // Upload the cover image to the CDN using SCP
                 let remote_covers_path = format!(
-                    "{}/albumcovers",
+                    "{}/covers",
                     seedpool_config.screenshots.remote_path.trim_end_matches('/')
                 );
                 let scp_command = std::process::Command::new("scp")
@@ -1418,7 +1423,7 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
                         .map_err(|e| format!("Failed to set permissions for cover image '{}': {}", renamed_cover_path.display(), e))?;
                 }
                 let remote_covers_path = format!(
-                    "{}/albumcovers",
+                    "{}/covers",
                     seedpool_config.screenshots.remote_path.trim_end_matches('/')
                 );
                 let scp_command = std::process::Command::new("scp")
@@ -1460,7 +1465,7 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
 
             info!("Uploading extracted PDF cover image: {}", renamed_cover_path.display());
             let remote_covers_path = format!(
-                "{}/albumcovers",
+                "{}/covers",
                 seedpool_config.screenshots.remote_path.trim_end_matches('/')
             );
             let scp_command = std::process::Command::new("scp")
@@ -1516,7 +1521,7 @@ fn extract_metadata_from_pdf(pdf_path: &str) -> Result<(Option<String>, Option<S
     Ok((title, author))
 }
 
-fn extract_torrent_id(response_text: &str) -> Result<String, String> {
+pub fn extract_torrent_id(response_text: &str) -> Result<String, String> {
     // Unescape any escaped slashes
     let response_text = response_text.replace(r"\/", "/");
 
@@ -1854,7 +1859,7 @@ pub fn generate_comic_description(
         // SCP to CDN (remote_path as-is)
         let scp_status = std::process::Command::new("scp")
             .arg(&image_path)
-            .arg(remote_path)
+            .arg(format!("{}/screenshots/", remote_path.trim_end_matches('/')))
             .status()
             .map_err(|e| format!("Failed to scp '{}': {}", image_path, e))?;
         if !scp_status.success() {
@@ -1901,46 +1906,52 @@ pub fn process_newspaper_upload(
     let mut working_dir = input_path.to_string();
 
     // If input is a file, get its parent directory for extraction
-    if Path::new(&working_dir).is_file() {
-        if let Some(parent) = Path::new(&working_dir).parent() {
-            working_dir = parent.to_string_lossy().to_string();
-        }
-    }
+    let path = Path::new(input_path);
+    let is_file = path.is_file();
+    let working_dir = if is_file {
+        // For single file, just use the file path
+        input_path.to_string()
+    } else {
+        // For directory, use as-is
+        input_path.to_string()
+    };
 
     // 1. Extract all ZIP files in the directory
-    let zip_files: Vec<_> = fs::read_dir(&working_dir)
-        .map_err(|e| format!("Failed to read directory '{}': {}", working_dir, e))?
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            let path = entry.path();
-            if path.extension().map_or(false, |ext| ext.eq_ignore_ascii_case("zip")) {
-                Some(path)
-            } else {
-                None
+    if !is_file {
+        let zip_files: Vec<_> = fs::read_dir(&working_dir)
+            .map_err(|e| format!("Failed to read directory '{}': {}", working_dir, e))?
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let path = entry.path();
+                if path.extension().map_or(false, |ext| ext.eq_ignore_ascii_case("zip")) {
+                    Some(path)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for zip_file in &zip_files {
+            log::info!("Extracting ZIP archive: {}", zip_file.display());
+            let output = std::process::Command::new("unzip")
+                .arg("-o")
+                .arg(zip_file)
+                .arg("-d")
+                .arg(&working_dir)
+                .output()
+                .map_err(|e| format!("Failed to execute unzip: {}", e))?;
+            if !output.status.success() {
+                return Err(format!(
+                    "Failed to extract ZIP archive: {}. Error: {}",
+                    zip_file.display(),
+                    String::from_utf8_lossy(&output.stderr)
+                ));
             }
-        })
-        .collect();
-
-    for zip_file in &zip_files {
-        log::info!("Extracting ZIP archive: {}", zip_file.display());
-        let output = std::process::Command::new("unzip")
-            .arg("-o")
-            .arg(zip_file)
-            .arg("-d")
-            .arg(&working_dir)
-            .output()
-            .map_err(|e| format!("Failed to execute unzip: {}", e))?;
-        if !output.status.success() {
-            return Err(format!(
-                "Failed to extract ZIP archive: {}. Error: {}",
-                zip_file.display(),
-                String::from_utf8_lossy(&output.stderr)
-            ));
         }
-    }
 
-    // 2. Extract all RAR files in the directory
-    extract_rar_archives(&working_dir)?;
+        // 2. Extract all RAR files in the directory
+        extract_rar_archives(&working_dir)?;
+    }
 
     // 3. Find the main .epub or .pdf file
     let mut found_pdf: Option<String> = None;
@@ -2034,7 +2045,7 @@ pub fn process_newspaper_upload(
             // SCP to CDN
             let scp = std::process::Command::new("scp")
                 .arg(&img_path)
-                .arg(&seedpool_config.screenshots.remote_path)
+                .arg(format!("{}/screenshots/", seedpool_config.screenshots.remote_path.trim_end_matches('/')))
                 .output()
                 .map_err(|e| format!("Failed to upload description image via SCP: {}", e))?;
             if !scp.status.success() {
@@ -2069,7 +2080,7 @@ pub fn process_newspaper_upload(
             let img_name = format!("{}-page{}.jpg", base_name, i + 1);
             let scp = std::process::Command::new("scp")
                 .arg(img)
-                .arg(&seedpool_config.screenshots.remote_path)
+                .arg(format!("{}/screenshots/", seedpool_config.screenshots.remote_path.trim_end_matches('/')))
                 .output()
                 .map_err(|e| format!("Failed to upload description image via SCP: {}", e))?;
             if !scp.status.success() {
@@ -2107,12 +2118,14 @@ pub fn process_newspaper_upload(
     description.push_str("[/table][/center]\n\n");
     description.push_str(&format!("[center]{}[/center]", default_non_video_description()));
 
-    for entry in fs::read_dir(&working_dir).map_err(|e| format!("Failed to read directory '{}': {}", working_dir, e))? {
-        let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
-        let path = entry.path();
-        if path.extension().map(|ext| ext.eq_ignore_ascii_case("zip")).unwrap_or(false) {
-            fs::remove_file(&path)
-                .map_err(|e| format!("Failed to remove zip file '{}': {}", path.display(), e))?;
+    if !is_file {
+        for entry in fs::read_dir(&working_dir).map_err(|e| format!("Failed to read directory '{}': {}", working_dir, e))? {
+            let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+            let path = entry.path();
+            if path.extension().map(|ext| ext.eq_ignore_ascii_case("zip")).unwrap_or(false) {
+                fs::remove_file(&path)
+                    .map_err(|e| format!("Failed to remove zip file '{}': {}", path.display(), e))?;
+            }
         }
     }
 
@@ -2200,7 +2213,7 @@ pub fn process_newspaper_upload(
                 .map_err(|e| format!("Failed to set permissions for cover image '{}': {}", temp_cover_path.display(), e))?;
         }
 
-        let cover_remote_path = format!("{}/albumcovers", seedpool_config.screenshots.remote_path.trim_end_matches('/'));
+        let cover_remote_path = format!("{}/covers", seedpool_config.screenshots.remote_path.trim_end_matches('/'));
         let cover_scp = std::process::Command::new("scp")
             .arg(&temp_cover_path)
             .arg(&cover_remote_path)
