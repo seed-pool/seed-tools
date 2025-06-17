@@ -1,5 +1,5 @@
-use reqwest::blocking::{multipart::Form, Client};
-use reqwest::blocking::ClientBuilder;
+use reqwest::blocking::{multipart::Form, Client, ClientBuilder};
+use reqwest::header::HeaderValue;
 use reqwest::cookie::Jar;
 use std::path::Path;
 use std::sync::Arc;
@@ -8,6 +8,7 @@ use epub::doc::EpubDoc;
 use log::{info, error, warn};
 use std::process::Command;
 use std::collections::HashSet;
+use std::collections::HashMap;
 use serde_json::{Value, json};
 use rand::Rng;
 use std::os::unix::fs::PermissionsExt;
@@ -16,6 +17,7 @@ use zip::ZipArchive;
 use std::fs::File;
 use walkdir::WalkDir;
 use crate::types::{PathsConfig, SeedpoolConfig, Config, QbittorrentConfig, VideoSettings, DelugeConfig};
+use base64::Engine;
 
 pub fn generate_release_name(base_name: &str) -> String {
     let mut release_name = base_name.to_string();
@@ -92,6 +94,9 @@ where
     }
 
     process_path(path, &mut video_files, &mut nfo_file, &supported_extensions, exclusions_enabled)?;
+
+    // Ensure video files are returned in natural sort order (e.g. S01E01 before S01E02).
+    sort_files_naturally(&mut video_files);
 
     if video_files.is_empty() {
         error!("No valid video files detected after exclusions.");
@@ -1065,7 +1070,10 @@ pub fn generate_screenshots_imgbb(
     video_file: &str,
     ffmpeg_path: &Path,
     ffprobe_path: &Path,
-    imgbb_api_key: &str,
+    provider_order: &[String],
+    imgbb_api_key: Option<&str>,
+    ptscreens_api_key: Option<&str>,
+    freeimage_api_key: Option<&str>,
 ) -> Result<(Vec<String>, Vec<String>), String> {
     let mut screenshots = Vec::new();
     let mut thumbnails = Vec::new();
@@ -1090,8 +1098,14 @@ pub fn generate_screenshots_imgbb(
         // Generate screenshot
         generate_screenshot(video_file, ffmpeg_path.to_str().unwrap(), timestamp, &screenshot_path)?;
 
-        // Upload screenshot to ImgBB
-        let (full_image_url, thumb_url) = upload_to_imgbb(&screenshot_path, imgbb_api_key)?;
+        // Upload screenshot using configured provider order
+        let (full_image_url, thumb_url) = upload_with_order(
+            &screenshot_path,
+            provider_order,
+            imgbb_api_key,
+            ptscreens_api_key,
+            freeimage_api_key,
+        )?;
         screenshots.push(full_image_url); // Use full_image_url for the description
         thumbnails.push(thumb_url);
 
@@ -2369,4 +2383,165 @@ pub fn extract_epub_images(epub_path: &str, temp_dir: &std::path::Path) -> Resul
 
     images.sort();
     Ok(images)
+}
+
+pub fn extract_ids_from_nfo(nfo_content: &str) -> (Option<u32>, Option<String>, Option<u32>) {
+    let tmdb_link_re = Regex::new(r"https?://(?:www\.)?themoviedb\.org/(?:movie|tv)/(\d+)").unwrap();
+    let tmdb_id_re = Regex::new(r"(?i)tmdb[^0-9]*(\d{2,})").unwrap();
+    let imdb_re = Regex::new(r"tt(\d+)").unwrap();
+    let tvdb_link_re = Regex::new(r"https?://(?:www\.)?thetvdb\.com/(?:movies|series)/(\d+)").unwrap();
+    let tvdb_id_re = Regex::new(r"(?i)tvdb[^0-9]*(\d{2,})").unwrap();
+
+    let tmdb_id = tmdb_link_re
+        .captures(nfo_content)
+        .or_else(|| tmdb_id_re.captures(nfo_content))
+        .and_then(|cap| cap.get(1).and_then(|m| m.as_str().parse::<u32>().ok()));
+
+    let imdb_id = imdb_re
+        .captures(nfo_content)
+        .and_then(|cap| cap.get(1).map(|m| m.as_str().to_string()));
+
+    let tvdb_id = tvdb_link_re
+        .captures(nfo_content)
+        .or_else(|| tvdb_id_re.captures(nfo_content))
+        .and_then(|cap| cap.get(1).and_then(|m| m.as_str().parse::<u32>().ok()));
+
+    (tmdb_id, imdb_id, tvdb_id)
+}
+
+pub fn upload_to_ptscreens(image_path: &str, api_key: &str) -> Result<(String, String), String> {
+    let client = Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0")
+        .cookie_store(true)
+        .build()
+        .map_err(|e| format!("Client build error: {e}"))?;
+
+    let form = Form::new()
+        .file("source", image_path)
+        .map_err(|e| format!("Attach image file: {e}"))?
+        .text("format", "json");
+
+    let response = client
+        .post("https://ptscreens.com/api/1/upload")
+        .header("X-API-Key", HeaderValue::from_str(api_key).unwrap())
+        .multipart(form)
+        .send()
+        .map_err(|e| format!("Network/CF error: {e}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "PTS upload failed – HTTP {}: {}",
+            response.status(),
+            response.text().unwrap_or_default()
+        ));
+    }
+
+    let json: serde_json::Value = response.json().map_err(|e| format!("Parse JSON: {e}"))?;
+    let full = json["image"]["url"].as_str().ok_or("no url")?.to_string();
+    let thumb = json["image"]["thumb"]["url"]
+        .as_str()
+        .or_else(|| json["image"]["medium"]["url"].as_str())
+        .unwrap_or(&full)
+        .to_string();
+
+    Ok((full, thumb))
+}
+
+pub fn upload_to_freeimage(image_path: &str, api_key: &str) -> Result<(String, String), String> {
+    let client = Client::new();
+
+    log::debug!("Uploading image to FreeImage: path={}", image_path);
+
+    let mut file = fs::File::open(image_path)
+        .map_err(|e| format!("Failed to open image file: {}", e))?;
+    let mut buffer = Vec::new();
+    use std::io::Read;
+    file.read_to_end(&mut buffer)
+        .map_err(|e| format!("Failed to read image file: {}", e))?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&buffer);
+
+    let mut map = HashMap::new();
+    map.insert("key", api_key);
+    map.insert("image", &encoded);
+
+    let response = client
+        .post("https://freeimage.host/api/1/upload")
+        .form(&map)
+        .send()
+        .map_err(|e| format!("Failed to upload image to FreeImage: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let response_body = response.text().unwrap_or_else(|_| "Failed to read response body".to_string());
+        log::error!("FreeImage API Error: HTTP Status: {}, Response: {}", status, response_body);
+        return Err(format!(
+            "Failed to upload image to FreeImage. HTTP Status: {}. Response: {}",
+            status, response_body
+        ));
+    }
+
+    let json: serde_json::Value = response
+        .json()
+        .map_err(|e| format!("Failed to parse FreeImage response: {}", e))?;
+
+    let full_image_url = json["image"]["url"]
+        .as_str()
+        .ok_or("Failed to extract full image URL from FreeImage response")?
+        .to_string();
+    let thumb_url = json["image"]["thumb"]["url"]
+        .as_str()
+        .or_else(|| json["image"]["medium"]["url"].as_str())
+        .unwrap_or(&full_image_url)
+        .to_string();
+
+    log::info!("FreeImage Upload Successful: full_image_url={}, thumb_url={}", full_image_url, thumb_url);
+
+    Ok((full_image_url, thumb_url))
+}
+
+pub fn upload_with_order(
+    image_path: &str,
+    provider_order: &[String],
+    imgbb_api_key: Option<&str>,
+    ptscreens_api_key: Option<&str>,
+    freeimage_api_key: Option<&str>,
+) -> Result<(String, String), String> {
+    for provider in provider_order {
+        match provider.as_str() {
+            "imgbb" => {
+                if let Some(key) = imgbb_api_key {
+                    match upload_to_imgbb(image_path, key) {
+                        Ok(res) => return Ok(res),
+                        Err(e) => {
+                            log::warn!("ImgBB upload failed: {}", e);
+                        }
+                    }
+                }
+            }
+            "ptscreens" => {
+                if let Some(key) = ptscreens_api_key {
+                    match upload_to_ptscreens(image_path, key) {
+                        Ok(res) => return Ok(res),
+                        Err(e) => {
+                            log::warn!("PTScreens upload failed: {}", e);
+                        }
+                    }
+                }
+            }
+            "freeimage" => {
+                if let Some(key) = freeimage_api_key {
+                    match upload_to_freeimage(image_path, key) {
+                        Ok(res) => return Ok(res),
+                        Err(e) => {
+                            log::warn!("FreeImage upload failed: {}", e);
+                        }
+                    }
+                }
+            }
+            other => {
+                log::warn!("Unknown image host provider: {}", other);
+            }
+        }
+    }
+    Err("All image uploads failed".into())
 }

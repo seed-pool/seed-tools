@@ -12,7 +12,7 @@ use crate::{Config, Client, SeedpoolConfig, Tracker};
 use seed_tools::utils::{
     generate_release_name, extract_rar_archives, upload_to_cdn, extract_torrent_id, find_video_files, create_torrent, generate_mediainfo, generate_sample,
     generate_screenshots, fetch_tmdb_id, generate_ebook_bbcode_description, generate_screenshots_imgbb, default_non_video_description, fetch_external_ids, generate_description,
-    generate_subtitle_list, extract_ids_from_mediainfo,
+    generate_subtitle_list, extract_ids_from_mediainfo, extract_ids_from_nfo,
     add_torrent_to_all_qbittorrent_instances,
 };
 use regex::Regex;
@@ -34,6 +34,8 @@ pub fn process_seedpool_release(
     mkbrr_path: &Path,
     mediainfo_path: &Path,
     imgbb_api_key: Option<&str>, // Optional ImgBB API key
+    ptscreens_api_key: Option<&str>,
+    freeimage_api_key: Option<&str>,
     tmdb_id_override: Option<u32>,
     imdb_id_override: Option<String>,
     tvdb_id_override: Option<u32>,
@@ -166,32 +168,25 @@ pub fn process_seedpool_release(
     // Generate subtitle list for all files
     let subtitle_list = generate_subtitle_list(&video_files, &mediainfo_path.to_string_lossy())?;
 
-    // Generate screenshots using ImgBB or Seedpool CDN
-    let (screenshots, thumbnails) = if let Some(api_key) = imgbb_api_key {
-        if api_key.is_empty() {
-            log::warn!("ImgBB API key is empty. Falling back to Seedpool CDN for screenshots.");
-            match generate_screenshots(
-                &video_files[0],
-                &config.paths.screenshots_dir,
-                &ffmpeg_path.to_string_lossy(),
-                &ffprobe_path.to_string_lossy(),
-                &seedpool_config.screenshots.remote_path,
-                &seedpool_config.screenshots.image_path,
-                &_sanitized_name,
-            ) {
-                Ok(res) => res,
-                Err(e) => {
-                    log::error!("Screenshot generation failed: {e}. Proceeding without screenshots.");
-                    (vec![], vec![])
-                }
-            }
-        } else {
-            match generate_screenshots_imgbb(&video_files[0], ffmpeg_path, ffprobe_path, api_key) {
-                Ok(res) => res,
-                Err(e) => {
-                    log::error!("Screenshot generation failed: {e}. Proceeding without screenshots.");
-                    (vec![], vec![])
-                }
+    // Determine image host order
+    let provider_order: Vec<String> = if let Some(order_map) = &config.image_host_order {
+        let mut pairs: Vec<(u8, String)> = order_map.iter().map(|(k, v)| (*k, v.clone())).collect();
+        pairs.sort_by_key(|(k, _)| *k);
+        pairs.into_iter().map(|(_, v)| v).collect()
+    } else {
+        vec!["imgbb".to_string(), "ptscreens".to_string()]
+    };
+
+    // Generate screenshots based on configured provider order
+    let (screenshots, thumbnails) = if provider_order.get(0).map(|s| s.as_str()) == Some("imgbb")
+        || provider_order.get(0).map(|s| s.as_str()) == Some("ptscreens")
+        || provider_order.get(0).map(|s| s.as_str()) == Some("freeimage")
+    {
+        match generate_screenshots_imgbb(&video_files[0], ffmpeg_path, ffprobe_path, &provider_order, imgbb_api_key, ptscreens_api_key, freeimage_api_key) {
+            Ok(res) => res,
+            Err(e) => {
+                log::error!("Screenshot generation failed: {e}. Proceeding without screenshots.");
+                (vec![], vec![])
             }
         }
     } else {
@@ -1208,6 +1203,31 @@ pub fn preflight_check(
     };
     log::debug!("TMDB ID: {}", tmdb_id);
 
+    // Attempt to extract IDs from NFO if available
+    let mut nfo_imdb_id: Option<String> = None;
+    let mut nfo_tvdb_id: Option<u32> = None;
+    if tmdb_id == 0 || imdb_id_override.is_none() || tvdb_id_override.is_none() {
+        if let Ok((_, nfo_opt)) = find_video_files(input_path, &config.paths, &seedpool_config.settings) {
+            if let Some(nfo_path) = nfo_opt {
+                if let Ok(content) = std::fs::read_to_string(&nfo_path) {
+                    let (nfo_tmdb, nfo_imdb, nfo_tvdb) = extract_ids_from_nfo(&content);
+                    if tmdb_id == 0 {
+                        if let Some(id) = nfo_tmdb {
+                            log::info!("Found TMDB ID {} in NFO", id);
+                            tmdb_id = id;
+                        }
+                    }
+                    if imdb_id_override.is_none() {
+                        nfo_imdb_id = nfo_imdb;
+                    }
+                    if tvdb_id_override.is_none() {
+                        nfo_tvdb_id = nfo_tvdb;
+                    }
+                }
+            }
+        }
+    }
+
     // Attempt to extract IDs from MediaInfo if TMDB ID wasn't found
     let mut mediainfo_imdb_id: Option<String> = None;
     if tmdb_id == 0 || imdb_id_override.is_none() {
@@ -1232,9 +1252,9 @@ pub fn preflight_check(
         .unwrap_or((None, None));
     if let Some(id) = imdb_id_override { imdb_id = Some(id); }
     if let Some(id) = tvdb_id_override { tvdb_id = Some(id); }
-    if imdb_id.is_none() {
-        imdb_id = mediainfo_imdb_id.clone();
-    }
+    if imdb_id.is_none() { imdb_id = nfo_imdb_id.clone(); }
+    if tvdb_id.is_none() { tvdb_id = nfo_tvdb_id; }
+    if imdb_id.is_none() { imdb_id = mediainfo_imdb_id.clone(); }
     log::debug!("IMDb ID: {:?}, TVDB ID: {:?}", imdb_id, tvdb_id);
 
     // Step 6: Check the `strip_from_videos` setting

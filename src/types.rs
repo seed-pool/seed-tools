@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Deserialize)]
 pub struct GeneralConfig {
@@ -112,11 +112,24 @@ pub struct Config {
     pub qbittorrent: Vec<QbittorrentConfig>,
     pub deluge: DelugeConfig,
     pub imgbb: Option<ImgBBConfig>, // Add this field
+    pub ptscreens: Option<PTScreensConfig>,
+    pub freeimage: Option<FreeImageConfig>,
+    pub image_host_order: Option<BTreeMap<u8, String>>, // e.g. 1: "imgbb"
 }
 
 #[derive(Deserialize)]
 pub struct ImgBBConfig {
     pub imgbb_api_key: String,
+}
+
+#[derive(Deserialize)]
+pub struct PTScreensConfig {
+    pub api_key: String,
+}
+
+#[derive(Deserialize)]
+pub struct FreeImageConfig {
+    pub api_key: String,
 }
 
 pub trait VideoSettings {

@@ -424,6 +424,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         info!("Running in standard upload mode.");
         let imgbb_api_key = main_config.imgbb.as_ref().map(|imgbb| imgbb.imgbb_api_key.clone());
         debug!("Loaded imgbb API key: {:?}", imgbb_api_key);
+        let ptscreens_api_key = main_config.ptscreens.as_ref().map(|p| p.api_key.clone());
+        debug!("Loaded ptscreens API key: {:?}", ptscreens_api_key);
+        let freeimage_api_key = main_config.freeimage.as_ref().map(|f| f.api_key.clone());
+        debug!("Loaded freeimage API key: {:?}", freeimage_api_key);
         
         // Pass the imgbb_api_key to the relevant functions
         if cli.sp {
@@ -437,6 +441,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 &mkbrr_path,
                 &mediainfo_path,
                 imgbb_api_key.as_deref(), // Pass the imgbb API key
+                ptscreens_api_key.as_deref(),
+                freeimage_api_key.as_deref(),
                 cli.tmdb_id,
                 cli.imdb_id.clone(),
                 cli.tvdb_id,
