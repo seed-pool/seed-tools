@@ -1,5 +1,4 @@
 use reqwest::blocking::{multipart::Form, Client, ClientBuilder};
-use reqwest::header::HeaderValue;
 use reqwest::cookie::Jar;
 use std::path::Path;
 use std::sync::Arc;
@@ -1072,11 +1071,11 @@ pub fn generate_screenshots_imgbb(
     ffprobe_path: &Path,
     provider_order: &[String],
     imgbb_api_key: Option<&str>,
-    ptscreens_api_key: Option<&str>,
     freeimage_api_key: Option<&str>,
 ) -> Result<(Vec<String>, Vec<String>), String> {
     let mut screenshots = Vec::new();
     let mut thumbnails = Vec::new();
+    let mut dynamic_order = provider_order.to_vec();
 
     // Get video duration
     let duration = get_video_duration(video_file, ffprobe_path.to_str().unwrap())?;
@@ -1101,9 +1100,8 @@ pub fn generate_screenshots_imgbb(
         // Upload screenshot using configured provider order
         let (full_image_url, thumb_url) = upload_with_order(
             &screenshot_path,
-            provider_order,
+            &mut dynamic_order,
             imgbb_api_key,
-            ptscreens_api_key,
             freeimage_api_key,
         )?;
         screenshots.push(full_image_url); // Use full_image_url for the description
@@ -2409,44 +2407,6 @@ pub fn extract_ids_from_nfo(nfo_content: &str) -> (Option<u32>, Option<String>, 
     (tmdb_id, imdb_id, tvdb_id)
 }
 
-pub fn upload_to_ptscreens(image_path: &str, api_key: &str) -> Result<(String, String), String> {
-    let client = Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0")
-        .cookie_store(true)
-        .build()
-        .map_err(|e| format!("Client build error: {e}"))?;
-
-    let form = Form::new()
-        .file("source", image_path)
-        .map_err(|e| format!("Attach image file: {e}"))?
-        .text("format", "json");
-
-    let response = client
-        .post("https://ptscreens.com/api/1/upload")
-        .header("X-API-Key", HeaderValue::from_str(api_key).unwrap())
-        .multipart(form)
-        .send()
-        .map_err(|e| format!("Network/CF error: {e}"))?;
-
-    if !response.status().is_success() {
-        return Err(format!(
-            "PTS upload failed – HTTP {}: {}",
-            response.status(),
-            response.text().unwrap_or_default()
-        ));
-    }
-
-    let json: serde_json::Value = response.json().map_err(|e| format!("Parse JSON: {e}"))?;
-    let full = json["image"]["url"].as_str().ok_or("no url")?.to_string();
-    let thumb = json["image"]["thumb"]["url"]
-        .as_str()
-        .or_else(|| json["image"]["medium"]["url"].as_str())
-        .unwrap_or(&full)
-        .to_string();
-
-    Ok((full, thumb))
-}
-
 pub fn upload_to_freeimage(image_path: &str, api_key: &str) -> Result<(String, String), String> {
     let client = Client::new();
 
@@ -2501,45 +2461,36 @@ pub fn upload_to_freeimage(image_path: &str, api_key: &str) -> Result<(String, S
 
 pub fn upload_with_order(
     image_path: &str,
-    provider_order: &[String],
+    provider_order: &mut Vec<String>,
     imgbb_api_key: Option<&str>,
-    ptscreens_api_key: Option<&str>,
     freeimage_api_key: Option<&str>,
 ) -> Result<(String, String), String> {
-    for provider in provider_order {
-        match provider.as_str() {
+    let mut index = 0;
+    while index < provider_order.len() {
+        let provider = provider_order[index].clone();
+        let result = match provider.as_str() {
             "imgbb" => {
                 if let Some(key) = imgbb_api_key {
-                    match upload_to_imgbb(image_path, key) {
-                        Ok(res) => return Ok(res),
-                        Err(e) => {
-                            log::warn!("ImgBB upload failed: {}", e);
-                        }
-                    }
-                }
-            }
-            "ptscreens" => {
-                if let Some(key) = ptscreens_api_key {
-                    match upload_to_ptscreens(image_path, key) {
-                        Ok(res) => return Ok(res),
-                        Err(e) => {
-                            log::warn!("PTScreens upload failed: {}", e);
-                        }
-                    }
+                    upload_to_imgbb(image_path, key)
+                } else {
+                    Err("ImgBB API key missing".into())
                 }
             }
             "freeimage" => {
                 if let Some(key) = freeimage_api_key {
-                    match upload_to_freeimage(image_path, key) {
-                        Ok(res) => return Ok(res),
-                        Err(e) => {
-                            log::warn!("FreeImage upload failed: {}", e);
-                        }
-                    }
+                    upload_to_freeimage(image_path, key)
+                } else {
+                    Err("FreeImage API key missing".into())
                 }
             }
-            other => {
-                log::warn!("Unknown image host provider: {}", other);
+            other => Err(format!("Unknown image host provider: {}", other)),
+        };
+
+        match result {
+            Ok(res) => return Ok(res),
+            Err(e) => {
+                log::warn!("{} upload failed: {}. Removing from provider order.", provider, e);
+                provider_order.remove(index);
             }
         }
     }

@@ -34,7 +34,6 @@ pub fn process_seedpool_release(
     mkbrr_path: &Path,
     mediainfo_path: &Path,
     imgbb_api_key: Option<&str>, // Optional ImgBB API key
-    ptscreens_api_key: Option<&str>,
     freeimage_api_key: Option<&str>,
     tmdb_id_override: Option<u32>,
     imdb_id_override: Option<String>,
@@ -174,15 +173,14 @@ pub fn process_seedpool_release(
         pairs.sort_by_key(|(k, _)| *k);
         pairs.into_iter().map(|(_, v)| v).collect()
     } else {
-        vec!["imgbb".to_string(), "ptscreens".to_string()]
+        vec!["imgbb".to_string(), "freeimage".to_string()]
     };
 
     // Generate screenshots based on configured provider order
     let (screenshots, thumbnails) = if provider_order.get(0).map(|s| s.as_str()) == Some("imgbb")
-        || provider_order.get(0).map(|s| s.as_str()) == Some("ptscreens")
         || provider_order.get(0).map(|s| s.as_str()) == Some("freeimage")
     {
-        match generate_screenshots_imgbb(&video_files[0], ffmpeg_path, ffprobe_path, &provider_order, imgbb_api_key, ptscreens_api_key, freeimage_api_key) {
+        match generate_screenshots_imgbb(&video_files[0], ffmpeg_path, ffprobe_path, &provider_order, imgbb_api_key, freeimage_api_key) {
             Ok(res) => res,
             Err(e) => {
                 log::error!("Screenshot generation failed: {e}. Proceeding without screenshots.");

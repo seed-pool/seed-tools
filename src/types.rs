@@ -112,7 +112,6 @@ pub struct Config {
     pub qbittorrent: Vec<QbittorrentConfig>,
     pub deluge: DelugeConfig,
     pub imgbb: Option<ImgBBConfig>, // Add this field
-    pub ptscreens: Option<PTScreensConfig>,
     pub freeimage: Option<FreeImageConfig>,
     pub image_host_order: Option<BTreeMap<u8, String>>, // e.g. 1: "imgbb"
 }
@@ -120,11 +119,6 @@ pub struct Config {
 #[derive(Deserialize)]
 pub struct ImgBBConfig {
     pub imgbb_api_key: String,
-}
-
-#[derive(Deserialize)]
-pub struct PTScreensConfig {
-    pub api_key: String,
 }
 
 #[derive(Deserialize)]
