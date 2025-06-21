@@ -75,7 +75,7 @@ fn extract_binary_paths(config_path: &str) -> Result<(PathBuf, PathBuf, PathBuf,
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Automated tool for processing and uploading releases to trackers.", long_about = None)]
 struct Cli {
-    #[arg(long, conflicts_with_all = ["sp", "tl", "custom_cat_type", "command", "irc"])]
+    #[arg(long, conflicts_with_all = ["sp", "tl", "custom_cat_type", "irc"])]
     sync: bool,
 
     #[arg(long = "SP", requires = "input_path")]
@@ -87,14 +87,17 @@ struct Cli {
     #[arg(short = 'c', long, value_name = "CAT_TYPE", requires = "input_path")]
     custom_cat_type: Option<String>,
 
-    #[arg(long, conflicts_with_all = ["sync", "sp", "tl", "custom_cat_type", "command", "irc"])]
+    #[arg(long, conflicts_with_all = ["sync", "sp", "tl", "custom_cat_type", "irc"])]
     ui: bool, // Add the `ui` argument
 
-    #[arg(long, conflicts_with_all = ["sync", "sp", "tl", "custom_cat_type", "command", "ui"])]
+    #[arg(long, conflicts_with_all = ["sync", "sp", "tl", "custom_cat_type", "ui"])]
     irc: bool, // Add the `irc` argument
 
-    #[arg(long, conflicts_with_all = ["sync", "sp", "tl", "custom_cat_type", "command"])]
+    #[arg(long, conflicts_with_all = ["sync", "sp", "tl", "custom_cat_type"])]
     pre: bool, // Add the `pre` argument
+
+    #[arg(long, help = "Enable dry-run mode - simulate uploads without actually uploading")]
+    dry_run: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -304,7 +307,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 info!("Detected eBook upload mode with argument: {}", category_type_arg);
             
                 // Assuming `config` and `seedpool_config` are already initialized
-                if let Err(e) = utils::process_ebook_upload(input_path_str, &main_config, &seedpool_config) {
+                if let Err(e) = utils::process_ebook_upload(input_path_str, &main_config, &seedpool_config, cli.dry_run) {
                     error!("Error processing eBook upload: {}", e);
                 } else {
                     info!("Successfully processed eBook upload.");
@@ -315,7 +318,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             if category_type_arg == "0742" {
                 info!("Detected Newspaper upload mode with argument: {}", category_type_arg);
 
-                if let Err(e) = utils::process_newspaper_upload(input_path_str, &main_config, &seedpool_config) {
+                if let Err(e) = utils::process_newspaper_upload(input_path_str, &main_config, &seedpool_config, cli.dry_run) {
                     error!("Error processing Newspaper upload: {}", e);
                 } else {
                     info!("Successfully processed Newspaper upload.");
@@ -332,6 +335,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     &seedpool_config,
                     &mkbrr_path,
                     &mediainfo_path,
+                    cli.dry_run,
                 ) {
                     error!("Error processing Audiobook upload: {}", e);
                 } else {
@@ -374,6 +378,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     &main_config.paths,
                     igdb_client_id,
                     igdb_bearer_token,
+                    cli.dry_run,
                 ) {
                     error!("Error processing game upload for {}: {}", target_tracker, e);
                 } else {
@@ -408,6 +413,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 Some(&torrentleech_config),
                 mkbrr_path.to_str().ok_or("Invalid mkbrr_path")?,
                 &main_config.paths,
+                cli.dry_run,
             ) {
                 error!("Error processing custom upload for {}: {}", target_tracker, e);
             } else {
@@ -433,6 +439,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 &mkbrr_path,
                 &mediainfo_path,
                 imgbb_api_key.as_deref(), // Pass the imgbb API key
+                cli.dry_run,
             ) {
                 error!("Error processing Seedpool release: {}", e);
                 errors.push(format!("Seedpool: {}", e));
@@ -449,6 +456,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 &torrentleech_config,
                 &mkbrr_path,
                 &mediainfo_path,
+                cli.dry_run,
             ) {
                 error!("Error processing TorrentLeech release: {}", e);
                 errors.push(format!("TorrentLeech: {}", e));

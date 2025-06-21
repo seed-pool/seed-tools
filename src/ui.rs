@@ -202,6 +202,7 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
         
                     // Define layout for click handling
                     let size = terminal.size()?;
+                    let area = Rect::new(0, 0, size.width, size.height);
                     let chunks = Layout::default()
                         .direction(Direction::Vertical)
                         .constraints([
@@ -211,7 +212,7 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
                             Constraint::Length(5),  // Pre-flight Check section
                             Constraint::Length(3),  // Bottom section (Quit message)
                         ])
-                        .split(size);
+                        .split(area);
         
                     let top_chunks = Layout::default()
                         .direction(Direction::Horizontal)
@@ -1089,10 +1090,11 @@ fn tracker_select(
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         let size = terminal.size()?;
+        let area = Rect::new(0, 0, size.width, size.height);
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(3)].as_ref())
-            .split(size);
+            .split(area);
 
         let content_area_height = chunks[0].height.saturating_sub(1) as usize;
 

@@ -1,7 +1,7 @@
 use reqwest::blocking::{multipart::Form, Client};
 use reqwest::blocking::ClientBuilder;
 use reqwest::cookie::Jar;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use regex::Regex;
 use epub::doc::EpubDoc;
@@ -11,10 +11,9 @@ use std::collections::HashSet;
 use serde_json::{Value, json};
 use rand::Rng;
 use std::os::unix::fs::PermissionsExt;
-use std::fs::{self, Permissions};
+use std::fs;
 use zip::ZipArchive;
 use std::fs::File;
-use std::io::Write;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use walkdir::WalkDir;
@@ -951,7 +950,7 @@ pub fn add_torrent_to_deluge(
     Ok(())
 }
 
-pub fn upload_to_imgbb(image_path: &str, imgbb_api_key: &str) -> Result<(String, String), String> {
+pub fn upload_to_imgbb(image_path: &str, imgbb_api_key: &str, dry_run: bool) -> Result<(String, String), String> {
     let client = Client::new();
 
     // Log the image path and API key for debugging
@@ -963,6 +962,12 @@ pub fn upload_to_imgbb(image_path: &str, imgbb_api_key: &str) -> Result<(String,
 
     let url = format!("https://api.imgbb.com/1/upload?key={}", imgbb_api_key);
     log::debug!("ImgBB API URL: {}", url);
+
+    if dry_run {
+        info!("[DRY RUN] Would upload image to ImgBB: {}", url);
+        info!("[DRY RUN] Image path: {}", image_path);
+        return Ok(("https://i.ibb.co/fake-url".to_string(), "https://i.ibb.co/fake-thumb".to_string()));
+    }
 
     let response = client
         .post(&url)
@@ -1003,6 +1008,7 @@ pub fn generate_screenshots_imgbb(
     ffmpeg_path: &Path,
     ffprobe_path: &Path,
     imgbb_api_key: &str,
+    dry_run: bool,
 ) -> Result<(Vec<String>, Vec<String>), String> {
     let mut screenshots = Vec::new();
     let mut thumbnails = Vec::new();
@@ -1028,7 +1034,7 @@ pub fn generate_screenshots_imgbb(
         generate_screenshot(video_file, ffmpeg_path.to_str().unwrap(), timestamp, &screenshot_path)?;
 
         // Upload screenshot to ImgBB
-        let (full_image_url, thumb_url) = upload_to_imgbb(&screenshot_path, imgbb_api_key)?;
+        let (full_image_url, thumb_url) = upload_to_imgbb(&screenshot_path, imgbb_api_key, dry_run)?;
         screenshots.push(full_image_url); // Use full_image_url for the description
         thumbnails.push(thumb_url);
 
@@ -1039,7 +1045,7 @@ pub fn generate_screenshots_imgbb(
     Ok((screenshots, thumbnails))
 }
 
-pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: &SeedpoolConfig) -> Result<(), String> {
+pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: &SeedpoolConfig, dry_run: bool) -> Result<(), String> {
     use reqwest::blocking::Client;
     use std::fs;
 
@@ -1367,6 +1373,13 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
 
     // Send the upload request
     let client = Client::new();
+    
+    if dry_run {
+        info!("[DRY RUN] Would upload eBook to Seedpool: {}", seedpool_config.settings.upload_url);
+        info!("[DRY RUN] Form data would include: torrent file, description, category, type, etc.");
+        return Ok(());
+    }
+    
     let response = client
         .post(&seedpool_config.settings.upload_url)
         .header("Authorization", format!("Bearer {}", seedpool_config.general.api_key))
@@ -1942,6 +1955,7 @@ pub fn process_newspaper_upload(
     input_path: &str,
     config: &Config,
     seedpool_config: &SeedpoolConfig,
+    dry_run: bool,
 ) -> Result<(), String> {
     use reqwest::blocking::Client;
     use std::fs;
@@ -2219,6 +2233,13 @@ pub fn process_newspaper_upload(
     }
 
     let client = Client::new();
+    
+    if dry_run {
+        info!("[DRY RUN] Would upload newspaper to Seedpool: {}", seedpool_config.settings.upload_url);
+        info!("[DRY RUN] Form data would include: torrent file, description, category 7, type 42, etc.");
+        return Ok(());
+    }
+    
     let response = client
         .post(&seedpool_config.settings.upload_url)
         .header("Authorization", format!("Bearer {}", seedpool_config.general.api_key))

@@ -31,6 +31,7 @@ pub trait Tracker {
         episode_number: Option<u32>,
         resolution_id: Option<u32>,
         is_dated_tv: bool,
+        dry_run: bool,
     ) -> Result<(), String>;
     fn generate_metadata(&self, torrent_file: &str) -> Result<HashMap<String, String>, String>;
 }
@@ -46,6 +47,7 @@ pub fn process_custom_upload(
     torrentleech_config: Option<&TorrentLeechConfig>,
     mkbrr_path: &str,
     paths_config: &PathsConfig, // Add this parameter
+    dry_run: bool,
 ) -> Result<(), String> {
     let base_name = Path::new(input_path)
         .file_name()
@@ -272,6 +274,7 @@ pub fn process_game_upload(
     paths_config: &PathsConfig,
     igdb_client_id: &str,
     igdb_bearer_token: &str,
+    dry_run: bool,
 ) -> Result<(), String> {
     use seed_tools::utils::{upload_to_cdn, generate_game_description, download_igdb_screenshots};
     use std::path::Path;

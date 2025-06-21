@@ -13,9 +13,9 @@ use seed_tools::utils::{
     generate_screenshots, fetch_tmdb_id, generate_ebook_bbcode_description, generate_screenshots_imgbb, default_non_video_description, fetch_external_ids, generate_description,
     add_torrent_to_all_qbittorrent_instances,
 };
-use tui::text::Spans;
-use tui::text::Span;
-use tui::style::{Color, Style};
+use ratatui::text::Line;
+use ratatui::text::Span;
+use ratatui::style::{Color, Style};
 use regex::Regex;
 use log::{info, warn, error};
 use seed_tools::types::PreflightCheckResult;
@@ -35,6 +35,7 @@ pub fn process_seedpool_release(
     mkbrr_path: &Path,
     mediainfo_path: &Path,
     imgbb_api_key: Option<&str>, // Optional ImgBB API key
+    dry_run: bool,
 ) -> Result<(), String> {
     log::debug!("Processing release for input_path: {}", input_path);
 
@@ -177,7 +178,7 @@ pub fn process_seedpool_release(
                 }
             }
         } else {
-            match generate_screenshots_imgbb(&video_files[0], ffmpeg_path, ffprobe_path, api_key) {
+            match generate_screenshots_imgbb(&video_files[0], ffmpeg_path, ffprobe_path, api_key, dry_run) {
                 Ok(res) => res,
                 Err(e) => {
                     log::error!("Screenshot generation failed: {e}. Proceeding without screenshots.");
@@ -260,6 +261,7 @@ pub fn process_seedpool_release(
         episode_number,
         Some(resolution_id),
         is_dated_tv,
+        dry_run,
     )?;
 
     // Add torrent to clients
@@ -833,6 +835,7 @@ impl Tracker for Seedpool {
         episode_number: Option<u32>,
         resolution_id: Option<u32>,
         is_dated_tv: bool,
+        dry_run: bool,
     ) -> Result<(), String> {
         log::debug!(
             "upload: category_id={}, type_id={:?}, tmdb_id={:?}, imdb_id={:?}, tvdb_id={:?}, season_number={:?}, episode_number={:?}, resolution_id={:?}",
@@ -889,6 +892,13 @@ impl Tracker for Seedpool {
             if let Some(episode) = episode_number {
                 form = form.text("episode_number", episode.to_string());
             }
+        }
+
+        if dry_run {
+            info!("[DRY RUN] Would upload to Seedpool: {}", self.upload_url);
+            info!("[DRY RUN] Release name: {}", release_name);
+            info!("[DRY RUN] Category: {}, Type: {:?}", category_id, type_id);
+            return Ok(());
         }
 
         let response = client
@@ -1314,6 +1324,7 @@ pub fn process_audiobook_upload(
     seedpool_config: &SeedpoolConfig,
     mkbrr_path: &Path,
     mediainfo_path: &Path,
+    dry_run: bool,
 ) -> Result<(), String> {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -1687,6 +1698,13 @@ pub fn process_audiobook_upload(
 
     // 10. Upload to Seedpool (get torrent ID)
     info!("Uploading torrent to Seedpool...");
+    
+    if dry_run {
+        info!("[DRY RUN] Would upload audiobook to Seedpool: {}", seedpool_config.settings.upload_url);
+        info!("[DRY RUN] Form data would include: torrent file, description, category 9, type 21, etc.");
+        return Ok(());
+    }
+    
     let response = client
         .post(&seedpool_config.settings.upload_url)
         .header("Authorization", format!("Bearer {}", seedpool_config.general.api_key))
