@@ -21,38 +21,81 @@ use walkdir::WalkDir;
 use rand::seq::IteratorRandom;
 use crate::types::{PathsConfig, SeedpoolConfig, Config, QbittorrentConfig, VideoSettings, DelugeConfig};
 
+// Input validation functions
+pub fn validate_file_path(path: &str) -> Result<(), String> {
+    if path.is_empty() {
+        return Err("File path cannot be empty".to_string());
+    }
+    
+    let path_obj = Path::new(path);
+    if !path_obj.exists() {
+        return Err(format!("File or directory does not exist: {}", path));
+    }
+    
+    // Check for potential path traversal attacks
+    if path.contains("../") || path.contains("..\\") {
+        return Err("Path traversal patterns not allowed".to_string());
+    }
+    
+    Ok(())
+}
+
+pub fn validate_api_key(api_key: &str, key_name: &str) -> Result<(), String> {
+    if api_key.is_empty() {
+        return Err(format!("{} cannot be empty", key_name));
+    }
+    
+    if api_key.len() < 10 {
+        return Err(format!("{} appears to be too short", key_name));
+    }
+    
+    // Check for placeholder values
+    if api_key.contains("xxxxx") || api_key == "your_api_key_here" {
+        return Err(format!("{} appears to be a placeholder value", key_name));
+    }
+    
+    Ok(())
+}
+
+pub fn validate_url(url: &str, url_name: &str) -> Result<(), String> {
+    if url.is_empty() {
+        return Err(format!("{} cannot be empty", url_name));
+    }
+    
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err(format!("{} must start with http:// or https://", url_name));
+    }
+    
+    Ok(())
+}
+
 pub fn generate_release_name(base_name: &str) -> String {
     let mut release_name = base_name.to_string();
 
     // Remove file extensions
-    release_name = Regex::new(r"\.(epub|mobi|pdf|txt|mkv|mp4|m4b|avi|mov|flv|wmv|ts)$")
-        .unwrap()
-        .replace(&release_name, "")
-        .to_string();
+    if let Ok(re) = Regex::new(r"\.(epub|mobi|pdf|txt|mkv|mp4|m4b|avi|mov|flv|wmv|ts)$") {
+        release_name = re.replace(&release_name, "").to_string();
+    }
 
     // Replace non-alphanumeric characters with dots
-    release_name = Regex::new(r"[^A-Za-z0-9+\-]")
-        .unwrap()
-        .replace_all(&release_name, ".")
-        .to_string();
+    if let Ok(re) = Regex::new(r"[^A-Za-z0-9+\-]") {
+        release_name = re.replace_all(&release_name, ".").to_string();
+    }
 
     // Replace multiple dots with a single dot
-    release_name = Regex::new(r"\.\.+")
-        .unwrap()
-        .replace_all(&release_name, ".")
-        .to_string();
+    if let Ok(re) = Regex::new(r"\.\.+") {
+        release_name = re.replace_all(&release_name, ".").to_string();
+    }
 
     // Replace mixed dot-dash patterns
-    release_name = Regex::new(r"-\.+|\.-+")
-        .unwrap()
-        .replace_all(&release_name, "-")
-        .to_string();
+    if let Ok(re) = Regex::new(r"-\.+|\.-+") {
+        release_name = re.replace_all(&release_name, "-").to_string();
+    }
 
     // Remove trailing dots
-    release_name = Regex::new(r"\.$")
-        .unwrap()
-        .replace(&release_name, "")
-        .to_string();
+    if let Ok(re) = Regex::new(r"\.$") {
+        release_name = re.replace(&release_name, "").to_string();
+    }
 
     // Remove leading dots
     release_name.trim_start_matches('.').to_string()

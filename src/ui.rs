@@ -1,9 +1,9 @@
 // --- External Crates ---
-use tui::{
+use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
-    text::{Span, Spans},
+    text::{Span, Line},
     widgets::{Block, Borders, List, ListItem, Paragraph, Widget},
     Terminal,
 };
@@ -12,7 +12,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use tui::layout::Rect;
+use ratatui::layout::Rect;
 use walkdir::WalkDir;
 use simplelog::*;
 use std::sync::mpsc;
@@ -69,7 +69,7 @@ enum UIContent<'a> {
 
 impl<'a> UIContent<'a> {
     /// Renders the UIContent (List or Paragraph) in the specified area.
-    fn render(self, f: &mut tui::Frame<CrosstermBackend<std::io::Stdout>>, area: tui::layout::Rect) {
+    fn render(self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
         match self {
             UIContent::List(list) => f.render_widget(list, area),
             UIContent::Paragraph(paragraph) => f.render_widget(paragraph, area),
@@ -458,7 +458,7 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn render_ui(
-    f: &mut tui::Frame<CrosstermBackend<std::io::Stdout>>,
+    f: &mut ratatui::Frame,
     input_path: &Option<PathBuf>,
     selected_trackers: &Vec<String>,
     file_list: &Vec<String>,
@@ -515,7 +515,7 @@ fn render_ui(
     // Input Path
     if let Some(path) = input_path {
         if let Some(file_name) = path.file_name() {
-            status_lines.push(Spans::from(vec![
+            status_lines.push(Line::from(vec![
                 Span::styled(
                     "Input Path: ",
                     Style::default().fg(Color::DarkGray), // DarkGray for the label
@@ -526,7 +526,7 @@ fn render_ui(
                 ),
             ]));
         } else {
-            status_lines.push(Spans::from(vec![
+            status_lines.push(Line::from(vec![
                 Span::styled(
                     "Input Path: ",
                     Style::default().fg(Color::DarkGray), // DarkGray for the label
@@ -538,7 +538,7 @@ fn render_ui(
             ]));
         }
     } else {
-        status_lines.push(Spans::from(vec![
+        status_lines.push(Line::from(vec![
             Span::styled(
                 "Input Path: ",
                 Style::default().fg(Color::DarkGray), // DarkGray for the label
@@ -552,7 +552,7 @@ fn render_ui(
     
     // Selected Trackers
     if selected_trackers.is_empty() {
-        status_lines.push(Spans::from(vec![
+        status_lines.push(Line::from(vec![
             Span::styled(
                 "Trackers: ",
                 Style::default().fg(Color::DarkGray), // DarkGray for the label
@@ -563,7 +563,7 @@ fn render_ui(
             ),
         ]));
     } else {
-        status_lines.push(Spans::from(vec![
+        status_lines.push(Line::from(vec![
             Span::styled(
                 "Trackers: ",
                 Style::default().fg(Color::DarkGray), // DarkGray for the label
@@ -583,14 +583,14 @@ fn render_ui(
     
     // Render Button Section
     let button_lines = vec![
-        Spans::from(vec![Span::styled(
+        Line::from(vec![Span::styled(
             "🔺  ＵＰＬＯＡＤ ", // Upload button text
             Style::default()
                 .fg(Color::White) // Text color
                 .bg(Color::Red) // Background color
                 .add_modifier(Modifier::BOLD),
         )]),
-        Spans::from(vec![Span::styled(
+        Line::from(vec![Span::styled(
             "✅ ＰＲＥ-ＦＬＩＧＨＴ", // Pre-flight Check button text
             Style::default()
                 .fg(Color::White) // Text color
@@ -607,7 +607,7 @@ fn render_ui(
 
 
     // Render "Files" and "Logs" Buttons Section
-    let files_logs_spans = Spans::from(vec![
+    let files_logs_spans = Line::from(vec![
         Span::styled(
             " 🖥️ Files",
             Style::default()
@@ -624,7 +624,7 @@ fn render_ui(
     ]);
 
     let files_logs_paragraph = Paragraph::new(files_logs_spans)
-        .alignment(tui::layout::Alignment::Left) // Align to the left
+        .alignment(ratatui::layout::Alignment::Left) // Align to the left
         .style(Style::default().bg(Color::Rgb(8, 8, 32))); // Background color
 
     // Render the buttons section in chunks[1]
@@ -639,7 +639,7 @@ fn render_ui(
         .iter()
         .skip(terminal_scroll_offset) // Skip lines based on the scroll offset
         .take(middle_chunks[0].height as usize) // Take only the visible lines
-        .map(|line| Spans::from(Span::raw(line.clone())))
+        .map(|line| Line::from(Span::raw(line.clone())))
         .collect::<Vec<_>>();
 
     let terminal_widget = Paragraph::new(visible_lines)
@@ -690,17 +690,17 @@ fn render_ui(
 
             // Split the tracker name into styled parts
             let styled_tracker_name = if tracker.contains("🆂") {
-                Spans::from(vec![
+                Line::from(vec![
                     Span::styled("🆂", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)), // Blue for 🆂🅿
                     Span::raw(tracker_name[4..].to_string()), // Clone the rest of the line
                 ])
             } else if tracker.contains("🆃") {
-                Spans::from(vec![
+                Line::from(vec![
                     Span::styled("🆃", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)), // Green for 🆃🅻
                     Span::raw(tracker_name[4..].to_string()), // Clone the rest of the line
                 ])
             } else {
-                Spans::from(vec![Span::raw(tracker_name)]) // Default style for other trackers
+                Line::from(vec![Span::raw(tracker_name)]) // Default style for other trackers
             };
 
             ListItem::new(styled_tracker_name)
@@ -718,13 +718,13 @@ fn render_ui(
     
             if is_pending {
                 // Display hourglass emoji for all fields
-                preflight_lines.push(Spans::from(vec![Span::styled(
+                preflight_lines.push(Line::from(vec![Span::styled(
                     "⏳ Running Pre-flight Check ...",
                     Style::default().fg(Color::Yellow),
                 )]));
             } else {
                 // Line 1: Title, Release Type, Audio Languages
-                preflight_lines.push(Spans::from(vec![
+                preflight_lines.push(Line::from(vec![
                     // Title
                     Span::styled(
                         "Title: ",
@@ -772,7 +772,7 @@ fn render_ui(
                 ]));
     
                 // Line 2: TMDB, IMDb, TVDB IDs, Season/Episode Numbers
-                preflight_lines.push(Spans::from(vec![
+                preflight_lines.push(Line::from(vec![
                     // TMDB ID
                     Span::styled(
                         "TMDB: ",
@@ -824,7 +824,7 @@ fn render_ui(
                 ]));
     
                 // Line 3: Release Name
-                preflight_lines.push(Spans::from(vec![
+                preflight_lines.push(Line::from(vec![
                     // Label: "Release Name:"
                     Span::styled(
                         "Release Name: ",
@@ -838,7 +838,7 @@ fn render_ui(
                 ]));
     
                 // Line 4: Dupe Check, Strip From Videos, Album Cover
-                preflight_lines.push(Spans::from(vec![
+                preflight_lines.push(Line::from(vec![
                     // Dupe Check
                     Span::styled(
                         "Dupe Check: ",
@@ -911,7 +911,7 @@ fn render_ui(
                 ]));
             }
         } else {
-            preflight_lines.push(Spans::from(Span::styled(
+            preflight_lines.push(Line::from(Span::styled(
                 "Pre-flight Check: No results available",
                 Style::default().fg(Color::DarkGray),
             )));
@@ -924,13 +924,13 @@ fn render_ui(
     f.render_widget(preflight_paragraph, chunks[3]);
 
     // Render Bottom Section
-    let bottom_lines = vec![Spans::from(vec![Span::styled(
+    let bottom_lines = vec![Line::from(vec![Span::styled(
         "Spam [ESC] to Quit ❌",
         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
     )])];
     let bottom_paragraph = Paragraph::new(bottom_lines)
         .block(Block::default().borders(Borders::ALL).title(" ⌨  Keys "))
-        .alignment(tui::layout::Alignment::Center)
+        .alignment(ratatui::layout::Alignment::Center)
         .style(Style::default().bg(Color::Rgb(8, 8, 32))); // Background color
     f.render_widget(bottom_paragraph, chunks[4]);
 }

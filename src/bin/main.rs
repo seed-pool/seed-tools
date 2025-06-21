@@ -11,7 +11,7 @@ use std::fs::File;
 use std::error::Error;
 use reqwest::blocking::Client;
 use seed_tools::utils;
-use seed_tools::utils::generate_release_name;
+use seed_tools::utils::{generate_release_name, validate_file_path, validate_api_key, validate_url};
 use seed_tools::types::{Config, SeedpoolConfig, TorrentLeechConfig, QbittorrentConfig, DelugeConfig};
 use seed_tools::sync;
 use seed_tools::irc::launch_irc_client;
@@ -32,12 +32,14 @@ struct GeneralConfig {
     pub tmdb_api_key: String,
 }
 
-fn load_yaml_config<T: serde::de::DeserializeOwned>(path: &str) -> T {
-    serde_yaml::from_str(&fs::read_to_string(path).expect("Failed to read config file"))
-        .expect("Failed to parse YAML config")
+fn load_yaml_config<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, String> {
+    let content = fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read config file '{}': {}", path, e))?;
+    serde_yaml::from_str(&content)
+        .map_err(|e| format!("Failed to parse YAML config '{}': {}", path, e))
 }
 
-fn extract_binaries(config_path: &str) -> Result<String, String> {
+fn extract_binary_paths(config_path: &str) -> Result<(PathBuf, PathBuf, PathBuf, PathBuf), String> {
     let config: serde_yaml::Value = serde_yaml::from_str(
         &fs::read_to_string(config_path).map_err(|e| format!("Failed to read config file: {}", e))?,
     )
@@ -45,7 +47,10 @@ fn extract_binaries(config_path: &str) -> Result<String, String> {
     let paths = config["paths"]
         .as_mapping()
         .ok_or("Missing or invalid 'paths' field in config")?;
+    
     let required_binaries = ["ffmpeg", "ffprobe", "mkbrr", "mediainfo"];
+    let mut binary_paths = Vec::new();
+    
     for binary in &required_binaries {
         if !paths.contains_key(binary) {
             return Err(format!("Missing '{}' in 'paths' field of config", binary));
@@ -56,17 +61,15 @@ fn extract_binaries(config_path: &str) -> Result<String, String> {
         if !Path::new(binary_path).exists() {
             return Err(format!("Binary '{}' not found at '{}'", binary, binary_path));
         }
+        binary_paths.push(PathBuf::from(binary_path));
     }
-    let bin_dir = Path::new(
-        paths["ffmpeg"]
-            .as_str()
-            .ok_or("Invalid path for 'ffmpeg'")?,
-    )
-    .parent()
-    .ok_or("Failed to determine bin directory")?
-    .to_string_lossy()
-    .to_string();
-    Ok(bin_dir)
+    
+    Ok((
+        binary_paths[0].clone(), // ffmpeg
+        binary_paths[1].clone(), // ffprobe  
+        binary_paths[2].clone(), // mkbrr
+        binary_paths[3].clone(), // mediainfo
+    ))
 }
 
 #[derive(Parser, Debug)]
@@ -161,15 +164,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     info!("Loading configurations...");
     let main_config_path_str = main_config_path.to_str()
         .ok_or_else(|| format!("Invalid non-UTF8 path for main config: {:?}", main_config_path))?;
-    let binaries_dir = extract_binaries(main_config_path_str).unwrap_or_else(|e| {
-        error!("Failed to extract binaries using config {:?}: {}", main_config_path, e);
-        std::process::exit(1);
-    });
-
-    let ffmpeg_path = Path::new(&binaries_dir).join("ffmpeg");
-    let ffprobe_path = Path::new(&binaries_dir).join("ffprobe");
-    let mkbrr_path = Path::new(&binaries_dir).join("mkbrr");
-    let mediainfo_path = Path::new(&binaries_dir).join("mediainfo");
+    let (ffmpeg_path, ffprobe_path, mkbrr_path, mediainfo_path) = extract_binary_paths(main_config_path_str).map_err(|e| {
+        error!("Failed to extract binary paths using config {:?}: {}", main_config_path, e);
+        format!("Failed to extract binary paths: {}", e)
+    })?;
     debug!(
         "Binary paths: ffmpeg={:?}, ffprobe={:?}, mkbrr={:?}, mediainfo={:?}",
         ffmpeg_path, ffprobe_path, mkbrr_path, mediainfo_path
@@ -180,9 +178,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let torrentleech_config_path_str = torrentleech_config_path.to_str()
         .ok_or_else(|| format!("Invalid non-UTF8 path for torrentleech config: {:?}", torrentleech_config_path))?;
 
-    let mut main_config: Config = load_yaml_config::<Config>(main_config_path_str);
-    let seedpool_config: SeedpoolConfig = load_yaml_config(seedpool_config_path_str);
-    let torrentleech_config: TorrentLeechConfig = load_yaml_config(torrentleech_config_path_str);
+    let mut main_config: Config = load_yaml_config::<Config>(main_config_path_str)
+        .map_err(|e| format!("Failed to load main config: {}", e))?;
+    let seedpool_config: SeedpoolConfig = load_yaml_config(seedpool_config_path_str)
+        .map_err(|e| format!("Failed to load seedpool config: {}", e))?;
+    let torrentleech_config: TorrentLeechConfig = load_yaml_config(torrentleech_config_path_str)
+        .map_err(|e| format!("Failed to load torrentleech config: {}", e))?;
     info!("Configurations loaded.");
 
     if cli.pre {
@@ -270,6 +271,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // --- Handle Input Path Dependent Modes ---
     if let Some(input_path) = cli.input_path {
         let input_path_str = input_path.to_str().ok_or("Invalid input path string")?;
+        
+        // Validate input path
+        validate_file_path(input_path_str)
+            .map_err(|e| format!("Input path validation failed: {}", e))?;
+        
         info!("Processing input path: {}", input_path_str);
 
         // Generate release name
