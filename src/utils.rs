@@ -1057,94 +1057,327 @@ pub fn generate_screenshots_imgbb(
     Ok((screenshots, thumbnails))
 }
 
-pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: &SeedpoolConfig, dry_run: bool) -> Result<(), String> {
-    use reqwest::blocking::Client;
-    use std::fs;
+#[derive(Debug, Clone)]
+enum EbookType {
+    Epub,
+    Pdf,
+    Cbz,
+    Cbr,
+}
 
-    let mut working_dir = input_path.to_string();
-
-    // If input is a file, get its parent directory for extraction
-    let path = Path::new(&working_dir);
-    let is_file = path.is_file();
-    if !is_file && !path.is_dir() {
-        return Err(format!("Input path '{}' is neither a file nor a directory.", working_dir));
+impl EbookType {
+    fn from_extension(ext: &str) -> Option<Self> {
+        match ext.to_lowercase().as_str() {
+            "epub" => Some(EbookType::Epub),
+            "pdf" => Some(EbookType::Pdf),
+            "cbz" => Some(EbookType::Cbz),
+            "cbr" => Some(EbookType::Cbr),
+            _ => None,
+        }
     }
 
-    // 1. Extract all ZIP files in the directory
-    if !is_file {
-        let zip_files: Vec<_> = fs::read_dir(&working_dir)
-            .map_err(|e| format!("Failed to read directory '{}': {}", working_dir, e))?
-            .filter_map(|entry| {
-                let entry = entry.ok()?;
-                let path = entry.path();
-                if path.extension().map_or(false, |ext| ext.eq_ignore_ascii_case("zip")) {
-                    Some(path)
-                } else {
-                    None
-                }
-            })
-            .collect();
+    fn is_comic(&self) -> bool {
+        matches!(self, EbookType::Cbz | EbookType::Cbr)
+    }
 
-        for zip_file in &zip_files {
-            log::info!("Extracting ZIP archive: {}", zip_file.display());
-            let output = std::process::Command::new("unzip")
-                .arg("-o")
-                .arg(zip_file)
+    fn needs_renaming(&self) -> bool {
+        matches!(self, EbookType::Epub)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct EbookFile {
+    path: std::path::PathBuf,
+    ebook_type: EbookType,
+}
+
+fn extract_archives_in_directory(working_dir: &str) -> Result<(), String> {
+    use std::fs;
+
+    let zip_files: Vec<_> = fs::read_dir(working_dir)
+        .map_err(|e| format!("Failed to read directory '{}': {}", working_dir, e))?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if path.extension().map_or(false, |ext| ext.eq_ignore_ascii_case("zip")) {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for zip_file in &zip_files {
+        log::info!("Extracting ZIP archive: {}", zip_file.display());
+        let output = std::process::Command::new("unzip")
+            .arg("-o")
+            .arg(zip_file)
+            .arg("-d")
+            .arg(working_dir)
+            .output()
+            .map_err(|e| format!("Failed to execute unzip: {}", e))?;
+        if !output.status.success() {
+            return Err(format!(
+                "Failed to extract ZIP archive: {}. Error: {}",
+                zip_file.display(),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+    }
+
+    extract_rar_archives(working_dir)?;
+    Ok(())
+}
+
+fn find_ebook_file(working_dir: &str) -> Result<EbookFile, String> {
+    let mut found_files = Vec::new();
+    
+    for entry in WalkDir::new(working_dir).into_iter().filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_file() {
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                if let Some(ebook_type) = EbookType::from_extension(ext) {
+                    found_files.push(EbookFile {
+                        path: path.to_path_buf(),
+                        ebook_type,
+                    });
+                }
+            }
+        }
+    }
+
+    if found_files.is_empty() {
+        return Err(format!("No supported ebook files (.epub, .pdf, .cbz, .cbr) found in directory '{}'", working_dir));
+    }
+
+    // Priority: EPUB > CBZ > CBR > PDF
+    found_files.sort_by_key(|f| match f.ebook_type {
+        EbookType::Epub => 0,
+        EbookType::Cbz => 1, 
+        EbookType::Cbr => 2,
+        EbookType::Pdf => 3,
+    });
+
+    Ok(found_files.into_iter().next().unwrap())
+}
+
+fn find_all_comic_files_or_main_ebook(working_dir: &str) -> Result<Vec<EbookFile>, String> {
+    use walkdir::WalkDir;
+
+    let mut found_files = Vec::new();
+    
+    for entry in WalkDir::new(working_dir).max_depth(1) {
+        let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+        let path = entry.path();
+        
+        if path.is_file() {
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                if let Some(ebook_type) = EbookType::from_extension(ext) {
+                    found_files.push(EbookFile {
+                        path: path.to_path_buf(),
+                        ebook_type,
+                    });
+                }
+            }
+        }
+    }
+
+    if found_files.is_empty() {
+        return Err(format!("No supported ebook files (.epub, .pdf, .cbz, .cbr) found in directory '{}'", working_dir));
+    }
+
+    // Check if we have any comic files (CBR/CBZ)
+    let comic_files: Vec<EbookFile> = found_files.iter()
+        .filter(|f| f.ebook_type.is_comic())
+        .cloned()
+        .collect();
+
+    if !comic_files.is_empty() {
+        // If we have comic files, return ALL of them
+        log::info!("Found {} comic file(s) in directory: {}", comic_files.len(), working_dir);
+        Ok(comic_files)
+    } else {
+        // If no comic files, use the original priority system to return one file
+        found_files.sort_by_key(|f| match f.ebook_type {
+            EbookType::Epub => 0,
+            EbookType::Cbz => 1,
+            EbookType::Cbr => 2,
+            EbookType::Pdf => 3,
+        });
+        Ok(vec![found_files.into_iter().next().unwrap()])
+    }
+}
+
+fn extract_ebook_metadata(ebook_file: &EbookFile) -> Result<(Option<String>, Option<String>), String> {
+    match ebook_file.ebook_type {
+        EbookType::Pdf => extract_metadata_from_pdf(ebook_file.path.to_str().unwrap()),
+        EbookType::Epub => extract_metadata_from_epub(ebook_file.path.to_str().unwrap()),
+        EbookType::Cbz | EbookType::Cbr => extract_metadata_from_comic(&ebook_file.path),
+    }
+}
+
+fn extract_metadata_from_comic(comic_path: &Path) -> Result<(Option<String>, Option<String>), String> {
+    // Extract title from filename, remove common comic suffixes
+    let filename = comic_path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Unknown Comic")
+        .to_string();
+    
+    // Clean up common comic filename patterns
+    let title = filename
+        .replace("_", " ")
+        .replace("-", " ")
+        .trim()
+        .to_string();
+    
+    // For comics, author is typically not available from filename
+    Ok((Some(title), None))
+}
+
+fn extract_comic_images(comic_file: &EbookFile, working_dir: &str) -> Result<String, String> {
+    use std::fs;
+    use std::process::Command;
+    
+    let comic_path = &comic_file.path;
+    
+    // Extract directly to the working directory (not a subdirectory)
+    let extract_dir = Path::new(working_dir);
+    
+    match comic_file.ebook_type {
+        EbookType::Cbz => {
+            // Extract CBZ (ZIP) file directly to working directory
+            log::info!("Extracting CBZ file: {}", comic_path.display());
+            let output = Command::new("unzip")
+                .arg("-o") // Overwrite files
+                .arg("-j") // Junk paths (extract to flat directory)
+                .arg(comic_path)
                 .arg("-d")
-                .arg(&working_dir)
+                .arg(&extract_dir)
                 .output()
                 .map_err(|e| format!("Failed to execute unzip: {}", e))?;
+            
             if !output.status.success() {
                 return Err(format!(
-                    "Failed to extract ZIP archive: {}. Error: {}",
-                    zip_file.display(),
+                    "Failed to extract CBZ file: {}. Error: {}",
+                    comic_path.display(),
                     String::from_utf8_lossy(&output.stderr)
                 ));
             }
         }
-
-        // 2. Extract all RAR files in the directory (using your existing function)
-        extract_rar_archives(&working_dir)?;
+        EbookType::Cbr => {
+            // Extract CBR (RAR) file directly to working directory
+            log::info!("Extracting CBR file: {}", comic_path.display());
+            let output = Command::new("unrar")
+                .arg("e") // Extract files
+                .arg("-o+") // Overwrite files
+                .arg(comic_path)
+                .arg(&extract_dir)
+                .output()
+                .map_err(|e| format!("Failed to execute unrar: {}", e))?;
+            
+            if !output.status.success() {
+                return Err(format!(
+                    "Failed to extract CBR file: {}. Error: {}",
+                    comic_path.display(),
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+        }
+        _ => {
+            return Err(format!("Unsupported file type for comic extraction: {:?}", comic_file.ebook_type));
+        }
     }
-
-    // 3. Find the main ebook file (prefer .epub, fallback to .pdf)
-    let mut found_pdf: Option<String> = None;
-    let mut found_epub: Option<String> = None;
-    for entry in WalkDir::new(&working_dir).into_iter().filter_map(|e| e.ok()) {
+    
+    // Verify we extracted image files in the working directory
+    let mut image_count = 0;
+    for entry in fs::read_dir(&extract_dir)
+        .map_err(|e| format!("Failed to read extraction directory: {}", e))? {
+        let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
         let path = entry.path();
         if path.is_file() {
             if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                if ext.eq_ignore_ascii_case("epub") {
-                    found_epub = Some(path.to_string_lossy().to_string());
-                    break;
-                } else if ext.eq_ignore_ascii_case("pdf") {
-                    found_pdf = Some(path.to_string_lossy().to_string());
+                let ext_lower = ext.to_lowercase();
+                if ext_lower == "jpg" || ext_lower == "jpeg" || ext_lower == "png" 
+                    || ext_lower == "gif" || ext_lower == "bmp" || ext_lower == "webp" {
+                    image_count += 1;
                 }
             }
         }
     }
-    let (ebook_path, is_pdf) = if let Some(epub) = found_epub {
-        (epub, false)
-    } else if let Some(pdf) = found_pdf {
-        (pdf, true)
+    
+    if image_count == 0 {
+        return Err(format!("No image files found in comic archive: {}", comic_path.display()));
+    }
+    
+    log::info!("Successfully extracted {} images from {} to {}", image_count, comic_path.display(), working_dir);
+    Ok(working_dir.to_string())
+}
+
+pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: &SeedpoolConfig, dry_run: bool) -> Result<(), String> {    use reqwest::blocking::Client;
+    use std::fs;
+
+    // Validate input path
+    let path = Path::new(input_path);
+    let is_file = path.is_file();
+    
+    // Set working directory: if it's a file, use parent dir; if it's a dir, use the dir itself
+    let working_dir = if is_file {
+        path.parent()
+            .ok_or_else(|| format!("Cannot determine parent directory for file: {}", input_path))?
+            .to_string_lossy()
+            .to_string()
     } else {
-        return Err(format!("No .epub or .pdf files found in directory '{}'", working_dir));
+        input_path.to_string()
+    };
+    if !is_file && !path.is_dir() {
+        return Err(format!("Input path '{}' is neither a file nor a directory.", working_dir));
+    }
+
+    // Extract archives if processing a directory
+    if !is_file {
+        extract_archives_in_directory(&working_dir)?;
+    }
+
+    // Find ebook files (single file or all comics in directory)
+    let ebook_files = if is_file {
+        // If processing a specific file, use that file directly
+        let ebook_type = path.extension()
+            .and_then(|ext| ext.to_str())
+            .and_then(|ext| EbookType::from_extension(ext))
+            .ok_or_else(|| format!("Unsupported file type: {}", path.display()))?;
+        vec![EbookFile {
+            path: path.to_path_buf(),
+            ebook_type,
+        }]
+    } else {
+        // If processing a directory, find all comic files or the main ebook file
+        find_all_comic_files_or_main_ebook(&working_dir)?
     };
 
-    // 4. Extract metadata and cover
-    let (mut title, mut author) = if is_pdf {
-        extract_metadata_from_pdf(&ebook_path)?
+    // Use the first file for metadata extraction and main processing
+    let main_ebook_file = &ebook_files[0];
+
+    // Extract metadata and cover
+    let (title_opt, author_opt) = extract_ebook_metadata(&main_ebook_file)?;
+    let mut title = title_opt.unwrap_or_else(|| "Unknown Title".to_string());
+    let mut author = author_opt.unwrap_or_else(|| "Unknown Author".to_string());
+
+    // Extract comic images if we have CBR/CBZ files
+    let actual_content_path = if main_ebook_file.ebook_type.is_comic() {
+        // Extract images from all comic files
+        for ebook_file in &ebook_files {
+            if ebook_file.ebook_type.is_comic() {
+                let extracted_dir = extract_comic_images(&ebook_file, &working_dir)?;
+                log::info!("Comic images extracted from {} to: {}", ebook_file.path.display(), extracted_dir);
+            }
+        }
+        working_dir.clone()
     } else {
-        extract_metadata_from_epub(&ebook_path)?
+        working_dir.clone()
     };
 
-    let mut title = title.unwrap_or_else(|| "Unknown Title".to_string());
-    let mut author = author.unwrap_or_else(|| "Unknown Author".to_string());
-
-    // Sanitize the file name and rename the ebook file
-    let new_ebook_path = if is_pdf {
-        Path::new(&ebook_path).to_path_buf() // Don't rename PDF
-    } else {
+    // Sanitize the file name and rename the ebook file if needed
+    let new_ebook_path = if main_ebook_file.ebook_type.needs_renaming() {
         let sanitized_author = {
             let parts: Vec<&str> = author.split_whitespace().collect();
             if parts.len() > 1 {
@@ -1164,26 +1397,29 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
             .replace("*", "");
         let new_ext = "epub";
         let new_ebook_name = format!("{} - {}.{}", sanitized_author, sanitized_title, new_ext);
-        let new_ebook_path = Path::new(&ebook_path).with_file_name(new_ebook_name);
-        fs::rename(&ebook_path, &new_ebook_path)
+        let new_ebook_path = main_ebook_file.path.with_file_name(new_ebook_name);
+        fs::rename(&main_ebook_file.path, &new_ebook_path)
             .map_err(|e| format!("Failed to rename ebook file: {}", e))?;
         new_ebook_path
+    } else {
+        main_ebook_file.path.clone() // Don't rename PDF, CBR, CBZ files
     };
 
-    // Remove any other .epub or .pdf files except the renamed one
+    // Clean up other ebook files except the selected one
     for entry in fs::read_dir(&working_dir).map_err(|e| format!("Failed to read directory '{}': {}", working_dir, e))? {
         let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
         let path = entry.path();
 
-        if is_pdf {
-            // Remove all .epub and .zip files, but NEVER remove the found PDF
+        if matches!(main_ebook_file.ebook_type, EbookType::Pdf | EbookType::Cbr | EbookType::Cbz) {
+            // Remove all .epub and .zip files, but keep the selected file
             if (path.extension().map(|ext| ext.eq_ignore_ascii_case("epub")).unwrap_or(false)
                 || path.extension().map(|ext| ext.eq_ignore_ascii_case("zip")).unwrap_or(false))
+                && path != new_ebook_path
             {
                 fs::remove_file(&path)
                     .map_err(|e| format!("Failed to remove file '{}': {}", path.display(), e))?;
             }
-            // Do NOT remove the PDF file at ebook_path (or new_ebook_path)
+            // Do NOT remove the PDF file at main_ebook_file.path (or new_ebook_path)
         } else {
             // For EPUBs: keep only the renamed epub, remove all other epubs
             if path.extension().map(|ext| ext.eq_ignore_ascii_case("epub")).unwrap_or(false)
@@ -1196,22 +1432,13 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
         }
     }
 
-    let torrent_input = &working_dir;
-    let torrent_file = create_torrent(
-        torrent_input,
-        &config.paths.torrent_dir,
-        &seedpool_config.settings.announce_url,
-        &config.paths.mkbrr,
-        true,
-    )?;
-
-    // Use the base name of the directory or ebook for the upload form
-    let base_name = Path::new(torrent_input)
+    // Generate comic description before removing CBR/CBZ files (or for PDF magazines/comics)
+    let base_name = Path::new(&actual_content_path)
         .file_name()
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-
+    
     let lower_base = base_name.to_lowercase();
     let type_id = if lower_base.contains("magazine") {
         "41"
@@ -1220,6 +1447,67 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
     } else {
         "20"
     };
+
+    let (mut description, mut keywords, mut cover_id) = if main_ebook_file.ebook_type.is_comic() || (matches!(main_ebook_file.ebook_type, EbookType::Pdf) && (type_id == "40" || type_id == "41")) {
+        let torrent_name = generate_release_name(&base_name);
+        let desc = generate_ebook_description(
+            new_ebook_path.to_str().unwrap(),
+            &torrent_name,
+            &seedpool_config.screenshots.remote_path,
+            &seedpool_config.screenshots.image_path,
+            dry_run,
+        )?;
+        let keywords = if type_id == "41" { "magazine".to_string() } else { "comic".to_string() };
+        (desc, keywords, None)
+    } else {
+        (String::new(), String::new(), None)
+    };
+
+    // Store original CBR/CBZ files in memory buffers, then remove from disk for torrent creation
+    let mut backup_archive_buffers = Vec::new();
+    for ebook_file in &ebook_files {
+        if ebook_file.ebook_type.is_comic() {
+            log::info!("Reading comic archive into memory buffer: {}", ebook_file.path.display());
+            let file_content = fs::read(&ebook_file.path)
+                .map_err(|e| format!("Failed to read comic file '{}' into memory: {}", ebook_file.path.display(), e))?;
+            backup_archive_buffers.push((ebook_file.path.clone(), file_content));
+            
+            log::info!("Temporarily removing comic archive from disk: {}", ebook_file.path.display());
+            fs::remove_file(&ebook_file.path)
+                .map_err(|e| format!("Failed to remove original comic file '{}': {}", ebook_file.path.display(), e))?;
+        }
+    }
+
+    // Create a restore guard to ensure files are always restored, even on error
+    struct RestoreGuard {
+        backup_buffers: Vec<(std::path::PathBuf, Vec<u8>)>,
+    }
+    
+    impl Drop for RestoreGuard {
+        fn drop(&mut self) {
+            for (original_path, file_content) in &self.backup_buffers {
+                if let Err(e) = fs::write(original_path, file_content) {
+                    log::error!("Failed to restore comic file '{}' during cleanup: {}", original_path.display(), e);
+                } else {
+                    log::info!("Restored comic file from memory during cleanup: {}", original_path.display());
+                }
+            }
+        }
+    }
+    
+    let _restore_guard = RestoreGuard {
+        backup_buffers: backup_archive_buffers.clone(),
+    };
+
+    let torrent_input = &actual_content_path;
+    let torrent_file = create_torrent(
+        torrent_input,
+        &config.paths.torrent_dir,
+        &seedpool_config.settings.announce_url,
+        &config.paths.mkbrr,
+        false, // Don't exclude image files for ebook/comic processing
+    )?;
+
 
     let nfo_file = fs::read_dir(&working_dir)
         .ok()
@@ -1236,18 +1524,7 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
         });
 
     // --- SKIP OPEN LIBRARY FOR COMICS & MAGAZINES ---
-    let (mut description, mut keywords);
-    let mut cover_id: Option<u64> = None;
-    if is_pdf && (type_id == "40" || type_id == "41") {
-        let torrent_name = generate_release_name(&base_name);
-        description = generate_comic_description(
-            &ebook_path,
-            &torrent_name,
-            &seedpool_config.screenshots.remote_path,
-            &seedpool_config.screenshots.image_path,
-        )?;
-        keywords = if type_id == "41" { "magazine".to_string() } else { "comic".to_string() };
-    } else {
+    if !main_ebook_file.ebook_type.is_comic() && !(matches!(main_ebook_file.ebook_type, EbookType::Pdf) && (type_id == "40" || type_id == "41")) {
         // --- ORIGINAL OPEN LIBRARY LOOKUP AND DESCRIPTION LOGIC ---
         let mut open_library_work_key = String::new();
         let mut open_library_author_key = String::new();
@@ -1340,8 +1617,8 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
 
     // If PDF, extract cover image from first page using Ghostscript
     let mut pdf_cover_image_path = None;
-    if is_pdf {
-        let cover_path = format!("{}.cover.jpg", ebook_path);
+    if matches!(main_ebook_file.ebook_type, EbookType::Pdf) {
+        let cover_path = format!("{}.cover.jpg", new_ebook_path.to_str().unwrap());
         let output = std::process::Command::new("gs")
             .args(&[
                 "-dBATCH", "-dNOPAUSE",
@@ -1349,7 +1626,7 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
                 "-dFirstPage=1", "-dLastPage=1",
                 "-r150", "-dJPEGQ=95",
                 &format!("-sOutputFile={}", cover_path),
-                &ebook_path,
+                new_ebook_path.to_str().unwrap(),
             ])
             .output()
             .map_err(|e| format!("Failed to run gs: {}", e))?;
@@ -1416,7 +1693,7 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
     // --- COVER HANDLING ---
 
     // For EPUBs: Fetch the cover image using the cover ID from Open Library (existing logic)
-    if !is_pdf && (type_id != "40" && type_id != "41") {
+    if !matches!(main_ebook_file.ebook_type, EbookType::Pdf) && (type_id != "40" && type_id != "41") {
         let mut cover_handled = false;
         if let Some(cover_id) = cover_id {
             let cover_url = format!("https://covers.openlibrary.org/b/id/{}-L.jpg", cover_id);
@@ -1451,22 +1728,24 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
                     info!("Successfully set permissions to 777 for cover image: {}", renamed_cover_path.display());
                 }
 
-                // Upload the cover image to the CDN using SCP
+                // Upload the cover image to the CDN using SCP (skip during dry run)
                 let remote_covers_path = format!(
                     "{}/covers",
                     seedpool_config.screenshots.remote_path.trim_end_matches('/')
                 );
-                let scp_command = std::process::Command::new("scp")
-                    .arg(&renamed_cover_path)
-                    .arg(&remote_covers_path)
-                    .output()
-                    .map_err(|e| format!("Failed to upload cover image via SCP: {}", e))?;
+                if !dry_run {
+                    let scp_command = std::process::Command::new("scp")
+                        .arg(&renamed_cover_path)
+                        .arg(&remote_covers_path)
+                        .output()
+                        .map_err(|e| format!("Failed to upload cover image via SCP: {}", e))?;
 
-                if !scp_command.status.success() {
-                    return Err(format!(
-                        "Failed to upload cover image via SCP. Error: {}",
-                        String::from_utf8_lossy(&scp_command.stderr)
-                    ));
+                    if !scp_command.status.success() {
+                        return Err(format!(
+                            "Failed to upload cover image via SCP. Error: {}",
+                            String::from_utf8_lossy(&scp_command.stderr)
+                        ));
+                    }
                 }
 
                 info!("Successfully uploaded cover image to CDN: {}", remote_covers_path);
@@ -1494,16 +1773,19 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
                     "{}/covers",
                     seedpool_config.screenshots.remote_path.trim_end_matches('/')
                 );
-                let scp_command = std::process::Command::new("scp")
-                    .arg(&renamed_cover_path)
-                    .arg(&remote_covers_path)
-                    .output()
-                    .map_err(|e| format!("Failed to upload extracted cover image via SCP: {}", e))?;
-                if !scp_command.status.success() {
-                    return Err(format!(
-                        "Failed to upload extracted cover image via SCP. Error: {}",
-                        String::from_utf8_lossy(&scp_command.stderr)
-                    ));
+                // SCP to CDN (skip during dry run)
+                if !dry_run {
+                    let scp_command = std::process::Command::new("scp")
+                        .arg(&renamed_cover_path)
+                        .arg(&remote_covers_path)
+                        .output()
+                        .map_err(|e| format!("Failed to upload extracted cover image via SCP: {}", e))?;
+                    if !scp_command.status.success() {
+                        return Err(format!(
+                            "Failed to upload extracted cover image via SCP. Error: {}",
+                            String::from_utf8_lossy(&scp_command.stderr)
+                        ));
+                    }
                 }
                 info!("Successfully uploaded extracted EPUB cover image to CDN: {}", remote_covers_path);
             } else {
@@ -1513,7 +1795,7 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
     }
 
     // For PDFs: Upload the extracted cover image (if any)
-    if is_pdf {
+    if matches!(main_ebook_file.ebook_type, EbookType::Pdf) {
         if let Some(cover_path) = pdf_cover_image_path {
             // Rename the cover image to include the torrent ID
             let renamed_cover_path = Path::new(&cover_path)
@@ -1531,22 +1813,25 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
                 info!("Successfully set permissions to 777 for cover image: {}", renamed_cover_path.display());
             }
 
-            info!("Uploading extracted PDF cover image: {}", renamed_cover_path.display());
+            info!("Preparing to upload extracted PDF cover image: {}", renamed_cover_path.display());
             let remote_covers_path = format!(
                 "{}/covers",
                 seedpool_config.screenshots.remote_path.trim_end_matches('/')
             );
-            let scp_command = std::process::Command::new("scp")
-                .arg(&renamed_cover_path)
-                .arg(&remote_covers_path)
-                .output()
-                .map_err(|e| format!("Failed to upload cover image via SCP: {}", e))?;
+            // SCP to CDN (skip during dry run)
+            if !dry_run {
+                let scp_command = std::process::Command::new("scp")
+                    .arg(&renamed_cover_path)
+                    .arg(&remote_covers_path)
+                    .output()
+                    .map_err(|e| format!("Failed to upload cover image via SCP: {}", e))?;
 
-            if !scp_command.status.success() {
-                return Err(format!(
-                    "Failed to upload cover image via SCP. Error: {}",
-                    String::from_utf8_lossy(&scp_command.stderr)
-                ));
+                if !scp_command.status.success() {
+                    return Err(format!(
+                        "Failed to upload cover image via SCP. Error: {}",
+                        String::from_utf8_lossy(&scp_command.stderr)
+                    ));
+                }
             }
             info!("Successfully uploaded cover image to CDN: {}", remote_covers_path);
         }
@@ -1560,6 +1845,8 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
         new_ebook_path.to_str().unwrap(),
         &config.paths,
     )?;
+
+    // Files will be automatically restored by the RestoreGuard when function exits
 
     Ok(())
 }
@@ -1879,64 +2166,143 @@ pub fn generate_game_description(
     description
 }
 
-pub fn generate_comic_description(
-    pdf_path: &str,
+pub fn generate_ebook_description(
+    ebook_path: &str,
     torrent_name: &str,
     remote_path: &str,
     public_image_path: &str,
+    dry_run: bool,
 ) -> Result<String, String> {
     use std::fs;
+    use std::path::Path;
 
     let mut image_urls = Vec::new();
+    
+    // Determine file type from extension
+    let path = Path::new(ebook_path);
+    let extension = path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_lowercase())
+        .unwrap_or_default();
+    
+    match extension.as_str() {
+        "cbr" | "cbz" => {
+            // For CBR/CBZ files, find and use existing extracted images
+            let parent_dir = path.parent()
+                .ok_or_else(|| "Cannot determine parent directory".to_string())?;
+            
+            // Look for extracted image files in the parent directory
+            let mut image_files = Vec::new();
+            for entry in fs::read_dir(parent_dir)
+                .map_err(|e| format!("Failed to read directory: {}", e))? {
+                let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+                let file_path = entry.path();
+                if file_path.is_file() {
+                    if let Some(ext) = file_path.extension().and_then(|e| e.to_str()) {
+                        let ext_lower = ext.to_lowercase();
+                        if ext_lower == "jpg" || ext_lower == "jpeg" || ext_lower == "png" 
+                            || ext_lower == "gif" || ext_lower == "bmp" || ext_lower == "webp" {
+                            image_files.push(file_path);
+                        }
+                    }
+                }
+            }
+            
+            // Sort files by name to ensure consistent ordering
+            image_files.sort();
+            
+            // Use up to 8 images (similar to the 3-10 page range for PDFs)
+            let images_to_use = image_files.iter().take(8);
+            
+            for (index, image_file) in images_to_use.enumerate() {
+                let image_name = format!("{}-image{}.jpg", torrent_name, index + 1);
+                let temp_image_path = format!("{}/{}", std::env::temp_dir().to_string_lossy(), image_name);
+                
+                // Copy the extracted image to temp directory with standardized name
+                fs::copy(image_file, &temp_image_path)
+                    .map_err(|e| format!("Failed to copy image '{}': {}", image_file.display(), e))?;
+                
+                // Set permissions to 777
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&temp_image_path, fs::Permissions::from_mode(0o777))
+                        .map_err(|e| format!("Failed to set permissions for '{}': {}", temp_image_path, e))?;
+                }
 
-    // Always extract pages 3-10
-    for page in 3..=10 {
-        let image_name = format!("{}-page{}.jpg", torrent_name, page);
-        let image_path = format!("{}/{}", std::env::temp_dir().to_string_lossy(), image_name);
+                // SCP to CDN (skip during dry run)
+                if !dry_run {
+                    let scp_status = std::process::Command::new("scp")
+                        .arg(&temp_image_path)
+                        .arg(format!("{}/screenshots/", remote_path.trim_end_matches('/')))
+                        .status()
+                        .map_err(|e| format!("Failed to scp '{}': {}", temp_image_path, e))?;
+                    if !scp_status.success() {
+                        return Err(format!("Failed to scp '{}'", temp_image_path));
+                    }
+                }
 
-        // Extract page as JPEG
-        let output = std::process::Command::new("gs")
-            .args(&[
-                "-dBATCH", "-dNOPAUSE",
-                "-sDEVICE=jpeg",
-                &format!("-dFirstPage={}", page),
-                &format!("-dLastPage={}", page),
-                "-r300", "-dJPEGQ=95",
-                &format!("-sOutputFile={}", image_path),
-                pdf_path,
-            ])
-            .output()
-            .map_err(|e| format!("Failed to run gs for page {}: {}", page, e))?;
-
-        if !output.status.success() {
-            return Err(format!(
-                "Failed to extract page {}: {}",
-                page,
-                String::from_utf8_lossy(&output.stderr)
-            ));
+                // Build public URL
+                let cdn_url = format!("{}/{}", public_image_path.trim_end_matches('/'), image_name);
+                image_urls.push(cdn_url);
+            }
         }
+        "pdf" => {
+            // For PDF files, use GhostScript to extract pages 3-10
+            for page in 3..=10 {
+                let image_name = format!("{}-page{}.jpg", torrent_name, page);
+                let image_path = format!("{}/{}", std::env::temp_dir().to_string_lossy(), image_name);
 
-        // Set permissions to 777
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&image_path, fs::Permissions::from_mode(0o777))
-                .map_err(|e| format!("Failed to set permissions for '{}': {}", image_path, e))?;
+                // Extract page as JPEG using GhostScript
+                let output = std::process::Command::new("gs")
+                    .args(&[
+                        "-dBATCH", "-dNOPAUSE",
+                        "-sDEVICE=jpeg",
+                        &format!("-dFirstPage={}", page),
+                        &format!("-dLastPage={}", page),
+                        "-r300", "-dJPEGQ=95",
+                        &format!("-sOutputFile={}", image_path),
+                        ebook_path,
+                    ])
+                    .output()
+                    .map_err(|e| format!("Failed to run gs for page {}: {}", page, e))?;
+
+                if !output.status.success() {
+                    return Err(format!(
+                        "Failed to extract page {}: {}",
+                        page,
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                }
+
+                // Set permissions to 777
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&image_path, fs::Permissions::from_mode(0o777))
+                        .map_err(|e| format!("Failed to set permissions for '{}': {}", image_path, e))?;
+                }
+
+                // SCP to CDN (skip during dry run)
+                if !dry_run {
+                    let scp_status = std::process::Command::new("scp")
+                        .arg(&image_path)
+                        .arg(format!("{}/screenshots/", remote_path.trim_end_matches('/')))
+                        .status()
+                        .map_err(|e| format!("Failed to scp '{}': {}", image_path, e))?;
+                    if !scp_status.success() {
+                        return Err(format!("Failed to scp '{}'", image_path));
+                    }
+                }
+
+                // Build public URL
+                let cdn_url = format!("{}/{}", public_image_path.trim_end_matches('/'), image_name);
+                image_urls.push(cdn_url);
+            }
         }
-
-        // SCP to CDN (remote_path as-is)
-        let scp_status = std::process::Command::new("scp")
-            .arg(&image_path)
-            .arg(format!("{}/screenshots/", remote_path.trim_end_matches('/')))
-            .status()
-            .map_err(|e| format!("Failed to scp '{}': {}", image_path, e))?;
-        if !scp_status.success() {
-            return Err(format!("Failed to scp '{}'", image_path));
+        _ => {
+            return Err(format!("Unsupported file type for description generation: {}", extension));
         }
-
-        // Build public URL
-        let cdn_url = format!("{}/{}", public_image_path.trim_end_matches('/'), image_name);
-        image_urls.push(cdn_url);
     }
 
     // Build BBCode description
@@ -2111,17 +2477,19 @@ pub fn process_newspaper_upload(
                 fs::set_permissions(&img_path, fs::Permissions::from_mode(0o777))
                     .map_err(|e| format!("Failed to set permissions for '{}': {}", img_path.display(), e))?;
             }
-            // SCP to CDN
-            let scp = std::process::Command::new("scp")
-                .arg(&img_path)
-                .arg(format!("{}/screenshots/", seedpool_config.screenshots.remote_path.trim_end_matches('/')))
-                .output()
-                .map_err(|e| format!("Failed to upload description image via SCP: {}", e))?;
-            if !scp.status.success() {
-                return Err(format!(
-                    "Failed to upload description image via SCP. Error: {}",
-                    String::from_utf8_lossy(&scp.stderr)
-                ));
+            // SCP to CDN (skip during dry run)
+            if !dry_run {
+                let scp = std::process::Command::new("scp")
+                    .arg(&img_path)
+                    .arg(format!("{}/screenshots/", seedpool_config.screenshots.remote_path.trim_end_matches('/')))
+                    .output()
+                    .map_err(|e| format!("Failed to upload description image via SCP: {}", e))?;
+                if !scp.status.success() {
+                    return Err(format!(
+                        "Failed to upload description image via SCP. Error: {}",
+                        String::from_utf8_lossy(&scp.stderr)
+                    ));
+                }
             }
             let url = format!("{}/{}", seedpool_config.screenshots.image_path.trim_end_matches('/'), img_name);
             desc_image_urls.push(url);
@@ -2147,16 +2515,19 @@ pub fn process_newspaper_upload(
                     .map_err(|e| format!("Failed to set permissions for image '{}': {}", img.display(), e))?;
             }
             let img_name = format!("{}-page{}.jpg", base_name, i + 1);
-            let scp = std::process::Command::new("scp")
-                .arg(img)
-                .arg(format!("{}/screenshots/", seedpool_config.screenshots.remote_path.trim_end_matches('/')))
-                .output()
-                .map_err(|e| format!("Failed to upload description image via SCP: {}", e))?;
-            if !scp.status.success() {
-                return Err(format!(
-                    "Failed to upload description image via SCP. Error: {}",
-                    String::from_utf8_lossy(&scp.stderr)
-                ));
+            // SCP to CDN (skip during dry run)
+            if !dry_run {
+                let scp = std::process::Command::new("scp")
+                    .arg(img)
+                    .arg(format!("{}/screenshots/", seedpool_config.screenshots.remote_path.trim_end_matches('/')))
+                    .output()
+                    .map_err(|e| format!("Failed to upload description image via SCP: {}", e))?;
+                if !scp.status.success() {
+                    return Err(format!(
+                        "Failed to upload description image via SCP. Error: {}",
+                        String::from_utf8_lossy(&scp.stderr)
+                    ));
+                }
             }
             let url = format!("{}/{}", seedpool_config.screenshots.image_path.trim_end_matches('/'), img_name);
             desc_image_urls.push(url);
@@ -2290,16 +2661,19 @@ pub fn process_newspaper_upload(
         }
 
         let cover_remote_path = format!("{}/covers", seedpool_config.screenshots.remote_path.trim_end_matches('/'));
-        let cover_scp = std::process::Command::new("scp")
-            .arg(&temp_cover_path)
-            .arg(&cover_remote_path)
-            .output()
-            .map_err(|e| format!("Failed to upload cover image via SCP: {}", e))?;
-        if !cover_scp.status.success() {
-            return Err(format!(
-                "Failed to upload cover image via SCP. Error: {}",
-                String::from_utf8_lossy(&cover_scp.stderr)
-            ));
+        // SCP to CDN (skip during dry run)
+        if !dry_run {
+            let cover_scp = std::process::Command::new("scp")
+                .arg(&temp_cover_path)
+                .arg(&cover_remote_path)
+                .output()
+                .map_err(|e| format!("Failed to upload cover image via SCP: {}", e))?;
+            if !cover_scp.status.success() {
+                return Err(format!(
+                    "Failed to upload cover image via SCP. Error: {}",
+                    String::from_utf8_lossy(&cover_scp.stderr)
+                ));
+            }
         }
 
         // Optionally clean up the temp file
