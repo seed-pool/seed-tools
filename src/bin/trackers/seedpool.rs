@@ -41,6 +41,15 @@ pub fn process_seedpool_release(
     for entry in WalkDir::new(input_path).into_iter().filter_map(|e| e.ok()) {
         if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
             if music_extensions.contains(&ext.to_lowercase().as_str()) {
+                          match ext.to_lowercase().as_str() {
+                    "mp3" => {
+                        type_id = 13; // MP3 type
+                    }
+                    "flac" => {
+                        type_id = 11; // FLAC type
+                    }
+                    _ => {}
+                }
                 found_music_file = true;
                 break; // Exit the loop once a valid music file is found
             }
@@ -121,7 +130,7 @@ pub fn process_seedpool_release(
 
     // Only treat as boxset if not a dated TV
     if category_id == 2 && episode_number == Some(0) && !is_dated_tv {
-        log::debug!("Detected season-only release. Setting category_id to 2 (Boxset) and type_id to 26.");
+        log::debug!("Detected season-only release. Setting category_id to 2 (Tv Show) and type_id to 26.");
         category_id = 2; // Boxset category
         type_id = 26; // Boxset type
     }
@@ -1513,7 +1522,7 @@ pub fn process_audiobook_upload(
             // Extract cover ID
             cover_id = first_result["cover_i"].as_u64();
 
-            // Use basic description for ebook (Open Library integration functionality was removed)
+            // Use basic description for ebook ()
             ebook_desc = format!(
                 "[center][b][size=32][color=#2E86C1]{}[/color][/size][/b][/center]\n\n[center][b][size=16][color=#117A65]By:[/color][/size][/b] [i]{}[/i][/center]\n\n{}",
                 title, author, default_non_video_description()
