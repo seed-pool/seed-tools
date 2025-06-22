@@ -1,0 +1,1042 @@
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+use walkdir::WalkDir;
+use reqwest::blocking::multipart::Form;
+use log::{info, warn};
+use epub::doc::EpubDoc;
+use zip::ZipArchive;
+use std::fs::File;
+use std::io::copy;
+use lopdf::{Document, Object};
+use regex::Regex;
+use serde_json::Value;
+
+use crate::types::{Config, SeedpoolConfig, EbookType, EbookFile};
+use crate::torrent::create_torrent;
+use crate::archive::extract_archives_in_directory;
+use crate::naming::generate_release_name;
+use urlencoding;
+
+
+
+/// Find all ebook files in a directory
+fn find_all_ebook_files(working_dir: &str) -> Result<Vec<EbookFile>, String> {
+    let mut found_files = Vec::new();
+    
+    for entry in WalkDir::new(working_dir).max_depth(1) {
+        let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+        let path = entry.path();
+        
+        if path.is_file() {
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                if let Some(ebook_type) = EbookType::from_extension(ext) {
+                    found_files.push(EbookFile {
+                        path: path.to_path_buf(),
+                        ebook_type,
+                    });
+                }
+            }
+        }
+    }
+
+    if found_files.is_empty() {
+        return Err(format!("No supported ebook files (.epub, .pdf, .cbz, .cbr) found in directory '{}'", working_dir));
+    }
+
+    // Check if we have any comic files (CBR/CBZ)
+    let comic_files: Vec<EbookFile> = found_files.iter()
+        .filter(|f| f.ebook_type.is_comic())
+        .cloned()
+        .collect();
+
+    if !comic_files.is_empty() {
+        // If we have comic files, return ALL of them
+        log::info!("Found {} comic file(s) in directory: {}", comic_files.len(), working_dir);
+        Ok(comic_files)
+    } else {
+        // If no comic files, use the original priority system to return one file
+        found_files.sort_by_key(|f| match f.ebook_type {
+            EbookType::Epub => 0,
+            EbookType::Cbz => 1,
+            EbookType::Cbr => 2,
+            EbookType::Pdf => 3,
+        });
+        Ok(vec![found_files.into_iter().next().unwrap()])
+    }
+}
+
+/// Extract metadata (title, author) from an ebook file
+fn extract_ebook_metadata(ebook_file: &EbookFile) -> Result<(Option<String>, Option<String>), String> {
+    match ebook_file.ebook_type {
+        EbookType::Pdf => extract_metadata_from_pdf(ebook_file.path.to_str().unwrap()),
+        EbookType::Epub => extract_metadata_from_epub(ebook_file.path.to_str().unwrap()),
+        EbookType::Cbz | EbookType::Cbr => extract_metadata_from_comic(&ebook_file.path),
+    }
+}
+
+/// Extract metadata from comic files (based on filename)
+fn extract_metadata_from_comic(comic_path: &Path) -> Result<(Option<String>, Option<String>), String> {
+    // Extract title from filename, remove common comic suffixes
+    let filename = comic_path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Unknown Comic")
+        .to_string();
+    
+    // Clean up common comic filename patterns
+    let title = filename
+        .replace("_", " ")
+        .replace("-", " ")
+        .trim()
+        .to_string();
+    
+    // For comics, author is typically not available from filename
+    Ok((Some(title), None))
+}
+
+/// Extract images from comic archives (CBR/CBZ)
+fn extract_comic_images(comic_file: &EbookFile, working_dir: &str) -> Result<String, String> {
+    let comic_path = &comic_file.path;
+    
+    // Extract directly to the working directory (not a subdirectory)
+    let extract_dir = Path::new(working_dir);
+    
+    match comic_file.ebook_type {
+        EbookType::Cbz => {
+            // Extract CBZ (ZIP) file directly to working directory
+            log::info!("Extracting CBZ file: {}", comic_path.display());
+            let output = Command::new("unzip")
+                .arg("-o") // Overwrite files
+                .arg("-j") // Junk paths (extract to flat directory)
+                .arg(comic_path)
+                .arg("-d")
+                .arg(&extract_dir)
+                .output()
+                .map_err(|e| format!("Failed to execute unzip: {}", e))?;
+            
+            if !output.status.success() {
+                return Err(format!(
+                    "Failed to extract CBZ file '{}': {}",
+                    comic_path.display(),
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+        },
+        EbookType::Cbr => {
+            // Extract CBR (RAR) file directly to working directory
+            log::info!("Extracting CBR file: {}", comic_path.display());
+            let output = Command::new("unrar")
+                .arg("x") // Extract with paths
+                .arg("-o+") // Overwrite files
+                .arg(comic_path)
+                .arg(extract_dir)
+                .output()
+                .map_err(|e| format!("Failed to execute unrar: {}", e))?;
+            
+            if !output.status.success() {
+                return Err(format!(
+                    "Failed to extract CBR file '{}': {}",
+                    comic_path.display(),
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
+        },
+        _ => return Err(format!("File '{}' is not a comic archive", comic_path.display())),
+    }
+    
+    log::info!("Successfully extracted comic images to: {}", extract_dir.display());
+    Ok(extract_dir.to_string_lossy().to_string())
+}
+
+/// Extract metadata from PDF files
+fn extract_metadata_from_pdf(pdf_path: &str) -> Result<(Option<String>, Option<String>), String> {
+    use lopdf::{Document, Object};
+
+    let doc = Document::load(pdf_path).map_err(|e| format!("Failed to open PDF: {}", e))?;
+    let info_obj = match doc.trailer.get(b"Info") {
+        Ok(obj) => obj,
+        Err(_) => return Ok((None, None)),
+    };
+    let info_ref = info_obj.as_reference().map_err(|e| format!("Failed to get Info reference: {}", e))?;
+    let dict = doc.get_dictionary(info_ref).map_err(|e| format!("Failed to get PDF info dictionary: {}", e))?;
+
+    fn get_pdf_string(dict: &lopdf::Dictionary, key: &[u8]) -> Option<String> {
+        match dict.get(key) {
+            Ok(Object::String(s, _)) => Some(String::from_utf8_lossy(s).to_string()),
+            Ok(obj) => obj.as_str().ok().map(|s| String::from_utf8_lossy(s).to_string()),
+            _ => None,
+        }
+    }
+
+    let title = get_pdf_string(&dict, b"Title");
+    let author = get_pdf_string(&dict, b"Author");
+    Ok((title, author))
+}
+
+/// Extract metadata from EPUB files
+fn extract_metadata_from_epub(epub_path: &str) -> Result<(Option<String>, Option<String>), String> {
+    let epub = EpubDoc::new(epub_path)
+        .map_err(|e| format!("Failed to open EPUB file '{}': {}", epub_path, e))?;
+
+    // Extract title from metadata
+    let title = epub.metadata.get("title").and_then(|titles| titles.get(0).cloned());
+
+    // Extract author from metadata
+    let author = epub.metadata.get("creator").and_then(|creators| creators.get(0).cloned());
+
+    Ok((title, author))
+}
+
+/// Extract images from EPUB files
+fn extract_epub_images(epub_path: &str, temp_dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>, String> {
+    use std::fs::File;
+    use zip::ZipArchive;
+    use std::io::copy;
+
+    let file = File::open(epub_path).map_err(|e| format!("Failed to open EPUB: {}", e))?;
+    let mut archive = ZipArchive::new(file).map_err(|e| format!("Failed to read EPUB as zip: {}", e))?;
+
+    fs::create_dir_all(temp_dir).map_err(|e| format!("Failed to create temp dir: {}", e))?;
+
+    let mut images = Vec::new();
+
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i).map_err(|e| format!("Failed to access EPUB entry: {}", e))?;
+        let name = file.name().to_lowercase();
+        if name.ends_with(".jpg") || name.ends_with(".jpeg") || name.ends_with(".png") || name.ends_with(".gif") {
+            let out_path = temp_dir.join(std::path::Path::new(&name).file_name().unwrap());
+            let mut out_file = File::create(&out_path).map_err(|e| format!("Failed to create image file: {}", e))?;
+            copy(&mut file, &mut out_file).map_err(|e| format!("Failed to extract image: {}", e))?;
+            images.push(out_path);
+        }
+    }
+
+    images.sort();
+    Ok(images)
+}
+
+
+
+/// Generate description with images for ebook/comic uploads
+pub fn generate_ebook_description(
+    ebook_path: &str,
+    torrent_name: &str,
+    remote_path: &str,
+    public_image_path: &str,
+    dry_run: bool,
+) -> Result<String, String> {
+    use std::fs;
+    use std::path::Path;
+
+    let mut image_urls = Vec::new();
+    
+    // Determine file type from extension
+    let path = Path::new(ebook_path);
+    
+    let extension = path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_lowercase())
+        .unwrap_or_default();
+    match extension.as_str() {
+        "cbr" | "cbz" => {
+            // For CBR/CBZ files, find and use existing extracted images
+            let parent_dir = path.parent()
+                .ok_or_else(|| "Cannot determine parent directory".to_string())?;
+            
+            // Look for extracted image files in the parent directory
+            let mut image_files = Vec::new();
+            for entry in fs::read_dir(parent_dir)
+                .map_err(|e| format!("Failed to read directory: {}", e))? {
+                let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+                let file_path = entry.path();
+                if file_path.is_file() {
+                    if let Some(ext) = file_path.extension().and_then(|e| e.to_str()) {
+                        let ext_lower = ext.to_lowercase();
+                        if ext_lower == "jpg" || ext_lower == "jpeg" || ext_lower == "png" 
+                            || ext_lower == "gif" || ext_lower == "bmp" || ext_lower == "webp" {
+                            image_files.push(file_path);
+                        }
+                    }
+                }
+            }
+            
+            // Sort files by name to ensure consistent ordering
+            image_files.sort();
+            
+            // Use up to 8 images (similar to the 3-10 page range for PDFs)
+            let images_to_use = image_files.iter().take(8);
+            
+            for (index, image_file) in images_to_use.enumerate() {
+                let image_name = format!("{}-image{}.jpg", torrent_name, index + 1);
+                let temp_image_path = format!("{}/{}", std::env::temp_dir().to_string_lossy(), image_name);
+                
+                // Copy the extracted image to temp directory with standardized name
+                fs::copy(image_file, &temp_image_path)
+                    .map_err(|e| format!("Failed to copy image '{}': {}", image_file.display(), e))?;
+                
+                // Set permissions to 777
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&temp_image_path, fs::Permissions::from_mode(0o777))
+                        .map_err(|e| format!("Failed to set permissions for '{}': {}", temp_image_path, e))?;
+                }
+
+                // SCP to CDN (skip during dry run)
+                if !dry_run {
+                    let scp_status = std::process::Command::new("scp")
+                        .arg(&temp_image_path)
+                        .arg(format!("{}/screenshots/", remote_path.trim_end_matches('/')))
+                        .status()
+                        .map_err(|e| format!("Failed to scp '{}': {}", temp_image_path, e))?;
+                    if !scp_status.success() {
+                        return Err(format!("Failed to scp '{}'", temp_image_path));
+                    }
+                }
+
+                // Build public URL
+                let cdn_url = format!("{}/{}", public_image_path.trim_end_matches('/'), image_name);
+                image_urls.push(cdn_url);
+            }
+        }
+        "pdf" => {
+            // For PDF files, use GhostScript to extract pages 3-10
+            for page in 3..=10 {
+                let image_name = format!("{}-page{}.jpg", torrent_name, page);
+                let image_path = format!("{}/{}", std::env::temp_dir().to_string_lossy(), image_name);
+
+                // Extract page as JPEG using GhostScript
+                let output = std::process::Command::new("gs")
+                    .args(&[
+                        "-dBATCH", "-dNOPAUSE",
+                        "-sDEVICE=jpeg",
+                        &format!("-dFirstPage={}", page),
+                        &format!("-dLastPage={}", page),
+                        "-r300", "-dJPEGQ=95",
+                        &format!("-sOutputFile={}", image_path),
+                        ebook_path,
+                    ])
+                    .output()
+                    .map_err(|e| format!("Failed to run gs for page {}: {}", page, e))?;
+
+                if !output.status.success() {
+                    return Err(format!(
+                        "Failed to extract page {}: {}",
+                        page,
+                        String::from_utf8_lossy(&output.stderr)
+                    ));
+                }
+
+                // Set permissions to 777
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&image_path, fs::Permissions::from_mode(0o777))
+                        .map_err(|e| format!("Failed to set permissions for '{}': {}", image_path, e))?;
+                }
+
+                // SCP to CDN (skip during dry run)
+                if !dry_run {
+                    let scp_status = std::process::Command::new("scp")
+                        .arg(&image_path)
+                        .arg(format!("{}/screenshots/", remote_path.trim_end_matches('/')))
+                        .status()
+                        .map_err(|e| format!("Failed to scp '{}': {}", image_path, e))?;
+                    if !scp_status.success() {
+                        return Err(format!("Failed to scp '{}'", image_path));
+                    }
+                }
+
+                // Build public URL
+                let cdn_url = format!("{}/{}", public_image_path.trim_end_matches('/'), image_name);
+                image_urls.push(cdn_url);
+            }
+        }
+        _ => {
+            return Err(format!("Unsupported file type for description generation: {}", extension));
+        }
+    }
+
+    // Build BBCode description
+    let mut description = format!(
+        "[center][b][size=18][color=#2E86C1]{}[/color][/size][/b]\n\n[table]\n",
+        torrent_name
+    );
+    for (i, url) in image_urls.iter().enumerate() {
+        if i % 2 == 0 {
+            description.push_str("  [tr]\n");
+        }
+        description.push_str(&format!("    [td][img width=720]{}[/img][/td]\n", url));
+        if i % 2 == 1 {
+            description.push_str("  [/tr]\n");
+        }
+    }
+    // If odd number of images, close the last row
+    if image_urls.len() % 2 != 0 {
+        description.push_str("    [td][/td]\n  [/tr]\n");
+    }
+    description.push_str("[/table][/center]\n\n");
+    description.push_str(&format!("[center]{}[/center]", crate::utils::default_non_video_description()));
+
+    Ok(description)
+}
+
+/// Generate BBCode description for ebooks using Open Library API
+pub fn generate_ebook_bbcode_description(
+    title: &str,
+    author: &str,
+    open_library_work_key: &str,
+    open_library_author_key: &str,
+    client: &reqwest::blocking::Client,
+) -> Result<(String, Vec<String>), String> {
+    use serde_json::Value;
+    
+    let mut description = String::new();
+    let mut subjects = Vec::new();
+
+    // Fetch book details from Open Library
+    let work_url = format!("https://openlibrary.org/works/{}.json", open_library_work_key);
+    let work_response = client
+        .get(&work_url)
+        .send()
+        .map_err(|e| format!("Failed to fetch book details: {}", e))?;
+    let work_json: Value = work_response
+        .json()
+        .map_err(|e| format!("Failed to parse book details: {}", e))?;
+
+    // Extract subjects (categories) but do not add them to the description
+    if let Some(subjects_array) = work_json["subjects"].as_array() {
+        subjects = subjects_array
+            .iter()
+            .filter_map(|s| s.as_str().map(|s| s.to_string()))
+            .collect();
+    }
+
+    // Fetch author details from Open Library
+    let author_url = format!("https://openlibrary.org/authors/{}.json", open_library_author_key);
+    let author_response = client
+        .get(&author_url)
+        .send()
+        .map_err(|e| format!("Failed to fetch author details: {}", e))?;
+    let author_json: Value = author_response
+        .json()
+        .map_err(|e| format!("Failed to parse author details: {}", e))?;
+
+    // Add book title and author
+    description.push_str(&format!(
+        "[center][b][size=32][color=#2E86C1]{}[/color][/size][/b][/center]\n\n",
+        work_json["title"].as_str().unwrap_or(title)
+    ));
+    description.push_str(&format!(
+        "[center][b][size=16][color=#117A65]By:[/color][/size][/b] [i]{}[/i][/center]\n\n",
+        author_json["name"].as_str().unwrap_or(author)
+    ));
+
+    // Add book description
+    if let Some(book_description) = work_json["description"]
+        .as_str()
+        .or_else(|| work_json["description"]["value"].as_str())
+    {
+        // Detect and extract links from the description
+        let link_regex = regex::Regex::new(r#"https?://[^\s\]]+"#).unwrap();
+        let mut extracted_links = Vec::new();
+
+        for capture in link_regex.captures_iter(book_description) {
+            if let Some(link) = capture.get(0) {
+                extracted_links.push(link.as_str().to_string());
+            }
+        }
+
+        // Remove links and lines containing "Contain" or brackets "[]" from the description
+        let sanitized_description: String = link_regex
+            .replace_all(book_description, "")
+            .to_string()
+            .lines()
+            .filter(|line| !line.contains("Contain") && !line.contains('[') && !line.contains(']'))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Add the sanitized description to the quote block
+        description.push_str("[b][size=15][color=#6C3483]Synopsis:[/color][/size][/b]\n");
+        description.push_str("[quote]\n");
+        description.push_str(&sanitized_description.trim());
+        description.push_str("\n[/quote]\n\n");
+
+        // Append the extracted links below the quote block
+        if !extracted_links.is_empty() {
+            description.push_str("[b][size=14][color=#2874A6]Additional Editions:[/color][/size][/b]\n");
+            for link in extracted_links {
+                description.push_str(&format!("- [url={}][color=#1ABC9C]{}[/color][/url]\n", link.trim_end_matches(')'), link.trim_end_matches(')')));
+            }
+            description.push_str("\n");
+        }
+    }
+
+
+    // Add author bio
+    if let Some(author_bio) = author_json["bio"]
+        .as_str()
+        .or_else(|| author_json["bio"]["value"].as_str())
+    {
+        // Remove the "([Source][1])" line and trim extra blank lines
+        let source_regex = regex::Regex::new(r"\(\[Source\]\[\d+\]\)").unwrap();
+        let sanitized_bio = source_regex
+            .replace_all(author_bio, "")
+            .to_string()
+            .lines()
+            .filter(|line| !line.trim().is_empty()) // Remove blank lines
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        description.push_str("[b][size=15][color=#F39C12]About the Author:[/color][/size][/b]\n");
+        description.push_str("[quote]\n");
+        description.push_str(&sanitized_bio.trim());
+        description.push_str("\n[/quote]\n\n");
+    }
+    
+    // Add footer
+    description.push_str(&format!("[center]{}[/center]", crate::utils::default_non_video_description()));
+
+    Ok((description, subjects))
+}
+
+/// Main function to process ebook uploads
+pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: &SeedpoolConfig, dry_run: bool) -> Result<(), String> {
+    use reqwest::blocking::Client;
+    use std::fs;
+    use crate::torrent::add_torrent_to_all_qbittorrent_instances;
+
+    // Validate input path
+    let path = Path::new(input_path);
+    let is_file = path.is_file();
+    
+    // Set working directory: if it's a file, use parent dir; if it's a dir, use the dir itself
+    let working_dir = if is_file {
+        path.parent()
+            .ok_or_else(|| format!("Cannot determine parent directory for file: {}", input_path))?
+            .to_string_lossy()
+            .to_string()
+    } else {
+        input_path.to_string()
+    };
+    if !is_file && !path.is_dir() {
+        return Err(format!("Input path '{}' is neither a file nor a directory.", working_dir));
+    }
+
+    // Extract archives if processing a directory
+    if !is_file {
+        extract_archives_in_directory(&working_dir)?;
+    }
+
+    // Find ebook files (single file or all comics in directory)
+    let ebook_files = if is_file {
+        // If processing a specific file, use that file directly
+        let ebook_type = path.extension()
+            .and_then(|ext| ext.to_str())
+            .and_then(|ext| EbookType::from_extension(ext))
+            .ok_or_else(|| format!("Unsupported file type: {}", path.display()))?;
+        vec![EbookFile {
+            path: path.to_path_buf(),
+            ebook_type,
+        }]
+    } else {
+        // If processing a directory, find all comic files or the main ebook file
+        find_all_ebook_files(&working_dir)?
+    };
+
+    // Use the first file for metadata extraction and main processing
+    let main_ebook_file = &ebook_files[0];
+
+    // Extract metadata and cover
+    let (title_opt, author_opt) = extract_ebook_metadata(&main_ebook_file)?;
+    let mut title = title_opt.unwrap_or_else(|| "Unknown Title".to_string());
+    let mut author = author_opt.unwrap_or_else(|| "Unknown Author".to_string());
+
+    // Extract comic images if we have CBR/CBZ files
+    let actual_content_path = if main_ebook_file.ebook_type.is_comic() {
+        // Extract images from all comic files
+        for ebook_file in &ebook_files {
+            if ebook_file.ebook_type.is_comic() {
+                let extracted_dir = extract_comic_images(&ebook_file, &working_dir)?;
+                log::info!("Comic images extracted from {} to: {}", ebook_file.path.display(), extracted_dir);
+            }
+        }
+        working_dir.clone()
+    } else {
+        working_dir.clone()
+    };
+
+    // Sanitize the file name and rename the ebook file if needed
+    let new_ebook_path = if main_ebook_file.ebook_type.needs_renaming() {
+        let sanitized_author = {
+            let parts: Vec<&str> = author.split_whitespace().collect();
+            if parts.len() > 1 {
+                format!("{}, {}", parts.last().unwrap(), parts[..parts.len() - 1].join(" "))
+            } else {
+                author.to_string()
+            }
+        };
+        let sanitized_title = title
+            .replace(".", " ")
+            .replace(":", " ")
+            .replace("'", "")
+            .replace("/", " ")
+            .replace("\\", " ")
+            .replace("&", "and")
+            .replace("?", "")
+            .replace("*", "");
+        let new_ext = "epub";
+        let new_ebook_name = format!("{} - {}.{}", sanitized_author, sanitized_title, new_ext);
+        let new_ebook_path = main_ebook_file.path.with_file_name(new_ebook_name);
+        fs::rename(&main_ebook_file.path, &new_ebook_path)
+            .map_err(|e| format!("Failed to rename ebook file: {}", e))?;
+        new_ebook_path
+    } else {
+        main_ebook_file.path.clone() // Don't rename PDF, CBR, CBZ files
+    };
+
+    // Clean up other ebook files except the selected one
+    for entry in fs::read_dir(&working_dir).map_err(|e| format!("Failed to read directory '{}': {}", working_dir, e))? {
+        let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+        let path = entry.path();
+
+        if matches!(main_ebook_file.ebook_type, EbookType::Pdf | EbookType::Cbr | EbookType::Cbz) {
+            // Remove all .epub and .zip files, but keep the selected file
+            if (path.extension().map(|ext| ext.eq_ignore_ascii_case("epub")).unwrap_or(false)
+                || path.extension().map(|ext| ext.eq_ignore_ascii_case("zip")).unwrap_or(false))
+                && path != new_ebook_path
+            {
+                fs::remove_file(&path)
+                    .map_err(|e| format!("Failed to remove file '{}': {}", path.display(), e))?;
+            }
+            // Do NOT remove the PDF file at main_ebook_file.path (or new_ebook_path)
+        } else {
+            // For EPUBs: keep only the renamed epub, remove all other epubs
+            if path.extension().map(|ext| ext.eq_ignore_ascii_case("epub")).unwrap_or(false)
+                && path != new_ebook_path
+            {
+                fs::remove_file(&path)
+                    .map_err(|e| format!("Failed to remove extra epub file '{}': {}", path.display(), e))?;
+            }
+            // Keep all ZIPs for EPUBs
+        }
+    }
+
+    // Generate comic description before removing CBR/CBZ files (or for PDF magazines/comics)
+    let base_name = Path::new(&actual_content_path)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    
+    let lower_base = base_name.to_lowercase();
+    let type_id = if lower_base.contains("magazine") {
+        "41"
+    } else if lower_base.contains("comic") {
+        "40"
+    } else {
+        "20"
+    };
+
+    let (mut description, mut keywords, mut cover_id) = if main_ebook_file.ebook_type.is_comic() || (matches!(main_ebook_file.ebook_type, EbookType::Pdf) && (type_id == "40" || type_id == "41")) {
+        let torrent_name = generate_release_name(&base_name);
+        let desc = generate_ebook_description(
+            new_ebook_path.to_str().unwrap(),
+            &torrent_name,
+            &seedpool_config.screenshots.remote_path,
+            &seedpool_config.screenshots.image_path,
+            dry_run,
+        )?;
+        let keywords = if type_id == "41" { "magazine".to_string() } else { "comic".to_string() };
+        (desc, keywords, None)
+    } else {
+        (String::new(), String::new(), None)
+    };
+
+    // Store original CBR/CBZ files in memory buffers, then remove from disk for torrent creation
+    let mut backup_archive_buffers = Vec::new();
+    for ebook_file in &ebook_files {
+        if ebook_file.ebook_type.is_comic() {
+            log::info!("Reading comic archive into memory buffer: {}", ebook_file.path.display());
+            let file_content = fs::read(&ebook_file.path)
+                .map_err(|e| format!("Failed to read comic file '{}' into memory: {}", ebook_file.path.display(), e))?;
+            backup_archive_buffers.push((ebook_file.path.clone(), file_content));
+            
+            log::info!("Temporarily removing comic archive from disk: {}", ebook_file.path.display());
+            fs::remove_file(&ebook_file.path)
+                .map_err(|e| format!("Failed to remove original comic file '{}': {}", ebook_file.path.display(), e))?;
+        }
+    }
+
+    // Create a restore guard to ensure files are always restored, even on error
+    struct RestoreGuard {
+        backup_buffers: Vec<(std::path::PathBuf, Vec<u8>)>,
+    }
+    
+    impl Drop for RestoreGuard {
+        fn drop(&mut self) {
+            for (original_path, file_content) in &self.backup_buffers {
+                if let Err(e) = fs::write(original_path, file_content) {
+                    log::error!("Failed to restore comic file '{}' during cleanup: {}", original_path.display(), e);
+                } else {
+                    log::info!("Restored comic file from memory during cleanup: {}", original_path.display());
+                }
+            }
+        }
+    }
+    
+    let _restore_guard = RestoreGuard {
+        backup_buffers: backup_archive_buffers.clone(),
+    };
+
+    let torrent_input = &actual_content_path;
+    let torrent_file = create_torrent(
+        torrent_input,
+        &config.paths.torrent_dir,
+        &seedpool_config.settings.announce_url,
+        &config.paths.mkbrr,
+        false, // Don't exclude image files for ebook/comic processing
+    )?;
+
+
+    let nfo_file = fs::read_dir(&working_dir)
+        .ok()
+        .and_then(|mut entries| {
+            entries.find_map(|entry| {
+                let entry = entry.ok()?;
+                let path = entry.path();
+                if path.extension().map(|ext| ext.eq_ignore_ascii_case("nfo")).unwrap_or(false) {
+                    Some(path.to_string_lossy().to_string())
+                } else {
+                    None
+                }
+            })
+        });
+
+    // --- SKIP OPEN LIBRARY FOR COMICS & MAGAZINES ---
+    if !main_ebook_file.ebook_type.is_comic() && !(matches!(main_ebook_file.ebook_type, EbookType::Pdf) && (type_id == "40" || type_id == "41")) {
+        // --- ORIGINAL OPEN LIBRARY LOOKUP AND DESCRIPTION LOGIC ---
+        let mut open_library_work_key = String::new();
+        let mut open_library_author_key = String::new();
+        let mut subjects = Vec::new();
+        let mut desc = format!(
+            "[center][b][size=32][color=#2E86C1]{}[/color][/size][/b]\n\
+            [b][size=16][color=#117A65]By:[/color][/size][/b] [i]{}[/i][/center]\n\n\
+            [b][size=15][color=#6C3483]Synopsis:[/color][/size][/b]\n\
+            [quote]No metadata available.[/quote]\n\n\
+            [center]{}[/center]",
+            title,
+            author,
+            crate::utils::default_non_video_description()
+        );
+
+        // Only try Open Library if we have at least a title or author
+        if title != "Unknown Title" || author != "Unknown Author" {
+            let query = format!(
+                "https://openlibrary.org/search.json?title={}&author={}",
+                urlencoding::encode(&title),
+                urlencoding::encode(&author)
+            );
+
+            info!("Querying Open Library API: {}", query);
+
+            let client = Client::new();
+            let response = client
+                .get(&query)
+                .send()
+                .map_err(|e| format!("Failed to query Open Library API: {}", e))?;
+
+            if response.status().is_success() {
+                let json: serde_json::Value = response
+                    .json()
+                    .map_err(|e| format!("Failed to parse Open Library API response: {}", e))?;
+
+                if let Some(first_result) = json["docs"].as_array().and_then(|docs| docs.get(0)) {
+                    // Use Open Library's title and author if available
+                    let ol_title = first_result["title"]
+                        .as_str()
+                        .unwrap_or(&title)
+                        .to_string();
+                    let ol_author = first_result["author_name"]
+                        .as_array()
+                        .and_then(|authors| authors.get(0))
+                        .and_then(|author| author.as_str())
+                        .unwrap_or(&author)
+                        .to_string();
+
+                    info!("Using title: '{}' and author: '{}'", ol_title, ol_author);
+
+                    // Update title and author with Open Library values
+                    title = ol_title;
+                    author = ol_author;
+
+                    // Extract Open Library work and author keys
+                    open_library_work_key = first_result["key"]
+                        .as_str()
+                        .unwrap_or("")
+                        .trim_start_matches("/works/")
+                        .to_string();
+                    open_library_author_key = first_result["author_key"]
+                        .as_array()
+                        .and_then(|keys| keys.get(0))
+                        .and_then(|key| key.as_str())
+                        .unwrap_or("")
+                        .to_string();
+
+                    // Extract cover ID
+                    cover_id = first_result["cover_i"].as_u64();
+
+                    // Generate the BBCode description and fetch subjects
+                    let (desc2, subj) = generate_ebook_bbcode_description(
+                        &title,
+                        &author,
+                        &open_library_work_key,
+                        &open_library_author_key,
+                        &client,
+                    )?;
+                    desc = desc2;
+                    subjects = subj;
+                }
+            }
+        }
+        description = desc;
+        keywords = subjects.join(", ");
+    }
+
+    info!("Processing eBook upload for title: '{}' and author: '{}'", title, author);
+
+    // If PDF, extract cover image from first page using Ghostscript
+    let mut pdf_cover_image_path = None;
+    if matches!(main_ebook_file.ebook_type, EbookType::Pdf) {
+        let cover_path = format!("{}.cover.jpg", new_ebook_path.to_str().unwrap());
+        let output = std::process::Command::new("gs")
+            .args(&[
+                "-dBATCH", "-dNOPAUSE",
+                "-sDEVICE=jpeg",
+                "-dFirstPage=1", "-dLastPage=1",
+                "-r150", "-dJPEGQ=95",
+                &format!("-sOutputFile={}", cover_path),
+                new_ebook_path.to_str().unwrap(),
+            ])
+            .output()
+            .map_err(|e| format!("Failed to run gs: {}", e))?;
+        if !output.status.success() {
+            return Err(format!(
+                "Failed to extract cover from PDF with gs: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        pdf_cover_image_path = Some(cover_path);
+    }
+
+    let mut form = Form::new()
+        .file("torrent", &torrent_file)
+        .map_err(|e| format!("Failed to attach torrent file: {}", e))?
+        .text("name", base_name.clone())
+        .text("category_id", "7") // eBooks category
+        .text("type_id", type_id)
+        .text("tmdb", "0")
+        .text("imdb", "0")
+        .text("tvdb", "0")
+        .text("anonymous", "0")
+        .text("description", description)
+        .text("keywords", keywords)
+        .text("mal", "0")
+        .text("igdb", "0")
+        .text("stream", "0")
+        .text("sd", "0");
+
+    if let Some(nfo) = nfo_file {
+        form = form.file("nfo", nfo).map_err(|e| format!("Failed to attach NFO file: {}", e))?;
+    }
+
+    // Send the upload request
+    let client = Client::new();
+    
+    if dry_run {
+        info!("[DRY RUN] Would upload eBook to Seedpool: {}", seedpool_config.settings.upload_url);
+        info!("[DRY RUN] Form data would include: torrent file, description, category, type, etc.");
+        return Ok(());
+    }
+    
+    let response = client
+        .post(&seedpool_config.settings.upload_url)
+        .header("Authorization", format!("Bearer {}", seedpool_config.general.api_key))
+        .multipart(form)
+        .send()
+        .map_err(|e| format!("Failed to send request to Seedpool: {}", e))?;
+
+    let status = response.status();
+    let response_text = response.text().unwrap_or_else(|_| "Failed to read response body".to_string());
+    info!("Seedpool API Response: {}", response_text);
+
+    if !status.is_success() {
+        return Err(format!(
+            "Failed to upload to Seedpool. HTTP Status: {}. Response: {}",
+            status, response_text
+        ));
+    }
+
+    // Extract the torrent ID from the response
+    let torrent_id = crate::utils::extract_torrent_id(&response_text)?;
+
+    // --- COVER HANDLING ---
+
+    // For EPUBs: Fetch the cover image using the cover ID from Open Library (existing logic)
+    if !matches!(main_ebook_file.ebook_type, EbookType::Pdf) && (type_id != "40" && type_id != "41") {
+        let mut cover_handled = false;
+        if let Some(cover_id) = cover_id {
+            let cover_url = format!("https://covers.openlibrary.org/b/id/{}-L.jpg", cover_id);
+            info!("Fetching cover image from: {}", cover_url);
+
+            let cover_response = client
+                .get(&cover_url)
+                .send()
+                .map_err(|e| format!("Failed to fetch cover image: {}", e))?;
+
+            if cover_response.status().is_success() {
+                // Save the cover image locally
+                let cover_path = new_ebook_path.with_extension("jpg");
+                std::fs::write(&cover_path, cover_response.bytes().map_err(|e| format!("Failed to read cover image bytes: {}", e))?)
+                    .map_err(|e| format!("Failed to save cover image: {}", e))?;
+
+                info!("Saved cover image to: {}", cover_path.display());
+
+                // Rename the cover image to include the torrent ID
+                let renamed_cover_path = cover_path.with_file_name(format!("torrent-cover_{}.jpg", torrent_id));
+                std::fs::rename(&cover_path, &renamed_cover_path)
+                    .map_err(|e| format!("Failed to rename cover image: {}", e))?;
+
+                // Set permissions to 777 for the renamed cover image
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+
+                    info!("Setting permissions to 777 for cover image: {}", renamed_cover_path.display());
+                    fs::set_permissions(&renamed_cover_path, fs::Permissions::from_mode(0o777))
+                        .map_err(|e| format!("Failed to set permissions for cover image '{}': {}", renamed_cover_path.display(), e))?;
+                    info!("Successfully set permissions to 777 for cover image: {}", renamed_cover_path.display());
+                }
+
+                // Upload the cover image to the CDN using SCP (skip during dry run)
+                let remote_covers_path = format!(
+                    "{}/covers",
+                    seedpool_config.screenshots.remote_path.trim_end_matches('/')
+                );
+                if !dry_run {
+                    let scp_command = std::process::Command::new("scp")
+                        .arg(&renamed_cover_path)
+                        .arg(&remote_covers_path)
+                        .output()
+                        .map_err(|e| format!("Failed to upload cover image via SCP: {}", e))?;
+
+                    if !scp_command.status.success() {
+                        return Err(format!(
+                            "Failed to upload cover image via SCP. Error: {}",
+                            String::from_utf8_lossy(&scp_command.stderr)
+                        ));
+                    }
+                }
+
+                info!("Successfully uploaded cover image to CDN: {}", remote_covers_path);
+                cover_handled = true;
+            } else {
+                warn!("Failed to fetch cover image with status: {}. Skipping cover image fetch.", cover_response.status());
+            }
+        }
+        // If no cover was handled, extract first image from EPUB as cover using Rust
+        if !cover_handled {
+            info!("No Open Library cover found, extracting first image from EPUB as cover.");
+            let temp_dir = std::env::temp_dir().join(format!("{}_cover_extract", base_name));
+            let page_images = extract_epub_images(new_ebook_path.to_str().unwrap(), &temp_dir)?;
+            if let Some(cover_img) = page_images.get(0) {
+                let renamed_cover_path = temp_dir.join(format!("torrent-cover_{}.jpg", torrent_id));
+                fs::copy(&cover_img, &renamed_cover_path)
+                    .map_err(|e| format!("Failed to copy extracted cover image: {}", e))?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&renamed_cover_path, fs::Permissions::from_mode(0o777))
+                        .map_err(|e| format!("Failed to set permissions for cover image '{}': {}", renamed_cover_path.display(), e))?;
+                }
+                let remote_covers_path = format!(
+                    "{}/covers",
+                    seedpool_config.screenshots.remote_path.trim_end_matches('/')
+                );
+                // SCP to CDN (skip during dry run)
+                if !dry_run {
+                    let scp_command = std::process::Command::new("scp")
+                        .arg(&renamed_cover_path)
+                        .arg(&remote_covers_path)
+                        .output()
+                        .map_err(|e| format!("Failed to upload extracted cover image via SCP: {}", e))?;
+                    if !scp_command.status.success() {
+                        return Err(format!(
+                            "Failed to upload extracted cover image via SCP. Error: {}",
+                            String::from_utf8_lossy(&scp_command.stderr)
+                        ));
+                    }
+                }
+                info!("Successfully uploaded extracted EPUB cover image to CDN: {}", remote_covers_path);
+            } else {
+                warn!("No images found to use as cover from EPUB.");
+            }
+        }
+    }
+
+    // For PDFs: Upload the extracted cover image (if any)
+    if matches!(main_ebook_file.ebook_type, EbookType::Pdf) {
+        if let Some(cover_path) = pdf_cover_image_path {
+            // Rename the cover image to include the torrent ID
+            let renamed_cover_path = Path::new(&cover_path)
+                .with_file_name(format!("torrent-cover_{}.jpg", torrent_id));
+            std::fs::rename(&cover_path, &renamed_cover_path)
+                .map_err(|e| format!("Failed to rename PDF cover image: {}", e))?;
+
+            // Set permissions to 777 for the renamed cover image
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                info!("Setting permissions to 777 for cover image: {}", renamed_cover_path.display());
+                std::fs::set_permissions(&renamed_cover_path, std::fs::Permissions::from_mode(0o777))
+                    .map_err(|e| format!("Failed to set permissions for cover image '{}': {}", renamed_cover_path.display(), e))?;
+                info!("Successfully set permissions to 777 for cover image: {}", renamed_cover_path.display());
+            }
+
+            info!("Preparing to upload extracted PDF cover image: {}", renamed_cover_path.display());
+            let remote_covers_path = format!(
+                "{}/covers",
+                seedpool_config.screenshots.remote_path.trim_end_matches('/')
+            );
+            // SCP to CDN (skip during dry run)
+            if !dry_run {
+                let scp_command = std::process::Command::new("scp")
+                    .arg(&renamed_cover_path)
+                    .arg(&remote_covers_path)
+                    .output()
+                    .map_err(|e| format!("Failed to upload cover image via SCP: {}", e))?;
+
+                if !scp_command.status.success() {
+                    return Err(format!(
+                        "Failed to upload cover image via SCP. Error: {}",
+                        String::from_utf8_lossy(&scp_command.stderr)
+                    ));
+                }
+            }
+            info!("Successfully uploaded cover image to CDN: {}", remote_covers_path);
+        }
+    }
+
+    // Add torrent to all qBittorrent instances
+    add_torrent_to_all_qbittorrent_instances(
+        &[torrent_file.clone()],
+        &config.qbittorrent,
+        &config.deluge,
+        new_ebook_path.to_str().unwrap(),
+        &config.paths,
+    )?;
+
+    // Files will be automatically restored by the RestoreGuard when function exits
+
+    Ok(())
+}

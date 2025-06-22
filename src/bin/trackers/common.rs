@@ -6,7 +6,6 @@ use seed_tools::types::PathsConfig; // Import PathsConfig
 use crate::{QbittorrentConfig, SeedpoolConfig, TorrentLeechConfig, DelugeConfig};
 use std::collections::HashMap;
 use reqwest::blocking::Client;
-use serde_json::Value;
 use regex::Regex;
 
 #[allow(dead_code)]
@@ -31,6 +30,7 @@ pub trait Tracker {
         episode_number: Option<u32>,
         resolution_id: Option<u32>,
         is_dated_tv: bool,
+        dry_run: bool,
     ) -> Result<(), String>;
     fn generate_metadata(&self, torrent_file: &str) -> Result<HashMap<String, String>, String>;
 }
@@ -46,6 +46,7 @@ pub fn process_custom_upload(
     torrentleech_config: Option<&TorrentLeechConfig>,
     mkbrr_path: &str,
     paths_config: &PathsConfig, // Add this parameter
+    dry_run: bool,
 ) -> Result<(), String> {
     let base_name = Path::new(input_path)
         .file_name()
@@ -126,9 +127,19 @@ pub fn process_custom_upload(
         form = form.file("nfo", nfo).map_err(|e| format!("Failed to attach NFO file: {}", e))?;
     }
     
-    // Send the upload request
+    // Send the upload request (or simulate if dry_run)
+    if dry_run {
+        info!("DRY RUN: Would upload custom release to {} at: {}", tracker, upload_url);
+        return Ok(());
+    }
+
     let response = client
         .post(&upload_url)
+        .header("Authorization", format!("Bearer {}", if tracker == "seedpool" { 
+            seedpool_config.as_ref().unwrap().general.api_key.clone() 
+        } else { 
+            torrentleech_config.as_ref().unwrap().settings.tl_key.clone() 
+        }))
         .multipart(form)
         .send()
         .map_err(|e| format!("Failed to send upload request: {}", e))?;
@@ -145,13 +156,17 @@ pub fn process_custom_upload(
     }
 
     // Inject the torrent into qBittorrent
-    add_torrent_to_all_qbittorrent_instances(
-        &[torrent_file], // Use the single torrent file wrapped in a slice
-        qbittorrent_configs, // Ensure this is passed correctly
-        deluge_config, // Pass the DelugeConfig
-        input_path, // Pass the input_path argument
-        paths_config, // Use paths_config directly
-    )?;
+    if !dry_run {
+        add_torrent_to_all_qbittorrent_instances(
+            &[torrent_file], // Use the single torrent file wrapped in a slice
+            qbittorrent_configs, // Ensure this is passed correctly
+            deluge_config, // Pass the DelugeConfig
+            input_path, // Pass the input_path argument
+            paths_config, // Use paths_config directly
+        )?;
+    } else {
+        info!("[DRY RUN] Skipping adding custom torrent to qBittorrent/Deluge clients");
+    }
 
     Ok(())
 }
@@ -272,8 +287,9 @@ pub fn process_game_upload(
     paths_config: &PathsConfig,
     igdb_client_id: &str,
     igdb_bearer_token: &str,
+    dry_run: bool,
 ) -> Result<(), String> {
-    use seed_tools::utils::{upload_to_cdn, generate_game_description, download_igdb_screenshots};
+    use seed_tools::utils::upload_to_cdn;
     use std::path::Path;
 
     let base_name = Path::new(input_path)
@@ -334,14 +350,37 @@ pub fn process_game_upload(
                     .unwrap_or_default();
 
                 // 3. Download screenshots, set permissions, upload to CDN, collect CDN URLs
-                let safe_base_name = url_safe_filename(&base_name);
-                let local_paths = download_igdb_screenshots(&image_ids, &safe_base_name, "./screenshots/")?;
-                for (i, local_path) in local_paths.iter().enumerate() {
-                    let file_name = Path::new(local_path).file_name().unwrap().to_string_lossy();
-                    let remote_file = format!("{}/screenshots/{}", remote_path, file_name);
-                    upload_to_cdn(local_path, &remote_file)?;
-                    let cdn_url = format!("{}/{}", image_path, file_name);
-                    screenshot_urls.push(cdn_url);
+                if !dry_run {
+                    let safe_base_name = url_safe_filename(&base_name);
+                    std::fs::create_dir_all("./screenshots/").map_err(|e| format!("Failed to create output dir: {}", e))?;
+                    
+                    for (i, image_id) in image_ids.iter().enumerate() {
+                        let url = format!("https://images.igdb.com/igdb/image/upload/t_screenshot_big/{}.jpg", image_id);
+                        let filename = format!("./screenshots/{}_screen{}.jpg", safe_base_name, i + 1);
+
+                        let mut resp = reqwest::blocking::Client::new().get(&url).send().map_err(|e| format!("Failed to download screenshot: {}", e))?;
+                        let mut out = std::fs::File::create(&filename).map_err(|e| format!("Failed to create file: {}", e))?;
+                        std::io::copy(&mut resp, &mut out).map_err(|e| format!("Failed to write screenshot: {}", e))?;
+
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            std::fs::set_permissions(&filename, std::fs::Permissions::from_mode(0o777))
+                                .map_err(|e| format!("Failed to set permissions for screenshot '{}': {}", filename, e))?;
+                        }
+                        
+                        let file_name = Path::new(&filename).file_name().unwrap().to_string_lossy();
+                        let remote_file = format!("{}/screenshots/{}", remote_path, file_name);
+                        upload_to_cdn(&filename, &remote_file)?;
+                        let cdn_url = format!("{}/{}", image_path, file_name);
+                        screenshot_urls.push(cdn_url);
+                    }
+                } else {
+                    info!("[DRY RUN] Skipping IGDB screenshot downloads and CDN uploads");
+                    // Create dummy URLs for description generation
+                    for _ in 0..std::cmp::min(image_ids.len(), 3) {
+                        screenshot_urls.push("[DRY RUN] Screenshot URL would be here".to_string());
+                    }
                 }
             }
         }
@@ -392,14 +431,44 @@ pub fn process_game_upload(
             })
     };
 
-    // Use the new game description generator
+    // Generate game description
     let description = if !screenshot_urls.is_empty() {
-        generate_game_description(
-            &screenshot_urls,
-            seedpool_config.and_then(|c| Some(c.settings.custom_description.as_str())),
-            None, // youtube_trailer_url
-            &base_name,
-        )
+        let mut desc = String::new();
+        
+        // Add screenshots in a 2x2 table pattern
+        desc.push_str("[center]\n");
+        for (i, screenshot) in screenshot_urls.iter().enumerate() {
+            if i % 2 == 0 {
+                desc.push_str("[tr]\n");
+            }
+            desc.push_str(&format!(
+                "        [td][img width=720]{}[/img][/td]\n",
+                screenshot
+            ));
+            if i % 2 == 1 || i == screenshot_urls.len() - 1 {
+                desc.push_str("[/tr]\n");
+            }
+        }
+        desc.push_str("[/center]\n\n");
+
+        // Add custom description if available
+        if let Some(config) = seedpool_config {
+            if !config.settings.custom_description.is_empty() {
+                desc.push_str(&config.settings.custom_description);
+                desc.push_str("\n\n");
+            }
+        }
+
+        // Append the default non-video description
+        desc.push_str(&format!(
+            "[center][b][size=12][color=#757575]Created with mkbrr, ffmpeg, and mediainfo. Posted to this fine tracker with seed-tools.[/color][/size][/b]
+            
+            [url=https://github.com/seed-pool/seed-tools][img]https://cdn.seedpool.org/sp.png[/img][/url]  \
+            [url=https://github.com/autobrr/mkbrr][img]https://cdn.seedpool.org/mkbrr.png[/img][/url]  \
+            [url=https://www.rust-lang.org][img]https://cdn.seedpool.org/rust.png[/img][/url][/center]"
+        ));
+
+        desc
     } else {
         base_name.clone()
     };
@@ -425,8 +494,19 @@ pub fn process_game_upload(
         form = form.file("nfo", nfo).map_err(|e| format!("Failed to attach NFO file: {}", e))?;
     }
 
+    // Send the upload request (or simulate if dry_run)
+    if dry_run {
+        info!("DRY RUN: Would upload game release to {} at: {}", tracker, upload_url);
+        return Ok(());
+    }
+
     let response = client
         .post(&upload_url)
+        .header("Authorization", format!("Bearer {}", if tracker == "seedpool" { 
+            seedpool_config.as_ref().unwrap().general.api_key.clone() 
+        } else { 
+            torrentleech_config.as_ref().unwrap().settings.tl_key.clone() 
+        }))
         .multipart(form)
         .send()
         .map_err(|e| format!("Failed to send upload request: {}", e))?;
@@ -442,13 +522,17 @@ pub fn process_game_upload(
         ));
     }
 
-    add_torrent_to_all_qbittorrent_instances(
-        &[torrent_file],
-        qbittorrent_configs,
-        deluge_config,
-        input_path,
-        paths_config,
-    )?;
+    if !dry_run {
+        add_torrent_to_all_qbittorrent_instances(
+            &[torrent_file],
+            qbittorrent_configs,
+            deluge_config,
+            input_path,
+            paths_config,
+        )?;
+    } else {
+        info!("[DRY RUN] Skipping adding game torrent to qBittorrent/Deluge clients");
+    }
 
     Ok(())
 }

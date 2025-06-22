@@ -2,11 +2,11 @@ use std::fs;
 use std::{path::Path, thread, time::Duration};
 use log::{info, error};
 use regex::Regex;
-use bendy::decoding::{FromBencode, Object};
+use serde_bencode::de;
 use reqwest::blocking::Client;
 use serde_json;
 use crate::utils::generate_release_name;
-use crate::types::QbittorrentConfig; 
+use crate::types::{QbittorrentConfig, FastResumeData}; 
 
 
 pub fn check_seedpool(
@@ -218,30 +218,21 @@ fn get_save_path_from_fastresume(torrent_hash: &str, fastresume_dir: &str) -> Re
     let fastresume_data = fs::read(&fastresume_path)
         .map_err(|e| format!("Failed to read .fastresume file: {}", e))?;
 
-    let mut decoder = bendy::decoding::Decoder::new(&fastresume_data);
-    let mut qb_save_path = None;
-    let mut save_path = None;
-
-    while let Ok(Some(object)) = decoder.next_object() {
-        if let Object::Dict(mut dict) = object {
-            while let Some((key, value)) = dict.next_pair().unwrap_or(None) {
-                let key_str = String::from_utf8_lossy(key);
-                match key_str.as_ref() {
-                    "qBt-savePath" => {
-                        if let Object::Bytes(path_bytes) = value {
-                            qb_save_path = Some(String::from_utf8_lossy(path_bytes).to_string());
-                        }
-                    }
-                    "save_path" => {
-                        if let Object::Bytes(path_bytes) = value {
-                            save_path = Some(String::from_utf8_lossy(path_bytes).to_string());
-                        }
-                    }
-                    _ => {}
-                }
-            }
+    let data: Result<FastResumeData, _> = de::from_bytes(&fastresume_data);
+    
+    let (qb_save_path, save_path) = match data {
+        Ok(resume_data) => {
+            let qb_save_path = resume_data.qbt_save_path
+                .map(|bytes| String::from_utf8_lossy(&bytes).to_string());
+            let save_path = resume_data.save_path
+                .map(|bytes| String::from_utf8_lossy(&bytes).to_string());
+            (qb_save_path, save_path)
         }
-    }
+        Err(_) => {
+            // Fallback to simple parsing if structured parsing fails
+            (None, None)
+        }
+    };
 
     // Use qBt-savePath if available, otherwise fallback to save_path
     qb_save_path

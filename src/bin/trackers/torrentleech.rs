@@ -84,6 +84,7 @@ pub fn process_torrentleech_release(
     torrentleech_config: &TorrentLeechConfig,
     mkbrr_path: &Path,
     mediainfo_path: &Path,
+    dry_run: bool,
 ) -> Result<(), String> {
     let release_name = generate_release_name(sanitized_name);
     info!("Generated release name: {}", release_name);
@@ -127,6 +128,13 @@ pub fn process_torrentleech_release(
     info!("Selected category_id: {}", category_id);
 
     // Upload torrent
+    if dry_run {
+        info!("[DRY RUN] Would upload to TorrentLeech: {}", torrentleech_config.settings.upload_url);
+        info!("[DRY RUN] Category: {}, Torrent: {}, NFO: {}", category_id, torrent_file, nfo_path);
+        info!("[DRY RUN] Would execute curl with POST request");
+        return Ok(());
+    }
+
     let output = Command::new("curl")
         .args(&[
             "-X", "POST",
