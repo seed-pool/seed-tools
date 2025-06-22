@@ -1,30 +1,24 @@
 use irc::client::Client;
 use irc::client::prelude::*;
-use std::io::{self, Write}; // Use `std::io` for synchronous I/O
 use futures_util::stream::StreamExt;
 use tokio::sync::{mpsc, Mutex};
-use tui::{
+use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
-    text::{Span, Spans},
+    text::{Span, Line},
     widgets::{Block, Borders, Paragraph},
     Terminal,
 };
 use crossterm::{
-    event::{self, Event, KeyCode},
+    event::{Event, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode},
 };
-use serde::Deserialize;
 use std::{fs, sync::Arc};
-use crate::types::SeedpoolGeneralConfig;
 use std::collections::HashMap;
 
-#[derive(Deserialize)]
-struct SeedpoolConfig {
-    general: SeedpoolGeneralConfig, // Use the struct from types.rs
-}
+use crate::types::SeedpoolConfig;
 
 pub async fn launch_irc_client() -> Result<(), Box<dyn std::error::Error>> {
     // Dynamically determine the config path relative to the executable directory
@@ -151,24 +145,24 @@ pub async fn launch_irc_client() -> Result<(), Box<dyn std::error::Error>> {
                     let chunks = Layout::default()
                         .direction(Direction::Vertical)
                         .constraints([Constraint::Min(1), Constraint::Length(3)].as_ref())
-                        .split(f.size());
+                        .split(f.area());
 
                     // Create a longer-lived empty vector
                     let empty_vec = vec![];
 
                     // Display messages for the active channel
-                    let message_spans: Vec<Spans> = messages
+                    let message_spans: Vec<Line> = messages
                         .get(&active_channel)
                         .unwrap_or(&empty_vec) // Use the longer-lived `empty_vec`
                         .iter()
-                        .map(|msg| Spans::from(parse_irc_colors(msg)))
+                        .map(|msg| Line::from(parse_irc_colors(msg)))
                         .collect();
                     let message_widget = Paragraph::new(message_spans)
                         .block(Block::default().borders(Borders::ALL).title(Span::raw(active_channel.clone())));
                     f.render_widget(message_widget, chunks[0]);
 
                     // Display input
-                    let input_widget = Paragraph::new(input.as_ref())
+                    let input_widget = Paragraph::new(input.as_str())
                         .style(Style::default().fg(Color::Yellow))
                         .block(Block::default().borders(Borders::ALL).title("Input"));
                     f.render_widget(input_widget, chunks[1]);
@@ -239,22 +233,22 @@ pub async fn launch_irc_client() -> Result<(), Box<dyn std::error::Error>> {
                     let chunks = Layout::default()
                         .direction(Direction::Vertical)
                         .constraints([Constraint::Min(1), Constraint::Length(3)].as_ref())
-                        .split(f.size());
+                        .split(f.area());
     
                     // Display messages for the active channel
                     let empty_vec = vec![];
-                    let message_spans: Vec<Spans> = messages
+                    let message_spans: Vec<Line> = messages
                         .get(&active_channel)
                         .unwrap_or(&empty_vec)
                         .iter()
-                        .map(|msg| Spans::from(parse_irc_colors(msg)))
+                        .map(|msg| Line::from(parse_irc_colors(msg)))
                         .collect();
                     let message_widget = Paragraph::new(message_spans)
                         .block(Block::default().borders(Borders::ALL).title(Span::raw(active_channel.clone())));
                     f.render_widget(message_widget, chunks[0]);
     
                     // Display input
-                    let input_widget = Paragraph::new(input.as_ref())
+                    let input_widget = Paragraph::new(input.as_str())
                         .style(Style::default().fg(Color::Yellow))
                         .block(Block::default().borders(Borders::ALL).title("Input"));
                     f.render_widget(input_widget, chunks[1]);
@@ -328,7 +322,7 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) 
 
 // Helper function to parse IRC color codes
 fn parse_irc_colors(message: &str) -> Vec<Span> {
-    use tui::style::{Color, Style};
+    use ratatui::style::{Color, Style};
     let mut spans = Vec::new();
     let mut chars = message.chars().peekable();
     let mut current_text = String::new();
@@ -379,10 +373,10 @@ fn parse_irc_colors(message: &str) -> Vec<Span> {
                     .bg(bg_color.unwrap_or(Color::Reset));
             }
             '\x02' => { // Bold
-                current_style = current_style.add_modifier(tui::style::Modifier::BOLD);
+                current_style = current_style.add_modifier(ratatui::style::Modifier::BOLD);
             }
             '\x1F' => { // Underline
-                current_style = current_style.add_modifier(tui::style::Modifier::UNDERLINED);
+                current_style = current_style.add_modifier(ratatui::style::Modifier::UNDERLINED);
             }
             '\x0F' => { // Reset
                 if !current_text.is_empty() {

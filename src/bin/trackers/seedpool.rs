@@ -1,23 +1,18 @@
 use reqwest::blocking::multipart::Form;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::ffi::OsStr;
 use std::process::Command;
 use std::os::unix::fs::PermissionsExt;
 use std::fs;
-use serde_json::Value;
-use chrono::{NaiveTime, Duration};
+use chrono::NaiveTime;
 use crate::{Config, Client, SeedpoolConfig, Tracker};
 use seed_tools::utils::{
     generate_release_name, extract_rar_archives, upload_to_cdn, extract_torrent_id, find_video_files, create_torrent, generate_mediainfo, generate_sample,
-    generate_screenshots, fetch_tmdb_id, generate_ebook_bbcode_description, generate_screenshots_imgbb, default_non_video_description, fetch_external_ids, generate_description,
+    generate_screenshots, fetch_tmdb_id, generate_screenshots_imgbb, default_non_video_description, fetch_external_ids, generate_description,
     add_torrent_to_all_qbittorrent_instances,
 };
-use tui::text::Spans;
-use tui::text::Span;
-use tui::style::{Color, Style};
 use regex::Regex;
-use log::{info, warn, error};
+use log::{info, warn};
 use seed_tools::types::PreflightCheckResult;
 pub struct Seedpool {
     pub upload_url: String,
@@ -30,24 +25,23 @@ pub fn process_seedpool_release(
     _sanitized_name: &str,
     config: &mut Config,
     seedpool_config: &SeedpoolConfig,
-    ffmpeg_path: &Path,
-    ffprobe_path: &Path,
+    _ffmpeg_path: &Path,
+    _ffprobe_path: &Path,
     mkbrr_path: &Path,
     mediainfo_path: &Path,
     imgbb_api_key: Option<&str>, // Optional ImgBB API key
+    dry_run: bool,
 ) -> Result<(), String> {
     log::debug!("Processing release for input_path: {}", input_path);
 
     // Check for music files early
     let music_extensions = ["mp3", "flac"];
-    let mut type_id = 0;
     let mut found_music_file = false;
 
     for entry in WalkDir::new(input_path).into_iter().filter_map(|e| e.ok()) {
         if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
             if music_extensions.contains(&ext.to_lowercase().as_str()) {
-                found_music_file = true;
-                match ext.to_lowercase().as_str() {
+                          match ext.to_lowercase().as_str() {
                     "mp3" => {
                         type_id = 13; // MP3 type
                     }
@@ -56,6 +50,7 @@ pub fn process_seedpool_release(
                     }
                     _ => {}
                 }
+                found_music_file = true;
                 break; // Exit the loop once a valid music file is found
             }
         }
@@ -63,7 +58,7 @@ pub fn process_seedpool_release(
 
     if found_music_file {
         log::debug!("Music release detected: {}", input_path);
-        return process_music_release(input_path, config, seedpool_config, mkbrr_path, ffmpeg_path);
+        return process_music_release(input_path, config, seedpool_config, mkbrr_path, _ffmpeg_path, dry_run);
     }
 
     if Path::new(input_path).is_dir() {
@@ -105,13 +100,17 @@ pub fn process_seedpool_release(
         std::fs::write(&torrent_file_path, &torrent_data)
             .map_err(|e| format!("Failed to save torrent file: {}", e))?;
 
-        add_torrent_to_all_qbittorrent_instances(
-            &[torrent_file_path.to_string_lossy().to_string()],
-            &config.qbittorrent,
-            &config.deluge,
-            input_path,
-            &config.paths,
-        )?;
+        if !dry_run {
+            add_torrent_to_all_qbittorrent_instances(
+                &[torrent_file_path.to_string_lossy().to_string()],
+                &config.qbittorrent,
+                &config.deluge,
+                input_path,
+                &config.paths,
+            )?;
+        } else {
+            info!("[DRY RUN] Skipping adding duplicate torrent to qBittorrent/Deluge clients");
+        }
         return Ok(());
     }
 
@@ -125,14 +124,14 @@ pub fn process_seedpool_release(
     let (mut category_id, mut type_id) = match release_type.as_str() {
         "tv" => (2, 24),
         "movie" => (1, 22),
-        "boxset" => (13, 26),
+        "boxset" => (2, 26),
         _ => (0, 0),
     };
 
     // Only treat as boxset if not a dated TV
     if category_id == 2 && episode_number == Some(0) && !is_dated_tv {
-        log::debug!("Detected season-only release. Setting category_id to 13 (Boxset) and type_id to 26.");
-        category_id = 13; // Boxset category
+        log::debug!("Detected season-only release. Setting category_id to 2 (Tv Show) and type_id to 26.");
+        category_id = 2; // Boxset category
         type_id = 26; // Boxset type
     }
 
@@ -164,11 +163,12 @@ pub fn process_seedpool_release(
             match generate_screenshots(
                 &video_files[0],
                 &config.paths.screenshots_dir,
-                &ffmpeg_path.to_string_lossy(),
-                &ffprobe_path.to_string_lossy(),
+                &_ffmpeg_path.to_string_lossy(),
+                &_ffprobe_path.to_string_lossy(),
                 &seedpool_config.screenshots.remote_path,
                 &seedpool_config.screenshots.image_path,
                 &_sanitized_name,
+                dry_run,
             ) {
                 Ok(res) => res,
                 Err(e) => {
@@ -177,7 +177,7 @@ pub fn process_seedpool_release(
                 }
             }
         } else {
-            match generate_screenshots_imgbb(&video_files[0], ffmpeg_path, ffprobe_path, api_key) {
+            match generate_screenshots_imgbb(&video_files[0], _ffmpeg_path, _ffprobe_path, api_key, dry_run) {
                 Ok(res) => res,
                 Err(e) => {
                     log::error!("Screenshot generation failed: {e}. Proceeding without screenshots.");
@@ -189,11 +189,12 @@ pub fn process_seedpool_release(
         match generate_screenshots(
             &video_files[0],
             &config.paths.screenshots_dir,
-            &ffmpeg_path.to_string_lossy(),
-            &ffprobe_path.to_string_lossy(),
+            &_ffmpeg_path.to_string_lossy(),
+            &_ffprobe_path.to_string_lossy(),
             &seedpool_config.screenshots.remote_path,
             &seedpool_config.screenshots.image_path,
             &_sanitized_name,
+            dry_run,
         ) {
             Ok(res) => res,
             Err(e) => {
@@ -212,8 +213,9 @@ pub fn process_seedpool_release(
             &config.paths.screenshots_dir,
             &seedpool_config.screenshots.remote_path,
             &seedpool_config.screenshots.image_path,
-            &ffmpeg_path.to_string_lossy(),
+            &_ffmpeg_path.to_string_lossy(),
             &base_name,
+            dry_run,
         ) {
             Ok(url) => url,
             Err(e) => {
@@ -260,16 +262,21 @@ pub fn process_seedpool_release(
         episode_number,
         Some(resolution_id),
         is_dated_tv,
+        dry_run,
     )?;
 
     // Add torrent to clients
-    add_torrent_to_all_qbittorrent_instances(
-        &torrent_files,
-        &config.qbittorrent,
-        &config.deluge,
-        input_path,
-        &config.paths,
-    )?;
+    if !dry_run {
+        add_torrent_to_all_qbittorrent_instances(
+            &torrent_files,
+            &config.qbittorrent,
+            &config.deluge,
+            input_path,
+            &config.paths,
+        )?;
+    } else {
+        info!("[DRY RUN] Skipping adding torrent to qBittorrent/Deluge clients");
+    }
 
     Ok(())
 }
@@ -363,6 +370,7 @@ pub fn process_music_release(
     seedpool_config: &SeedpoolConfig,
     mkbrr_path: &Path,
     ffmpeg_path: &Path,
+    dry_run: bool,
 ) -> Result<(), String> {
     log::debug!("Processing music release for input_path: {}", input_path);
 
@@ -532,7 +540,7 @@ pub fn process_music_release(
 
     // Prepare the upload form
     let client = reqwest::blocking::Client::new();
-    let mut form = Form::new()
+    let form = Form::new()
         .file("torrent", &torrent_file)
         .map_err(|e| format!("Failed to attach torrent file: {}", e))?
         .text("name", base_name.clone()) // Clone base_name to satisfy the 'static lifetime
@@ -548,7 +556,12 @@ pub fn process_music_release(
         .text("stream", "0") // Add default value for stream
         .text("sd", "0"); // Add default value for sd
 
-    // Send the upload request
+    // Send the upload request (or simulate if dry_run)
+    if dry_run {
+        info!("DRY RUN: Would upload music release to Seedpool at: {}", seedpool_config.settings.upload_url);
+        return Ok(());
+    }
+
     let response = client
         .post(&seedpool_config.settings.upload_url)
         .header("Authorization", format!("Bearer {}", seedpool_config.general.api_key))
@@ -616,13 +629,17 @@ pub fn process_music_release(
     log::info!("Music release successfully uploaded: {}", base_name);
 
     // Add torrent to all qBittorrent instances
-    add_torrent_to_all_qbittorrent_instances(
-        &[torrent_file.clone()], // Use the torrent_file directly
-        &config.qbittorrent,
-        &config.deluge,
-        input_path,
-        &config.paths,
-    )?;
+    if !dry_run {
+        add_torrent_to_all_qbittorrent_instances(
+            &[torrent_file.clone()], // Use the torrent_file directly
+            &config.qbittorrent,
+            &config.deluge,
+            input_path,
+            &config.paths,
+        )?;
+    } else {
+        info!("[DRY RUN] Skipping adding music torrent to qBittorrent/Deluge clients");
+    }
 
     Ok(())
 }
@@ -833,6 +850,7 @@ impl Tracker for Seedpool {
         episode_number: Option<u32>,
         resolution_id: Option<u32>,
         is_dated_tv: bool,
+        dry_run: bool,
     ) -> Result<(), String> {
         log::debug!(
             "upload: category_id={}, type_id={:?}, tmdb_id={:?}, imdb_id={:?}, tvdb_id={:?}, season_number={:?}, episode_number={:?}, resolution_id={:?}",
@@ -889,6 +907,13 @@ impl Tracker for Seedpool {
             if let Some(episode) = episode_number {
                 form = form.text("episode_number", episode.to_string());
             }
+        }
+
+        if dry_run {
+            info!("[DRY RUN] Would upload to Seedpool: {}", self.upload_url);
+            info!("[DRY RUN] Release name: {}", release_name);
+            info!("[DRY RUN] Category: {}, Type: {:?}", category_id, type_id);
+            return Ok(());
         }
 
         let response = client
@@ -980,8 +1005,8 @@ pub fn preflight_check(
     input_path: &str,
     config: &Config,
     seedpool_config: &SeedpoolConfig,
-    ffmpeg_path: &Path,
-    ffprobe_path: &Path,
+    _ffmpeg_path: &Path,
+    _ffprobe_path: &Path,
     mediainfo_path: &Path,
 ) -> Result<PreflightCheckResult, String> {
     log::debug!("Processing release for input_path: {}", input_path);
@@ -1148,13 +1173,16 @@ pub fn preflight_check(
         std::fs::write(&torrent_file_path, &torrent_data)
             .map_err(|e| format!("Failed to save torrent file: {}", e))?;
 
-        add_torrent_to_all_qbittorrent_instances(
-            &[torrent_file_path.to_string_lossy().to_string()],
-            &config.qbittorrent,
-            &config.deluge,
-            input_path,
-            &config.paths,
-        )?;
+        // This is a preflight check, don't add to torrent clients
+        // if !dry_run {
+        //     add_torrent_to_all_qbittorrent_instances(
+        //         &[torrent_file_path.to_string_lossy().to_string()],
+        //         &config.qbittorrent,
+        //         &config.deluge,
+        //         input_path,
+        //         &config.paths,
+        //     )?;
+        // }
 
         return Ok(PreflightCheckResult {
             release_name: title.clone(),
@@ -1314,6 +1342,7 @@ pub fn process_audiobook_upload(
     seedpool_config: &SeedpoolConfig,
     mkbrr_path: &Path,
     mediainfo_path: &Path,
+    dry_run: bool,
 ) -> Result<(), String> {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -1363,7 +1392,7 @@ pub fn process_audiobook_upload(
     let genre = metadata.get("Genre").cloned().unwrap_or_else(|| "Audiobook".to_string());
     let mut open_library_work_key = String::new();
     let mut open_library_author_key = String::new();
-    let mut subjects = Vec::new();
+    let mut subjects: Vec<String> = Vec::new();
     let mut cover_id: Option<u64> = None;
     let mut ebook_desc = String::new();
 
@@ -1493,24 +1522,13 @@ pub fn process_audiobook_upload(
             // Extract cover ID
             cover_id = first_result["cover_i"].as_u64();
 
-            // Generate the BBCode description and fetch subjects (includes other books by author)
-            let client = Client::new();
-            match generate_ebook_bbcode_description(
-                &title,
-                &author,
-                &open_library_work_key,
-                &open_library_author_key,
-                &client,
-            ) {
-                Ok((desc2, subj)) => {
-                    ebook_desc = desc2;
-                    subjects = subj;
-                    info!("Fetched Open Library description and subjects.");
-                }
-                Err(e) => {
-                    warn!("Failed to generate Open Library BBCode description: {}", e);
-                }
-            }
+            // Use basic description for ebook ()
+            ebook_desc = format!(
+                "[center][b][size=32][color=#2E86C1]{}[/color][/size][/b][/center]\n\n[center][b][size=16][color=#117A65]By:[/color][/size][/b] [i]{}[/i][/center]\n\n{}",
+                title, author, default_non_video_description()
+            );
+            subjects = Vec::new(); // No subjects from simplified implementation
+            info!("Using basic ebook description format.");
         } else {
             warn!("Open Library result did not match original title/author closely enough. Skipping Open Library data.");
         }
@@ -1667,7 +1685,7 @@ pub fn process_audiobook_upload(
 
     // 9. Prepare upload form (no cover in description)
     let client = Client::new();
-    let mut form = reqwest::blocking::multipart::Form::new()
+    let form = reqwest::blocking::multipart::Form::new()
         .file("torrent", &torrent_file)
         .map_err(|e| format!("Failed to attach torrent file: {}", e))?
         .text("name", release_name.clone())
@@ -1687,6 +1705,13 @@ pub fn process_audiobook_upload(
 
     // 10. Upload to Seedpool (get torrent ID)
     info!("Uploading torrent to Seedpool...");
+    
+    if dry_run {
+        info!("[DRY RUN] Would upload audiobook to Seedpool: {}", seedpool_config.settings.upload_url);
+        info!("[DRY RUN] Form data would include: torrent file, description, category 9, type 21, etc.");
+        return Ok(());
+    }
+    
     let response = client
         .post(&seedpool_config.settings.upload_url)
         .header("Authorization", format!("Bearer {}", seedpool_config.general.api_key))
@@ -1743,9 +1768,13 @@ pub fn process_audiobook_upload(
 
     let remote_albumcovers_path = format!("{}/albumcovers", seedpool_config.screenshots.remote_path);
     if let Some(ref cover_path) = cover_path {
-        info!("Uploading cover art to CDN: {:?}", cover_path);
-        upload_to_cdn(cover_path.to_str().unwrap(), &remote_albumcovers_path)?;
-        info!("Cover art uploaded to CDN.");
+        if !dry_run {
+            info!("Uploading cover art to CDN: {:?}", cover_path);
+            upload_to_cdn(cover_path.to_str().unwrap(), &remote_albumcovers_path)?;
+            info!("Cover art uploaded to CDN.");
+        } else {
+            info!("[DRY RUN] Skipping cover art upload to CDN: {:?}", cover_path);
+        }
     } else if let Some(cover_id) = cover_id {
         // Download from Open Library, save as torrent-cover_<id>.jpg, set 777, upload
         let ol_url = format!("https://covers.openlibrary.org/b/id/{}-L.jpg", cover_id);
@@ -1758,8 +1787,12 @@ pub fn process_audiobook_upload(
             fs::set_permissions(&cover_path, fs::Permissions::from_mode(0o777))
                 .map_err(|e| format!("Failed to set permissions for Open Library cover: {}", e))?;
             info!("Downloaded and saved Open Library cover art to {:?}", cover_path);
-            upload_to_cdn(cover_path.to_str().unwrap(), &remote_albumcovers_path)?;
-            info!("Open Library cover art uploaded to CDN.");
+            if !dry_run {
+                upload_to_cdn(cover_path.to_str().unwrap(), &remote_albumcovers_path)?;
+                info!("Open Library cover art uploaded to CDN.");
+            } else {
+                info!("[DRY RUN] Skipping Open Library cover art upload to CDN: {:?}", cover_path);
+            }
         } else {
             warn!("Failed to fetch Open Library cover art.");
         }
@@ -1768,14 +1801,18 @@ pub fn process_audiobook_upload(
     }
 
     // 13. Add torrent to all qBittorrent instances
-    info!("Adding torrent to all qBittorrent and Deluge instances.");
-    add_torrent_to_all_qbittorrent_instances(
-        &[torrent_file.clone()],
-        &config.qbittorrent,
-        &config.deluge,
-        input_path,
-        &config.paths,
-    )?;
+    if !dry_run {
+        info!("Adding torrent to all qBittorrent and Deluge instances.");
+        add_torrent_to_all_qbittorrent_instances(
+            &[torrent_file.clone()],
+            &config.qbittorrent,
+            &config.deluge,
+            input_path,
+            &config.paths,
+        )?;
+    } else {
+        info!("[DRY RUN] Skipping adding audiobook torrent to qBittorrent/Deluge clients");
+    }
 
     info!("Audiobook upload process completed successfully.");
     Ok(())

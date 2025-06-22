@@ -1,0 +1,11 @@
+variables:
+  NIX_CI_ARTIFACTS: seed-tools
+
+include:
+- remote: 'https://gitlab.com/kevincox/nix-ci/-/raw/v1/gitlab-ci.yml'
+
+nix-ci:build:
+  tags: [nix]
+  only:
+    - master
+    - development

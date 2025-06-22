@@ -1,5 +1,50 @@
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::path::PathBuf;
+
+/// Supported ebook file types
+#[derive(Debug, Clone)]
+pub enum EbookType {
+    Epub,
+    Pdf,
+    Cbz,
+    Cbr,
+}
+
+impl EbookType {
+    pub fn from_extension(ext: &str) -> Option<Self> {
+        match ext.to_lowercase().as_str() {
+            "epub" => Some(EbookType::Epub),
+            "pdf" => Some(EbookType::Pdf),
+            "cbz" => Some(EbookType::Cbz),
+            "cbr" => Some(EbookType::Cbr),
+            _ => None,
+        }
+    }
+
+    pub fn is_comic(&self) -> bool {
+        matches!(self, EbookType::Cbz | EbookType::Cbr)
+    }
+
+    pub fn needs_renaming(&self) -> bool {
+        matches!(self, EbookType::Epub)
+    }
+}
+
+/// Represents an ebook file with its type
+#[derive(Debug, Clone)]
+pub struct EbookFile {
+    pub path: PathBuf,
+    pub ebook_type: EbookType,
+}
+
+/// Fast resume data for qBittorrent
+#[derive(Deserialize)]
+pub struct FastResumeData {
+    #[serde(rename = "qBt-savePath")]
+    pub qbt_save_path: Option<Vec<u8>>,
+    pub save_path: Option<Vec<u8>>,
+}
 
 #[derive(Deserialize)]
 pub struct GeneralConfig {
