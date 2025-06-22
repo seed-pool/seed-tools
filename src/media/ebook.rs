@@ -98,13 +98,20 @@ fn extract_metadata_from_comic(comic_path: &Path) -> Result<(Option<String>, Opt
 fn extract_comic_images(comic_file: &EbookFile, working_dir: &str) -> Result<String, String> {
     let comic_path = &comic_file.path;
     
-    // Extract directly to the working directory (not a subdirectory)
-    let extract_dir = Path::new(working_dir);
+    // Create a subfolder based on the comic file name
+    let comic_name = comic_path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("comic");
+    let extract_dir = Path::new(working_dir).join(comic_name);
+    
+    // Create the extraction directory if it doesn't exist
+    std::fs::create_dir_all(&extract_dir)
+        .map_err(|e| format!("Failed to create extraction directory '{}': {}", extract_dir.display(), e))?;
     
     match comic_file.ebook_type {
         EbookType::Cbz => {
-            // Extract CBZ (ZIP) file directly to working directory
-            log::info!("Extracting CBZ file: {}", comic_path.display());
+            // Extract CBZ (ZIP) file to subfolder
+            log::info!("Extracting CBZ file: {} to {}", comic_path.display(), extract_dir.display());
             let output = Command::new("unzip")
                 .arg("-o") // Overwrite files
                 .arg("-j") // Junk paths (extract to flat directory)
@@ -123,13 +130,13 @@ fn extract_comic_images(comic_file: &EbookFile, working_dir: &str) -> Result<Str
             }
         },
         EbookType::Cbr => {
-            // Extract CBR (RAR) file directly to working directory
-            log::info!("Extracting CBR file: {}", comic_path.display());
+            // Extract CBR (RAR) file to subfolder
+            log::info!("Extracting CBR file: {} to {}", comic_path.display(), extract_dir.display());
             let output = Command::new("unrar")
                 .arg("x") // Extract with paths
                 .arg("-o+") // Overwrite files
                 .arg(comic_path)
-                .arg(extract_dir)
+                .arg(&extract_dir)
                 .output()
                 .map_err(|e| format!("Failed to execute unrar: {}", e))?;
             
@@ -243,9 +250,22 @@ pub fn generate_ebook_description(
             let parent_dir = path.parent()
                 .ok_or_else(|| "Cannot determine parent directory".to_string())?;
             
-            // Look for extracted image files in the parent directory
+            // Look for the extraction subfolder based on comic file name
+            let comic_name = path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("comic");
+            let extract_dir = parent_dir.join(comic_name);
+            
+            // Use the extraction directory if it exists, otherwise fall back to parent directory
+            let search_dir = if extract_dir.exists() && extract_dir.is_dir() {
+                &extract_dir
+            } else {
+                parent_dir
+            };
+            
+            // Look for extracted image files in the appropriate directory
             let mut image_files = Vec::new();
-            for entry in fs::read_dir(parent_dir)
+            for entry in fs::read_dir(search_dir)
                 .map_err(|e| format!("Failed to read directory: {}", e))? {
                 let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
                 let file_path = entry.path();
@@ -554,14 +574,19 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
 
     // Extract comic images if we have CBR/CBZ files
     let actual_content_path = if main_ebook_file.ebook_type.is_comic() {
-        // Extract images from all comic files
+        // Extract images from all comic files and use the first extraction directory
+        let mut extracted_dir_path = working_dir.clone();
         for ebook_file in &ebook_files {
             if ebook_file.ebook_type.is_comic() {
                 let extracted_dir = extract_comic_images(&ebook_file, &working_dir)?;
                 log::info!("Comic images extracted from {} to: {}", ebook_file.path.display(), extracted_dir);
+                // Use the first extracted directory as the content path for torrent creation
+                if extracted_dir_path == working_dir {
+                    extracted_dir_path = extracted_dir;
+                }
             }
         }
-        working_dir.clone()
+        extracted_dir_path
     } else {
         working_dir.clone()
     };
@@ -630,10 +655,13 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
         .to_string();
     
     let lower_base = base_name.to_lowercase();
-    let type_id = if lower_base.contains("magazine") {
-        "41"
-    } else if lower_base.contains("comic") {
-        "40"
+    let type_id = if main_ebook_file.ebook_type.is_comic() {
+        // CBR/CBZ files are comics - check filename for magazine vs comic
+        if lower_base.contains("magazine") {
+            "41"
+        } else {
+            "40"
+        }
     } else {
         "20"
     };
@@ -883,7 +911,7 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
     // --- COVER HANDLING ---
 
     // For EPUBs: Fetch the cover image using the cover ID from Open Library (existing logic)
-    if !matches!(main_ebook_file.ebook_type, EbookType::Pdf) && (type_id != "40" && type_id != "41") {
+    if !matches!(main_ebook_file.ebook_type, EbookType::Pdf){
         let mut cover_handled = false;
         if let Some(cover_id) = cover_id {
             let cover_url = format!("https://covers.openlibrary.org/b/id/{}-L.jpg", cover_id);
