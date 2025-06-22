@@ -3,19 +3,10 @@ use std::{path::Path, thread, time::Duration};
 use log::{info, error};
 use regex::Regex;
 use serde_bencode::de;
-use serde::{Deserialize};
-use std::collections::HashMap;
 use reqwest::blocking::Client;
 use serde_json;
 use crate::utils::generate_release_name;
-use crate::types::QbittorrentConfig;
-
-#[derive(Deserialize)]
-struct FastResumeData {
-    #[serde(rename = "qBt-savePath")]
-    qbt_save_path: Option<Vec<u8>>,
-    save_path: Option<Vec<u8>>,
-} 
+use crate::types::{QbittorrentConfig, FastResumeData}; 
 
 
 pub fn check_seedpool(

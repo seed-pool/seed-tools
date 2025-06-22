@@ -4,20 +4,17 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Span, Line},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Widget},
+    widgets::{Block, Borders, List, ListItem, Paragraph},
     Terminal,
 };
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers, EnableMouseCapture},
+    event::{self, Event, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::layout::Rect;
 use walkdir::WalkDir;
-use simplelog::*;
 use std::sync::mpsc;
-use std::sync::mpsc::channel;
-use notify::{Config as NotifyConfig, Watcher, RecursiveMode, RecommendedWatcher, Event as NotifyEvent, EventKind};
 use serde::Deserialize;
 // --- Standard Library ---
 use std::{
@@ -29,26 +26,10 @@ use std::{
     thread,
     time::Duration,
 };
-use vte::{Parser, Perform};
 use crate::types::PreflightCheckResult;
-use crate::utils;
-use std::fs::OpenOptions;
 // --- Static Variables ---
 static INIT_LOGGER: Once = Once::new();
-#[derive(Deserialize)]
-struct GeneralConfig {
-    tmdb_api_key: String,
-}
-
-#[derive(Deserialize)]
-struct PathsConfig {
-    mediainfo: String,
-    torrent_dir: String,
-    screenshots_dir: String,
-    ffmpeg: String,
-    ffprobe: String,
-    mkbrr: String,
-}
+use crate::types::{GeneralConfig, PathsConfig};
 
 #[derive(Deserialize)]
 struct AppConfig {
@@ -108,8 +89,8 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
     let config = load_config();
 
     // Extract the TMDB API key and mediainfo path
-    let tmdb_api_key = config.general.tmdb_api_key;
-    let mediainfo_path = config.paths.mediainfo.clone();
+    let _tmdb_api_key = config.general.tmdb_api_key;
+    let _mediainfo_path = config.paths.mediainfo.clone();
     std::panic::set_hook(Box::new(move |panic_info| {
         let _ = disable_raw_mode();
         let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::event::DisableMouseCapture);
@@ -128,7 +109,7 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
     let mut file_list = get_files_in_dir(&current_dir);
     let mut selected_file_index = 0;
     let mut scroll_offset = 0;
-    let mut tracker_scroll_offset = 0;
+    let tracker_scroll_offset = 0;
     let mut selected_trackers = Vec::<String>::new();
     let mut input_path = None::<PathBuf>;
     let mut exit_requested = false;
@@ -137,14 +118,14 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
     let tracker_options = vec!["✔️ Select All", "🐳 seedpool [SP]", "🐛 TorrentLeech [TL]"];
     let log_output = Arc::new(Mutex::new(Vec::<String>::new()));
     let log_scroll_offset = Arc::new(Mutex::new(0)); // Shared scroll offset for logs
-    let mut preflight_check_result: Option<PreflightCheckResult> = None;
+    let preflight_check_result: Option<PreflightCheckResult> = None;
     let mut upload_running = false; // Tracks if the upload process is running
-    let mut preflight_check_running = false;
+    let preflight_check_running = false;
     let terminal_emulator = Arc::new(TerminalEmulator::new());
     let log_file_path = "seed-tools.log";
     start_log_tail(Arc::clone(&terminal_emulator), log_file_path);
     // Channel for notifying the main loop of log updates
-    let (tx, rx) = mpsc::channel::<()>();
+    let (_tx, rx) = mpsc::channel::<()>();
     let mut terminal_scroll_offset = 0; 
     // Initial UI render
     terminal.draw(|f| {
@@ -280,8 +261,7 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
                                             log_output,
                                         );
         
-                                        // Reset spinner state and notify the main loop
-                                        upload_running = false;
+                                        // Upload completed
                                     }
                                 });
                             } else {
@@ -469,13 +449,13 @@ fn render_ui(
     tracker_options: &[&str],
     showing_log: bool,
     terminal_emulator: &Arc<TerminalEmulator>, // Pass terminal_emulator instead of log_output
-    log_scroll_offset: &Arc<Mutex<usize>>,
-    preflight_check_result: &Option<PreflightCheckResult>,
-    upload_running: bool,
-    preflight_check_running: bool,
+    _log_scroll_offset: &Arc<Mutex<usize>>,
+    _preflight_check_result: &Option<PreflightCheckResult>,
+    _upload_running: bool,
+    _preflight_check_running: bool,
 ) {
     // Define the layout
-    let size = f.size();
+    let size = f.area();
 
     // Render a full-screen block with the background color
     let background_block = Block::default().style(Style::default().bg(Color::Rgb(8, 8, 32))); // Background color
@@ -634,7 +614,7 @@ fn render_ui(
     // Render File List or Log Section
     if showing_log {
         // Render the terminal emulator
-        let mut terminal_scroll_offset = 0; 
+        let terminal_scroll_offset = 0; 
     let terminal_output = terminal_emulator.render();
     let visible_lines = terminal_output
         .iter()
@@ -681,7 +661,7 @@ fn render_ui(
     let visible_trackers = &tracker_options[tracker_scroll_offset
         ..(tracker_scroll_offset + middle_chunks[1].height as usize).min(tracker_options.len())];
     let tracker_list_widget = List::new(
-        visible_trackers.iter().enumerate().map(|(i, tracker)| {
+        visible_trackers.iter().enumerate().map(|(_i, tracker)| {
             let is_selected = selected_trackers.contains(&tracker.to_string());
             let tracker_name = if is_selected {
                 format!("{} ✔️", tracker) // Append ✔️ to selected trackers

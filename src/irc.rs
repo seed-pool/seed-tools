@@ -1,6 +1,5 @@
 use irc::client::Client;
 use irc::client::prelude::*;
-use std::io::{self, Write}; // Use `std::io` for synchronous I/O
 use futures_util::stream::StreamExt;
 use tokio::sync::{mpsc, Mutex};
 use ratatui::{
@@ -12,19 +11,14 @@ use ratatui::{
     Terminal,
 };
 use crossterm::{
-    event::{self, Event, KeyCode},
+    event::{Event, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode},
 };
-use serde::Deserialize;
 use std::{fs, sync::Arc};
-use crate::types::SeedpoolGeneralConfig;
 use std::collections::HashMap;
 
-#[derive(Deserialize)]
-struct SeedpoolConfig {
-    general: SeedpoolGeneralConfig, // Use the struct from types.rs
-}
+use crate::types::SeedpoolConfig;
 
 pub async fn launch_irc_client() -> Result<(), Box<dyn std::error::Error>> {
     // Dynamically determine the config path relative to the executable directory

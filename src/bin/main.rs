@@ -1,24 +1,19 @@
 use std::{
     fs,
-    env,
     path::{Path, PathBuf},
-    collections::HashMap,
 };
 use serde::Deserialize;
 use log::{info, error, debug, LevelFilter};
 use simplelog::{Config as SimpleLogConfig, CombinedLogger, WriteLogger};
-use std::fs::File;
 use std::error::Error;
 use reqwest::blocking::Client;
 use seed_tools::utils;
-use seed_tools::utils::{generate_release_name, validate_file_path, validate_api_key, validate_url};
+use seed_tools::utils::{generate_release_name, validate_file_path};
 use seed_tools::types::{Config, SeedpoolConfig, TorrentLeechConfig, QbittorrentConfig, DelugeConfig};
 use seed_tools::sync;
 use seed_tools::irc::launch_irc_client;
-use seed_tools::types::PreflightCheckResult;
 use trackers::seedpool::preflight_check;
 use seed_tools::ui;
-use tokio::main;
 mod trackers {
     pub mod seedpool;
     pub mod torrentleech;
@@ -368,7 +363,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             if category_type_arg == "0316" || category_type_arg == "0415" || category_type_arg == "0334" || category_type_arg == "0333" {
                 let igdb_client_id = &main_config.general.igdb_client_id;
                 let igdb_bearer_token = &main_config.general.igdb_bearer_token;
-                let game_title = &sanitize_game_title(&base_name);
+                let _game_title = &sanitize_game_title(&base_name);
 
                 if let Err(e) = process_game_upload(
                     input_path_str,

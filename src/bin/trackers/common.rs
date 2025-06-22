@@ -6,7 +6,6 @@ use seed_tools::types::PathsConfig; // Import PathsConfig
 use crate::{QbittorrentConfig, SeedpoolConfig, TorrentLeechConfig, DelugeConfig};
 use std::collections::HashMap;
 use reqwest::blocking::Client;
-use serde_json::Value;
 use regex::Regex;
 
 #[allow(dead_code)]
@@ -290,7 +289,7 @@ pub fn process_game_upload(
     igdb_bearer_token: &str,
     dry_run: bool,
 ) -> Result<(), String> {
-    use seed_tools::utils::{upload_to_cdn, generate_game_description, download_igdb_screenshots};
+    use seed_tools::utils::upload_to_cdn;
     use std::path::Path;
 
     let base_name = Path::new(input_path)
@@ -353,11 +352,26 @@ pub fn process_game_upload(
                 // 3. Download screenshots, set permissions, upload to CDN, collect CDN URLs
                 if !dry_run {
                     let safe_base_name = url_safe_filename(&base_name);
-                    let local_paths = download_igdb_screenshots(&image_ids, &safe_base_name, "./screenshots/")?;
-                    for (i, local_path) in local_paths.iter().enumerate() {
-                        let file_name = Path::new(local_path).file_name().unwrap().to_string_lossy();
+                    std::fs::create_dir_all("./screenshots/").map_err(|e| format!("Failed to create output dir: {}", e))?;
+                    
+                    for (i, image_id) in image_ids.iter().enumerate() {
+                        let url = format!("https://images.igdb.com/igdb/image/upload/t_screenshot_big/{}.jpg", image_id);
+                        let filename = format!("./screenshots/{}_screen{}.jpg", safe_base_name, i + 1);
+
+                        let mut resp = reqwest::blocking::Client::new().get(&url).send().map_err(|e| format!("Failed to download screenshot: {}", e))?;
+                        let mut out = std::fs::File::create(&filename).map_err(|e| format!("Failed to create file: {}", e))?;
+                        std::io::copy(&mut resp, &mut out).map_err(|e| format!("Failed to write screenshot: {}", e))?;
+
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            std::fs::set_permissions(&filename, std::fs::Permissions::from_mode(0o777))
+                                .map_err(|e| format!("Failed to set permissions for screenshot '{}': {}", filename, e))?;
+                        }
+                        
+                        let file_name = Path::new(&filename).file_name().unwrap().to_string_lossy();
                         let remote_file = format!("{}/screenshots/{}", remote_path, file_name);
-                        upload_to_cdn(local_path, &remote_file)?;
+                        upload_to_cdn(&filename, &remote_file)?;
                         let cdn_url = format!("{}/{}", image_path, file_name);
                         screenshot_urls.push(cdn_url);
                     }
@@ -417,14 +431,44 @@ pub fn process_game_upload(
             })
     };
 
-    // Use the new game description generator
+    // Generate game description
     let description = if !screenshot_urls.is_empty() {
-        generate_game_description(
-            &screenshot_urls,
-            seedpool_config.and_then(|c| Some(c.settings.custom_description.as_str())),
-            None, // youtube_trailer_url
-            &base_name,
-        )
+        let mut desc = String::new();
+        
+        // Add screenshots in a 2x2 table pattern
+        desc.push_str("[center]\n");
+        for (i, screenshot) in screenshot_urls.iter().enumerate() {
+            if i % 2 == 0 {
+                desc.push_str("[tr]\n");
+            }
+            desc.push_str(&format!(
+                "        [td][img width=720]{}[/img][/td]\n",
+                screenshot
+            ));
+            if i % 2 == 1 || i == screenshot_urls.len() - 1 {
+                desc.push_str("[/tr]\n");
+            }
+        }
+        desc.push_str("[/center]\n\n");
+
+        // Add custom description if available
+        if let Some(config) = seedpool_config {
+            if !config.settings.custom_description.is_empty() {
+                desc.push_str(&config.settings.custom_description);
+                desc.push_str("\n\n");
+            }
+        }
+
+        // Append the default non-video description
+        desc.push_str(&format!(
+            "[center][b][size=12][color=#757575]Created with mkbrr, ffmpeg, and mediainfo. Posted to this fine tracker with seed-tools.[/color][/size][/b]
+            
+            [url=https://github.com/seed-pool/seed-tools][img]https://cdn.seedpool.org/sp.png[/img][/url]  \
+            [url=https://github.com/autobrr/mkbrr][img]https://cdn.seedpool.org/mkbrr.png[/img][/url]  \
+            [url=https://www.rust-lang.org][img]https://cdn.seedpool.org/rust.png[/img][/url][/center]"
+        ));
+
+        desc
     } else {
         base_name.clone()
     };

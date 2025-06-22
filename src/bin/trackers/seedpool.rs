@@ -1,23 +1,18 @@
 use reqwest::blocking::multipart::Form;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::ffi::OsStr;
 use std::process::Command;
 use std::os::unix::fs::PermissionsExt;
 use std::fs;
-use serde_json::Value;
-use chrono::{NaiveTime, Duration};
+use chrono::NaiveTime;
 use crate::{Config, Client, SeedpoolConfig, Tracker};
 use seed_tools::utils::{
     generate_release_name, extract_rar_archives, upload_to_cdn, extract_torrent_id, find_video_files, create_torrent, generate_mediainfo, generate_sample,
-    generate_screenshots, fetch_tmdb_id, generate_ebook_bbcode_description, generate_screenshots_imgbb, default_non_video_description, fetch_external_ids, generate_description,
+    generate_screenshots, fetch_tmdb_id, generate_screenshots_imgbb, default_non_video_description, fetch_external_ids, generate_description,
     add_torrent_to_all_qbittorrent_instances,
 };
-use ratatui::text::Line;
-use ratatui::text::Span;
-use ratatui::style::{Color, Style};
 use regex::Regex;
-use log::{info, warn, error};
+use log::{info, warn};
 use seed_tools::types::PreflightCheckResult;
 pub struct Seedpool {
     pub upload_url: String,
@@ -30,8 +25,8 @@ pub fn process_seedpool_release(
     _sanitized_name: &str,
     config: &mut Config,
     seedpool_config: &SeedpoolConfig,
-    ffmpeg_path: &Path,
-    ffprobe_path: &Path,
+    _ffmpeg_path: &Path,
+    _ffprobe_path: &Path,
     mkbrr_path: &Path,
     mediainfo_path: &Path,
     imgbb_api_key: Option<&str>, // Optional ImgBB API key
@@ -41,22 +36,12 @@ pub fn process_seedpool_release(
 
     // Check for music files early
     let music_extensions = ["mp3", "flac"];
-    let mut type_id = 0;
     let mut found_music_file = false;
 
     for entry in WalkDir::new(input_path).into_iter().filter_map(|e| e.ok()) {
         if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
             if music_extensions.contains(&ext.to_lowercase().as_str()) {
                 found_music_file = true;
-                match ext.to_lowercase().as_str() {
-                    "mp3" => {
-                        type_id = 13; // MP3 type
-                    }
-                    "flac" => {
-                        type_id = 11; // FLAC type
-                    }
-                    _ => {}
-                }
                 break; // Exit the loop once a valid music file is found
             }
         }
@@ -64,7 +49,7 @@ pub fn process_seedpool_release(
 
     if found_music_file {
         log::debug!("Music release detected: {}", input_path);
-        return process_music_release(input_path, config, seedpool_config, mkbrr_path, ffmpeg_path, dry_run);
+        return process_music_release(input_path, config, seedpool_config, mkbrr_path, _ffmpeg_path, dry_run);
     }
 
     if Path::new(input_path).is_dir() {
@@ -130,14 +115,14 @@ pub fn process_seedpool_release(
     let (mut category_id, mut type_id) = match release_type.as_str() {
         "tv" => (2, 24),
         "movie" => (1, 22),
-        "boxset" => (13, 26),
+        "boxset" => (2, 26),
         _ => (0, 0),
     };
 
     // Only treat as boxset if not a dated TV
     if category_id == 2 && episode_number == Some(0) && !is_dated_tv {
-        log::debug!("Detected season-only release. Setting category_id to 13 (Boxset) and type_id to 26.");
-        category_id = 13; // Boxset category
+        log::debug!("Detected season-only release. Setting category_id to 2 (Boxset) and type_id to 26.");
+        category_id = 2; // Boxset category
         type_id = 26; // Boxset type
     }
 
@@ -169,8 +154,8 @@ pub fn process_seedpool_release(
             match generate_screenshots(
                 &video_files[0],
                 &config.paths.screenshots_dir,
-                &ffmpeg_path.to_string_lossy(),
-                &ffprobe_path.to_string_lossy(),
+                &_ffmpeg_path.to_string_lossy(),
+                &_ffprobe_path.to_string_lossy(),
                 &seedpool_config.screenshots.remote_path,
                 &seedpool_config.screenshots.image_path,
                 &_sanitized_name,
@@ -183,7 +168,7 @@ pub fn process_seedpool_release(
                 }
             }
         } else {
-            match generate_screenshots_imgbb(&video_files[0], ffmpeg_path, ffprobe_path, api_key, dry_run) {
+            match generate_screenshots_imgbb(&video_files[0], _ffmpeg_path, _ffprobe_path, api_key, dry_run) {
                 Ok(res) => res,
                 Err(e) => {
                     log::error!("Screenshot generation failed: {e}. Proceeding without screenshots.");
@@ -195,8 +180,8 @@ pub fn process_seedpool_release(
         match generate_screenshots(
             &video_files[0],
             &config.paths.screenshots_dir,
-            &ffmpeg_path.to_string_lossy(),
-            &ffprobe_path.to_string_lossy(),
+            &_ffmpeg_path.to_string_lossy(),
+            &_ffprobe_path.to_string_lossy(),
             &seedpool_config.screenshots.remote_path,
             &seedpool_config.screenshots.image_path,
             &_sanitized_name,
@@ -219,7 +204,7 @@ pub fn process_seedpool_release(
             &config.paths.screenshots_dir,
             &seedpool_config.screenshots.remote_path,
             &seedpool_config.screenshots.image_path,
-            &ffmpeg_path.to_string_lossy(),
+            &_ffmpeg_path.to_string_lossy(),
             &base_name,
             dry_run,
         ) {
@@ -546,7 +531,7 @@ pub fn process_music_release(
 
     // Prepare the upload form
     let client = reqwest::blocking::Client::new();
-    let mut form = Form::new()
+    let form = Form::new()
         .file("torrent", &torrent_file)
         .map_err(|e| format!("Failed to attach torrent file: {}", e))?
         .text("name", base_name.clone()) // Clone base_name to satisfy the 'static lifetime
@@ -1011,8 +996,8 @@ pub fn preflight_check(
     input_path: &str,
     config: &Config,
     seedpool_config: &SeedpoolConfig,
-    ffmpeg_path: &Path,
-    ffprobe_path: &Path,
+    _ffmpeg_path: &Path,
+    _ffprobe_path: &Path,
     mediainfo_path: &Path,
 ) -> Result<PreflightCheckResult, String> {
     log::debug!("Processing release for input_path: {}", input_path);
@@ -1398,7 +1383,7 @@ pub fn process_audiobook_upload(
     let genre = metadata.get("Genre").cloned().unwrap_or_else(|| "Audiobook".to_string());
     let mut open_library_work_key = String::new();
     let mut open_library_author_key = String::new();
-    let mut subjects = Vec::new();
+    let mut subjects: Vec<String> = Vec::new();
     let mut cover_id: Option<u64> = None;
     let mut ebook_desc = String::new();
 
@@ -1528,24 +1513,13 @@ pub fn process_audiobook_upload(
             // Extract cover ID
             cover_id = first_result["cover_i"].as_u64();
 
-            // Generate the BBCode description and fetch subjects (includes other books by author)
-            let client = Client::new();
-            match generate_ebook_bbcode_description(
-                &title,
-                &author,
-                &open_library_work_key,
-                &open_library_author_key,
-                &client,
-            ) {
-                Ok((desc2, subj)) => {
-                    ebook_desc = desc2;
-                    subjects = subj;
-                    info!("Fetched Open Library description and subjects.");
-                }
-                Err(e) => {
-                    warn!("Failed to generate Open Library BBCode description: {}", e);
-                }
-            }
+            // Use basic description for ebook (Open Library integration functionality was removed)
+            ebook_desc = format!(
+                "[center][b][size=32][color=#2E86C1]{}[/color][/size][/b][/center]\n\n[center][b][size=16][color=#117A65]By:[/color][/size][/b] [i]{}[/i][/center]\n\n{}",
+                title, author, default_non_video_description()
+            );
+            subjects = Vec::new(); // No subjects from simplified implementation
+            info!("Using basic ebook description format.");
         } else {
             warn!("Open Library result did not match original title/author closely enough. Skipping Open Library data.");
         }
@@ -1702,7 +1676,7 @@ pub fn process_audiobook_upload(
 
     // 9. Prepare upload form (no cover in description)
     let client = Client::new();
-    let mut form = reqwest::blocking::multipart::Form::new()
+    let form = reqwest::blocking::multipart::Form::new()
         .file("torrent", &torrent_file)
         .map_err(|e| format!("Failed to attach torrent file: {}", e))?
         .text("name", release_name.clone())
