@@ -37,6 +37,7 @@ pub fn process_seedpool_release(
     // Check for music files early
     let music_extensions = ["mp3", "flac"];
     let mut found_music_file = false;
+    let mut type_id = 0;
 
     for entry in WalkDir::new(input_path).into_iter().filter_map(|e| e.ok()) {
         if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
