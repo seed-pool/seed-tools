@@ -303,11 +303,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 return Ok(()); // Exit cleanly
             }
 
-            if category_type_arg == "0720" || category_type_arg == "0740" || category_type_arg == "0741" {
+            if category_type_arg == "0700" || category_type_arg == "0720" || category_type_arg == "0740" || category_type_arg == "0741" {
                 info!("Detected eBook upload mode with argument: {}", category_type_arg);
             
                 // Assuming `config` and `seedpool_config` are already initialized
-                if let Err(e) = utils::process_ebook_upload(input_path_str, &main_config, &seedpool_config, cli.dry_run) {
+                if let Err(e) = utils::process_ebook_upload(input_path_str, &main_config, &seedpool_config, Some(&category_type_arg), cli.dry_run) {
                     error!("Error processing eBook upload: {}", e);
                 } else {
                     info!("Successfully processed eBook upload.");

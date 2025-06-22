@@ -521,7 +521,7 @@ pub fn generate_ebook_bbcode_description(
 }
 
 /// Main function to process ebook uploads
-pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: &SeedpoolConfig, dry_run: bool) -> Result<(), String> {
+pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: &SeedpoolConfig, category_arg: Option<&str>, dry_run: bool) -> Result<(), String> {
     use reqwest::blocking::Client;
     use std::fs;
     use crate::torrent::add_torrent_to_all_qbittorrent_instances;
@@ -543,24 +543,193 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
         return Err(format!("Input path '{}' is neither a file nor a directory.", working_dir));
     }
 
-    // Extract archives if processing a directory
-    if !is_file {
+    // Store archive files that will be extracted and deleted for later restoration
+    let mut backup_extracted_archive_buffers = Vec::new();
+    
+    // Handle archive extraction for both files and directories
+    if is_file {
+        // If processing a specific file, check if it's an archive that needs extraction
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            let ext_lower = ext.to_lowercase();
+            if ext_lower == "zip" || ext_lower == "rar" || ext_lower == "r00" || ext_lower == "r01" {
+                log::info!("Extracting archive file: {}", path.display());
+                
+                // Backup the archive file before extraction
+                log::info!("Reading archive into memory buffer: {}", path.display());
+                let file_content = fs::read(path)
+                    .map_err(|e| format!("Failed to read archive file '{}' into memory: {}", path.display(), e))?;
+                backup_extracted_archive_buffers.push((path.to_path_buf(), file_content));
+                
+                if ext_lower == "zip" {
+                    let output = Command::new("unzip")
+                        .arg("-o")
+                        .arg(path)
+                        .arg("-d")
+                        .arg(&working_dir)
+                        .output()
+                        .map_err(|e| format!("Failed to execute unzip: {}", e))?;
+                    if !output.status.success() {
+                        return Err(format!(
+                            "Failed to extract ZIP archive: {}. Error: {}",
+                            path.display(),
+                            String::from_utf8_lossy(&output.stderr)
+                        ));
+                    }
+                } else {
+                    // RAR files
+                    let output = Command::new("unrar")
+                        .args(&["x", "-o+", path.to_str().unwrap(), &working_dir])
+                        .output()
+                        .map_err(|e| format!("Failed to execute unrar: {}", e))?;
+                    if !output.status.success() {
+                        return Err(format!(
+                            "Failed to extract RAR archive: {}. Error: {}",
+                            path.display(),
+                            String::from_utf8_lossy(&output.stderr)
+                        ));
+                    }
+                }
+                log::info!("Successfully extracted archive: {}", path.display());
+                
+                // Remove the original archive file to keep working directory clean
+                log::info!("Temporarily removing archive from disk: {}", path.display());
+                fs::remove_file(path)
+                    .map_err(|e| format!("Failed to remove original archive file '{}': {}", path.display(), e))?;
+            }
+        }
+    } else {
+        // Extract archives in the directory
         extract_archives_in_directory(&working_dir)?;
     }
 
-    // Find ebook files (single file or all comics in directory)
+    // Only do iterative archive extraction for directory processing, not single files
+    if !is_file {
+        // After archive extraction, iteratively extract any newly extracted archives
+        let mut extraction_rounds = 0;
+        let max_extraction_rounds = 3; // Prevent infinite loops
+        
+        loop {
+            extraction_rounds += 1;
+            if extraction_rounds > max_extraction_rounds {
+                log::warn!("Maximum extraction rounds ({}) reached, stopping archive extraction", max_extraction_rounds);
+                break;
+            }
+            
+            // Check for more archives in the working directory
+            let mut found_archives = false;
+            for entry in fs::read_dir(&working_dir).map_err(|e| format!("Failed to read directory '{}': {}", working_dir, e))? {
+                let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+                let file_path = entry.path();
+                
+                if file_path.is_file() {
+                    if let Some(ext) = file_path.extension().and_then(|e| e.to_str()) {
+                        let ext_lower = ext.to_lowercase();
+                        if ext_lower == "zip" || ext_lower == "rar" || ext_lower == "r00" || ext_lower == "r01" {
+                            found_archives = true;
+                            log::info!("Found archive in round {}: {}", extraction_rounds, file_path.display());
+                            
+                            // Backup the archive file before extraction
+                            log::info!("Reading archive into memory buffer: {}", file_path.display());
+                            if let Ok(file_content) = fs::read(&file_path) {
+                                backup_extracted_archive_buffers.push((file_path.clone(), file_content));
+                            } else {
+                                log::warn!("Failed to backup archive file: {}", file_path.display());
+                                continue;
+                            }
+                            
+                            if ext_lower == "zip" {
+                                let output = Command::new("unzip")
+                                    .arg("-o")
+                                    .arg(&file_path)
+                                    .arg("-d")
+                                    .arg(&working_dir)
+                                    .output()
+                                    .map_err(|e| format!("Failed to execute unzip: {}", e))?;
+                                if !output.status.success() {
+                                    log::warn!("Failed to extract ZIP archive: {}. Error: {}", 
+                                        file_path.display(), String::from_utf8_lossy(&output.stderr));
+                                    continue;
+                                }
+                            } else {
+                                // RAR files
+                                let output = Command::new("unrar")
+                                    .args(&["x", "-o+", file_path.to_str().unwrap(), &working_dir])
+                                    .output()
+                                    .map_err(|e| format!("Failed to execute unrar: {}", e))?;
+                                if !output.status.success() {
+                                    log::warn!("Failed to extract RAR archive: {}. Error: {}", 
+                                        file_path.display(), String::from_utf8_lossy(&output.stderr));
+                                    continue;
+                                }
+                            }
+                            log::info!("Successfully extracted archive: {}", file_path.display());
+                            
+                            // Remove the extracted archive file to keep working directory clean
+                            log::info!("Temporarily removing archive from disk: {}", file_path.display());
+                            if let Err(e) = fs::remove_file(&file_path) {
+                                log::warn!("Failed to remove extracted archive file '{}': {}", file_path.display(), e);
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // If no more archives found, break the loop
+            if !found_archives {
+                break;
+            }
+        }
+    }
+    
+    // Now find ebook files - if we started with a single file, only process that file and its extracted content
     let ebook_files = if is_file {
-        // If processing a specific file, use that file directly
-        let ebook_type = path.extension()
-            .and_then(|ext| ext.to_str())
-            .and_then(|ext| EbookType::from_extension(ext))
-            .ok_or_else(|| format!("Unsupported file type: {}", path.display()))?;
-        vec![EbookFile {
-            path: path.to_path_buf(),
-            ebook_type,
-        }]
+        // If we started with a single file, look for that specific file or any files extracted from it
+        let original_filename = path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown");
+        
+        // Check if the original file still exists (if it wasn't an archive)
+        let mut files = Vec::new();
+        if path.exists() {
+            let ebook_type = path.extension()
+                .and_then(|ext| ext.to_str())
+                .and_then(|ext| EbookType::from_extension(ext))
+                .ok_or_else(|| format!("Unsupported file type: {}", path.display()))?;
+            files.push(EbookFile {
+                path: path.to_path_buf(),
+                ebook_type,
+            });
+        } else {
+            // Original file was extracted, look for ebook files that came from it
+            // Look for any ebook files in the working directory that match the original filename
+            for entry in fs::read_dir(&working_dir).map_err(|e| format!("Failed to read directory '{}': {}", working_dir, e))? {
+                let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+                let file_path = entry.path();
+                
+                if file_path.is_file() {
+                    if let Some(ext) = file_path.extension().and_then(|e| e.to_str()) {
+                        if let Some(ebook_type) = EbookType::from_extension(ext) {
+                            // Check if this file relates to our original file by name
+                            if let Some(filename) = file_path.file_stem().and_then(|s| s.to_str()) {
+                                if filename.contains(original_filename) || original_filename.contains(filename) {
+                                    files.push(EbookFile {
+                                        path: file_path,
+                                        ebook_type,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        if files.is_empty() {
+            return Err(format!("No ebook files found for input file: {}", path.display()));
+        }
+        files
     } else {
-        // If processing a directory, find all comic files or the main ebook file
+        // If we started with a directory, find all ebook files as before
         find_all_ebook_files(&working_dir)?
     };
 
@@ -573,23 +742,20 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
     let mut author = author_opt.unwrap_or_else(|| "Unknown Author".to_string());
 
     // Extract comic images if we have CBR/CBZ files
-    let actual_content_path = if main_ebook_file.ebook_type.is_comic() {
+    let mut extracted_comic_dir = None;
+    if main_ebook_file.ebook_type.is_comic() {
         // Extract images from all comic files and use the first extraction directory
-        let mut extracted_dir_path = working_dir.clone();
         for ebook_file in &ebook_files {
             if ebook_file.ebook_type.is_comic() {
                 let extracted_dir = extract_comic_images(&ebook_file, &working_dir)?;
                 log::info!("Comic images extracted from {} to: {}", ebook_file.path.display(), extracted_dir);
                 // Use the first extracted directory as the content path for torrent creation
-                if extracted_dir_path == working_dir {
-                    extracted_dir_path = extracted_dir;
+                if extracted_comic_dir.is_none() {
+                    extracted_comic_dir = Some(extracted_dir);
                 }
             }
         }
-        extracted_dir_path
-    } else {
-        working_dir.clone()
-    };
+    }
 
     // Sanitize the file name and rename the ebook file if needed
     let new_ebook_path = if main_ebook_file.ebook_type.needs_renaming() {
@@ -618,6 +784,18 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
         new_ebook_path
     } else {
         main_ebook_file.path.clone() // Don't rename PDF, CBR, CBZ files
+    };
+
+    // Determine the content path for torrent creation (after any file renaming)
+    let actual_content_path = if let Some(comic_dir) = extracted_comic_dir {
+        // Use the extracted comic directory
+        comic_dir
+    } else if is_file {
+        // If processing a single non-comic file, use the (possibly renamed) file path
+        new_ebook_path.to_string_lossy().to_string()
+    } else {
+        // If processing a directory, use the directory path
+        working_dir.clone()
     };
 
     // Clean up other ebook files except the selected one
@@ -655,15 +833,114 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
         .to_string();
     
     let lower_base = base_name.to_lowercase();
-    let type_id = if main_ebook_file.ebook_type.is_comic() {
-        // CBR/CBZ files are comics - check filename for magazine vs comic
-        if lower_base.contains("magazine") {
-            "41"
-        } else {
-            "40"
-        }
+    let type_id = if let Some("0700") = category_arg {
+        // 0700 = automatic detection based on file type and filename
+        info!("Using automatic type detection (0700) for file: {}", main_ebook_file.path.display());
+        let detected_type = match main_ebook_file.ebook_type {
+            EbookType::Cbr | EbookType::Cbz => {
+                // CBR/CBZ files are comics - check filename for magazine vs comic
+                if lower_base.contains("magazine") {
+                    info!("Detected type: Magazine (41) - CBR/CBZ file with 'magazine' in filename");
+                    "41" // Magazine
+                } else {
+                    info!("Detected type: Comic (40) - CBR/CBZ file");
+                    "40" // Comic
+                }
+            },
+            EbookType::Pdf => {
+                // PDF files - check filename content to determine type
+                if lower_base.contains("magazine") {
+                    info!("Detected type: Magazine (41) - PDF with 'magazine' in filename");
+                    "41" // Magazine
+                } else if lower_base.contains("newspaper") || lower_base.contains("news") {
+                    info!("Detected type: Newspaper (42) - PDF with 'newspaper'/'news' in filename");
+                    "42" // Newspaper  
+                } else if lower_base.contains("comic") {
+                    info!("Detected type: Comic (40) - PDF with 'comic' in filename");
+                    "40" // Comic
+                } else {
+                    info!("Detected type: Regular ebook (20) - PDF file");
+                    "20" // Regular ebook/PDF
+                }
+            },
+            EbookType::Epub => {
+                // EPUB files - check filename content to determine if it's a magazine
+                if lower_base.contains("magazine") {
+                    info!("Detected type: Magazine (41) - EPUB with 'magazine' in filename");
+                    "41" // Magazine
+                } else if lower_base.contains("newspaper") || lower_base.contains("news") {
+                    info!("Detected type: Newspaper (42) - EPUB with 'newspaper'/'news' in filename");
+                    "42" // Newspaper
+                } else {
+                    info!("Detected type: Regular ebook (20) - EPUB file");
+                    "20" // Regular ebook
+                }
+            }
+        };
+        detected_type
+    } else if let Some(cat_arg) = category_arg {
+        // Extract type from specific codes like 0720, 0740, 0741
+        let forced_type = match cat_arg {
+            "0720" => {
+                info!("Forced type: Regular ebook (20) - Category code 0720");
+                "20" // Regular ebook
+            },
+            "0740" => {
+                info!("Forced type: Comic (40) - Category code 0740");
+                "40" // Comic
+            },
+            "0741" => {
+                info!("Forced type: Magazine (41) - Category code 0741");
+                "41" // Magazine
+            },
+            _ => {
+                info!("Unknown category code '{}', defaulting to Regular ebook (20)", cat_arg);
+                "20" // Default to regular ebook
+            }
+        };
+        forced_type
     } else {
-        "20"
+        // Fallback to automatic detection (same as 0700)
+        info!("No category specified, using automatic type detection for file: {}", main_ebook_file.path.display());
+        let detected_type = match main_ebook_file.ebook_type {
+            EbookType::Cbr | EbookType::Cbz => {
+                if lower_base.contains("magazine") {
+                    info!("Detected type: Magazine (41) - CBR/CBZ file with 'magazine' in filename");
+                    "41"
+                } else {
+                    info!("Detected type: Comic (40) - CBR/CBZ file");
+                    "40"
+                }
+            },
+            EbookType::Pdf => {
+                if lower_base.contains("magazine") {
+                    info!("Detected type: Magazine (41) - PDF with 'magazine' in filename");
+                    "41"
+                } else if lower_base.contains("newspaper") || lower_base.contains("news") {
+                    info!("Detected type: Newspaper (42) - PDF with 'newspaper'/'news' in filename");
+                    "42"
+                } else if lower_base.contains("comic") {
+                    info!("Detected type: Comic (40) - PDF with 'comic' in filename");
+                    "40"
+                } else {
+                    info!("Detected type: Regular ebook (20) - PDF file");
+                    "20"
+                }
+            },
+            EbookType::Epub => {
+                if lower_base.contains("magazine") {
+                    info!("Detected type: Magazine (41) - EPUB with 'magazine' in filename");
+                    "41"
+                } else if lower_base.contains("newspaper") || lower_base.contains("news") {
+                    info!("Detected type: Newspaper (42) - EPUB with 'newspaper'/'news' in filename");
+                    "42"
+                } else {
+                    info!("Detected type: Regular ebook (20) - EPUB file");
+                    "20"
+                }
+            }
+        };
+        detected_type
     };
 
     let (mut description, mut keywords, mut cover_id) = if main_ebook_file.ebook_type.is_comic() || (matches!(main_ebook_file.ebook_type, EbookType::Pdf) && (type_id == "40" || type_id == "41")) {
@@ -698,23 +975,34 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
 
     // Create a restore guard to ensure files are always restored, even on error
     struct RestoreGuard {
-        backup_buffers: Vec<(std::path::PathBuf, Vec<u8>)>,
+        comic_backup_buffers: Vec<(std::path::PathBuf, Vec<u8>)>,
+        archive_backup_buffers: Vec<(std::path::PathBuf, Vec<u8>)>,
     }
     
     impl Drop for RestoreGuard {
         fn drop(&mut self) {
-            for (original_path, file_content) in &self.backup_buffers {
+            // Restore comic files
+            for (original_path, file_content) in &self.comic_backup_buffers {
                 if let Err(e) = fs::write(original_path, file_content) {
                     log::error!("Failed to restore comic file '{}' during cleanup: {}", original_path.display(), e);
                 } else {
                     log::info!("Restored comic file from memory during cleanup: {}", original_path.display());
                 }
             }
+            // Restore extracted archive files  
+            for (original_path, file_content) in &self.archive_backup_buffers {
+                if let Err(e) = fs::write(original_path, file_content) {
+                    log::error!("Failed to restore archive file '{}' during cleanup: {}", original_path.display(), e);
+                } else {
+                    log::info!("Restored archive file from memory during cleanup: {}", original_path.display());
+                }
+            }
         }
     }
     
     let _restore_guard = RestoreGuard {
-        backup_buffers: backup_archive_buffers.clone(),
+        comic_backup_buffers: backup_archive_buffers.clone(),
+        archive_backup_buffers: backup_extracted_archive_buffers.clone(),
     };
 
     let torrent_input = &actual_content_path;
