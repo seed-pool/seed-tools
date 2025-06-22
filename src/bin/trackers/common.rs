@@ -128,9 +128,19 @@ pub fn process_custom_upload(
         form = form.file("nfo", nfo).map_err(|e| format!("Failed to attach NFO file: {}", e))?;
     }
     
-    // Send the upload request
+    // Send the upload request (or simulate if dry_run)
+    if dry_run {
+        info!("DRY RUN: Would upload custom release to {} at: {}", tracker, upload_url);
+        return Ok(());
+    }
+
     let response = client
         .post(&upload_url)
+        .header("Authorization", format!("Bearer {}", if tracker == "seedpool" { 
+            seedpool_config.as_ref().unwrap().general.api_key.clone() 
+        } else { 
+            torrentleech_config.as_ref().unwrap().settings.tl_key.clone() 
+        }))
         .multipart(form)
         .send()
         .map_err(|e| format!("Failed to send upload request: {}", e))?;
@@ -147,13 +157,17 @@ pub fn process_custom_upload(
     }
 
     // Inject the torrent into qBittorrent
-    add_torrent_to_all_qbittorrent_instances(
-        &[torrent_file], // Use the single torrent file wrapped in a slice
-        qbittorrent_configs, // Ensure this is passed correctly
-        deluge_config, // Pass the DelugeConfig
-        input_path, // Pass the input_path argument
-        paths_config, // Use paths_config directly
-    )?;
+    if !dry_run {
+        add_torrent_to_all_qbittorrent_instances(
+            &[torrent_file], // Use the single torrent file wrapped in a slice
+            qbittorrent_configs, // Ensure this is passed correctly
+            deluge_config, // Pass the DelugeConfig
+            input_path, // Pass the input_path argument
+            paths_config, // Use paths_config directly
+        )?;
+    } else {
+        info!("[DRY RUN] Skipping adding custom torrent to qBittorrent/Deluge clients");
+    }
 
     Ok(())
 }
@@ -337,14 +351,22 @@ pub fn process_game_upload(
                     .unwrap_or_default();
 
                 // 3. Download screenshots, set permissions, upload to CDN, collect CDN URLs
-                let safe_base_name = url_safe_filename(&base_name);
-                let local_paths = download_igdb_screenshots(&image_ids, &safe_base_name, "./screenshots/")?;
-                for (i, local_path) in local_paths.iter().enumerate() {
-                    let file_name = Path::new(local_path).file_name().unwrap().to_string_lossy();
-                    let remote_file = format!("{}/screenshots/{}", remote_path, file_name);
-                    upload_to_cdn(local_path, &remote_file)?;
-                    let cdn_url = format!("{}/{}", image_path, file_name);
-                    screenshot_urls.push(cdn_url);
+                if !dry_run {
+                    let safe_base_name = url_safe_filename(&base_name);
+                    let local_paths = download_igdb_screenshots(&image_ids, &safe_base_name, "./screenshots/")?;
+                    for (i, local_path) in local_paths.iter().enumerate() {
+                        let file_name = Path::new(local_path).file_name().unwrap().to_string_lossy();
+                        let remote_file = format!("{}/screenshots/{}", remote_path, file_name);
+                        upload_to_cdn(local_path, &remote_file)?;
+                        let cdn_url = format!("{}/{}", image_path, file_name);
+                        screenshot_urls.push(cdn_url);
+                    }
+                } else {
+                    info!("[DRY RUN] Skipping IGDB screenshot downloads and CDN uploads");
+                    // Create dummy URLs for description generation
+                    for _ in 0..std::cmp::min(image_ids.len(), 3) {
+                        screenshot_urls.push("[DRY RUN] Screenshot URL would be here".to_string());
+                    }
                 }
             }
         }
@@ -428,8 +450,19 @@ pub fn process_game_upload(
         form = form.file("nfo", nfo).map_err(|e| format!("Failed to attach NFO file: {}", e))?;
     }
 
+    // Send the upload request (or simulate if dry_run)
+    if dry_run {
+        info!("DRY RUN: Would upload game release to {} at: {}", tracker, upload_url);
+        return Ok(());
+    }
+
     let response = client
         .post(&upload_url)
+        .header("Authorization", format!("Bearer {}", if tracker == "seedpool" { 
+            seedpool_config.as_ref().unwrap().general.api_key.clone() 
+        } else { 
+            torrentleech_config.as_ref().unwrap().settings.tl_key.clone() 
+        }))
         .multipart(form)
         .send()
         .map_err(|e| format!("Failed to send upload request: {}", e))?;
@@ -445,13 +478,17 @@ pub fn process_game_upload(
         ));
     }
 
-    add_torrent_to_all_qbittorrent_instances(
-        &[torrent_file],
-        qbittorrent_configs,
-        deluge_config,
-        input_path,
-        paths_config,
-    )?;
+    if !dry_run {
+        add_torrent_to_all_qbittorrent_instances(
+            &[torrent_file],
+            qbittorrent_configs,
+            deluge_config,
+            input_path,
+            paths_config,
+        )?;
+    } else {
+        info!("[DRY RUN] Skipping adding game torrent to qBittorrent/Deluge clients");
+    }
 
     Ok(())
 }

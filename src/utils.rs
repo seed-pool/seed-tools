@@ -340,6 +340,7 @@ pub fn generate_sample(
     image_path: &str,
     ffmpeg_path: &str,
     input_name: &str,
+    dry_run: bool,
 ) -> Result<String, String> {
     let sanitized_input_name = generate_release_name(input_name);
     let sample_file = format!("{}/{}.sample.mkv", screenshots_dir, sanitized_input_name);
@@ -371,10 +372,15 @@ pub fn generate_sample(
     }
 
     // Upload the sample file
-    upload_to_cdn(
-        &sample_file,
-        &format!("{}/previews/", remote_path.trim_end_matches('/'))
-    )?;
+    if !dry_run {
+        upload_to_cdn(
+            &sample_file,
+            &format!("{}/previews/", remote_path.trim_end_matches('/'))
+        )?;
+        info!("Sample file uploaded to CDN.");
+    } else {
+        info!("[DRY RUN] Would upload sample to CDN: {} {}", &format!("{}/previews/", remote_path.trim_end_matches('/')), sanitized_input_name);
+    }
 
     // Return the public-facing URL for the sample
     Ok(format!("{}/{}.sample.mkv", image_path, sanitized_input_name))
@@ -597,6 +603,7 @@ pub fn generate_screenshots(
     remote_path: &str,
     image_path: &str,
     input_name: &str,
+    dry_run: bool,
 ) -> Result<(Vec<String>, Vec<String>), String> {
     let mut screenshots_list = Vec::new();
     let mut thumbnails_list = Vec::new();
@@ -628,8 +635,13 @@ pub fn generate_screenshots(
         }
 
         // Upload files to the CDN
-        upload_to_cdn(&screenshot_file, &format!("{}/screenshots/", remote_path.trim_end_matches('/')))?;
-        upload_to_cdn(&thumbnail_file, &format!("{}/screenshots/", remote_path.trim_end_matches('/')))?;
+        if !dry_run {
+            upload_to_cdn(&screenshot_file, &format!("{}/screenshots/", remote_path.trim_end_matches('/')))?;
+            upload_to_cdn(&thumbnail_file, &format!("{}/screenshots/", remote_path.trim_end_matches('/')))?;
+        } else {
+            
+            info!("[DRY RUN] Skipping screenshot/thumbnail upload to CDN: {} {}", &format!("{}/screenshots/", remote_path.trim_end_matches('/')), screenshot_file);
+        }
 
         // Add public-facing URLs to the lists
         screenshots_list.push(format!("{}/{}", image_path, Path::new(&screenshot_file).file_name().unwrap().to_string_lossy()));
@@ -965,7 +977,7 @@ pub fn upload_to_imgbb(image_path: &str, imgbb_api_key: &str, dry_run: bool) -> 
 
     if dry_run {
         info!("[DRY RUN] Would upload image to ImgBB: {}", url);
-        info!("[DRY RUN] Image path: {}", image_path);
+        info!("[DRY RUN] Would generate ImgBB URLs: https://i.ibb.co/fake-url and https://i.ibb.co/fake-thumb");
         return Ok(("https://i.ibb.co/fake-url".to_string(), "https://i.ibb.co/fake-thumb".to_string()));
     }
 

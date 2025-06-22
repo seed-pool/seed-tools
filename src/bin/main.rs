@@ -142,6 +142,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     info!("Parsing arguments...");
     let cli = Cli::parse();
     debug!("Parsed arguments: {:?}", cli);
+    
+    // Log dry-run mode if enabled
+    if cli.dry_run {
+        info!("🚫 DRY RUN MODE ENABLED - No actual uploads or downloads will occur");
+    }
 
     // --- Handle IRC Mode ---
     if cli.irc {

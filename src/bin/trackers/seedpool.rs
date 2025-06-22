@@ -64,7 +64,7 @@ pub fn process_seedpool_release(
 
     if found_music_file {
         log::debug!("Music release detected: {}", input_path);
-        return process_music_release(input_path, config, seedpool_config, mkbrr_path, ffmpeg_path);
+        return process_music_release(input_path, config, seedpool_config, mkbrr_path, ffmpeg_path, dry_run);
     }
 
     if Path::new(input_path).is_dir() {
@@ -106,13 +106,17 @@ pub fn process_seedpool_release(
         std::fs::write(&torrent_file_path, &torrent_data)
             .map_err(|e| format!("Failed to save torrent file: {}", e))?;
 
-        add_torrent_to_all_qbittorrent_instances(
-            &[torrent_file_path.to_string_lossy().to_string()],
-            &config.qbittorrent,
-            &config.deluge,
-            input_path,
-            &config.paths,
-        )?;
+        if !dry_run {
+            add_torrent_to_all_qbittorrent_instances(
+                &[torrent_file_path.to_string_lossy().to_string()],
+                &config.qbittorrent,
+                &config.deluge,
+                input_path,
+                &config.paths,
+            )?;
+        } else {
+            info!("[DRY RUN] Skipping adding duplicate torrent to qBittorrent/Deluge clients");
+        }
         return Ok(());
     }
 
@@ -170,6 +174,7 @@ pub fn process_seedpool_release(
                 &seedpool_config.screenshots.remote_path,
                 &seedpool_config.screenshots.image_path,
                 &_sanitized_name,
+                dry_run,
             ) {
                 Ok(res) => res,
                 Err(e) => {
@@ -195,6 +200,7 @@ pub fn process_seedpool_release(
             &seedpool_config.screenshots.remote_path,
             &seedpool_config.screenshots.image_path,
             &_sanitized_name,
+            dry_run,
         ) {
             Ok(res) => res,
             Err(e) => {
@@ -215,6 +221,7 @@ pub fn process_seedpool_release(
             &seedpool_config.screenshots.image_path,
             &ffmpeg_path.to_string_lossy(),
             &base_name,
+            dry_run,
         ) {
             Ok(url) => url,
             Err(e) => {
@@ -265,13 +272,17 @@ pub fn process_seedpool_release(
     )?;
 
     // Add torrent to clients
-    add_torrent_to_all_qbittorrent_instances(
-        &torrent_files,
-        &config.qbittorrent,
-        &config.deluge,
-        input_path,
-        &config.paths,
-    )?;
+    if !dry_run {
+        add_torrent_to_all_qbittorrent_instances(
+            &torrent_files,
+            &config.qbittorrent,
+            &config.deluge,
+            input_path,
+            &config.paths,
+        )?;
+    } else {
+        info!("[DRY RUN] Skipping adding torrent to qBittorrent/Deluge clients");
+    }
 
     Ok(())
 }
@@ -365,6 +376,7 @@ pub fn process_music_release(
     seedpool_config: &SeedpoolConfig,
     mkbrr_path: &Path,
     ffmpeg_path: &Path,
+    dry_run: bool,
 ) -> Result<(), String> {
     log::debug!("Processing music release for input_path: {}", input_path);
 
@@ -550,7 +562,12 @@ pub fn process_music_release(
         .text("stream", "0") // Add default value for stream
         .text("sd", "0"); // Add default value for sd
 
-    // Send the upload request
+    // Send the upload request (or simulate if dry_run)
+    if dry_run {
+        info!("DRY RUN: Would upload music release to Seedpool at: {}", seedpool_config.settings.upload_url);
+        return Ok(());
+    }
+
     let response = client
         .post(&seedpool_config.settings.upload_url)
         .header("Authorization", format!("Bearer {}", seedpool_config.general.api_key))
@@ -618,13 +635,17 @@ pub fn process_music_release(
     log::info!("Music release successfully uploaded: {}", base_name);
 
     // Add torrent to all qBittorrent instances
-    add_torrent_to_all_qbittorrent_instances(
-        &[torrent_file.clone()], // Use the torrent_file directly
-        &config.qbittorrent,
-        &config.deluge,
-        input_path,
-        &config.paths,
-    )?;
+    if !dry_run {
+        add_torrent_to_all_qbittorrent_instances(
+            &[torrent_file.clone()], // Use the torrent_file directly
+            &config.qbittorrent,
+            &config.deluge,
+            input_path,
+            &config.paths,
+        )?;
+    } else {
+        info!("[DRY RUN] Skipping adding music torrent to qBittorrent/Deluge clients");
+    }
 
     Ok(())
 }
@@ -1158,13 +1179,16 @@ pub fn preflight_check(
         std::fs::write(&torrent_file_path, &torrent_data)
             .map_err(|e| format!("Failed to save torrent file: {}", e))?;
 
-        add_torrent_to_all_qbittorrent_instances(
-            &[torrent_file_path.to_string_lossy().to_string()],
-            &config.qbittorrent,
-            &config.deluge,
-            input_path,
-            &config.paths,
-        )?;
+        // This is a preflight check, don't add to torrent clients
+        // if !dry_run {
+        //     add_torrent_to_all_qbittorrent_instances(
+        //         &[torrent_file_path.to_string_lossy().to_string()],
+        //         &config.qbittorrent,
+        //         &config.deluge,
+        //         input_path,
+        //         &config.paths,
+        //     )?;
+        // }
 
         return Ok(PreflightCheckResult {
             release_name: title.clone(),
@@ -1761,9 +1785,13 @@ pub fn process_audiobook_upload(
 
     let remote_albumcovers_path = format!("{}/albumcovers", seedpool_config.screenshots.remote_path);
     if let Some(ref cover_path) = cover_path {
-        info!("Uploading cover art to CDN: {:?}", cover_path);
-        upload_to_cdn(cover_path.to_str().unwrap(), &remote_albumcovers_path)?;
-        info!("Cover art uploaded to CDN.");
+        if !dry_run {
+            info!("Uploading cover art to CDN: {:?}", cover_path);
+            upload_to_cdn(cover_path.to_str().unwrap(), &remote_albumcovers_path)?;
+            info!("Cover art uploaded to CDN.");
+        } else {
+            info!("[DRY RUN] Skipping cover art upload to CDN: {:?}", cover_path);
+        }
     } else if let Some(cover_id) = cover_id {
         // Download from Open Library, save as torrent-cover_<id>.jpg, set 777, upload
         let ol_url = format!("https://covers.openlibrary.org/b/id/{}-L.jpg", cover_id);
@@ -1776,8 +1804,12 @@ pub fn process_audiobook_upload(
             fs::set_permissions(&cover_path, fs::Permissions::from_mode(0o777))
                 .map_err(|e| format!("Failed to set permissions for Open Library cover: {}", e))?;
             info!("Downloaded and saved Open Library cover art to {:?}", cover_path);
-            upload_to_cdn(cover_path.to_str().unwrap(), &remote_albumcovers_path)?;
-            info!("Open Library cover art uploaded to CDN.");
+            if !dry_run {
+                upload_to_cdn(cover_path.to_str().unwrap(), &remote_albumcovers_path)?;
+                info!("Open Library cover art uploaded to CDN.");
+            } else {
+                info!("[DRY RUN] Skipping Open Library cover art upload to CDN: {:?}", cover_path);
+            }
         } else {
             warn!("Failed to fetch Open Library cover art.");
         }
@@ -1786,14 +1818,18 @@ pub fn process_audiobook_upload(
     }
 
     // 13. Add torrent to all qBittorrent instances
-    info!("Adding torrent to all qBittorrent and Deluge instances.");
-    add_torrent_to_all_qbittorrent_instances(
-        &[torrent_file.clone()],
-        &config.qbittorrent,
-        &config.deluge,
-        input_path,
-        &config.paths,
-    )?;
+    if !dry_run {
+        info!("Adding torrent to all qBittorrent and Deluge instances.");
+        add_torrent_to_all_qbittorrent_instances(
+            &[torrent_file.clone()],
+            &config.qbittorrent,
+            &config.deluge,
+            input_path,
+            &config.paths,
+        )?;
+    } else {
+        info!("[DRY RUN] Skipping adding audiobook torrent to qBittorrent/Deluge clients");
+    }
 
     info!("Audiobook upload process completed successfully.");
     Ok(())
