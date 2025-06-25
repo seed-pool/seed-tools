@@ -1,11 +1,74 @@
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use log::{info, error, debug};
+use log::{info, error, debug, warn};
 use rand::Rng;
+use regex::Regex;
 
-use crate::types::{PathsConfig, VideoSettings};
+use crate::types::{PathsConfig, VideoSettings, VideoFile, VideoType, MediaFile, MediaType, VideoCategory, VideoSourceType};
 use crate::naming::generate_release_name;
+use crate::extraction::process_and_extract_archives;
+
+/// Metadata extracted from video filename
+#[derive(Debug, Clone)]
+pub struct VideoMetadata {
+    pub title: String,
+    pub year: Option<u32>,
+    pub season: Option<u32>,
+    pub episode: Option<u32>,
+    pub category: VideoCategory,
+    pub source_type: VideoSourceType,
+    pub is_boxset: bool,
+    pub is_dated_tv: bool,
+    pub resolution: Option<String>,
+    pub codec: Option<String>,
+}
+
+impl Default for VideoMetadata {
+    fn default() -> Self {
+        Self {
+            title: String::new(),
+            year: None,
+            season: None,
+            episode: None,
+            category: VideoCategory::Unknown,
+            source_type: VideoSourceType::Unknown,
+            is_boxset: false,
+            is_dated_tv: false,
+            resolution: None,
+            codec: None,
+        }
+    }
+}
+
+/// Processed data ready for upload (media-agnostic)
+/// This struct accumulates all the data needed for the upload process
+#[derive(Debug, Clone)]
+pub struct UploadData {
+    pub nfo_data: Option<(String, Vec<u8>)>,  // (path, content)
+    pub mediainfo: Option<String>,
+    pub screenshots: Vec<String>,
+    pub thumbnails: Vec<String>,
+    pub sample_url: Option<String>,
+    pub torrent_path: Option<String>,
+    pub release_name: Option<String>,
+    pub description: Option<String>,
+}
+
+impl UploadData {
+    pub fn new() -> Self {
+        Self {
+            nfo_data: None,
+            mediainfo: None,
+            screenshots: Vec::new(),
+            thumbnails: Vec::new(),
+            sample_url: None,
+            torrent_path: None,
+            release_name: None,
+            description: None,
+        }
+    }
+}
 
 pub fn find_video_files<T>(
     input_path: &str,
@@ -15,7 +78,7 @@ pub fn find_video_files<T>(
 where
     T: VideoSettings,
 {
-    let supported_extensions = ["mkv", "mp4", "ts", "avi", "mov", "flv", "wmv"];
+    let supported_extensions = ["mkv", "mp4", "avi", "mov", "wmv", "flv", "webm", "m4v", "ts", "mpg", "mpeg"];
     let path = Path::new(input_path);
 
     let mut video_files = Vec::new();
@@ -56,51 +119,19 @@ where
     Ok((video_files, nfo_file))
 }
 
-pub fn generate_mediainfo(video_file: &str, mediainfo_path: &str) -> Result<String, String> {
-    let output = Command::new(mediainfo_path)
-        .args(&["--Output=TEXT", video_file])
-        .output()
-        .map_err(|e| format!("Failed to run mediainfo: {}", e))?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "Mediainfo command failed with status: {}",
-            output.status
-        ));
-    }
-
-    let mut result = String::from_utf8(output.stdout)
-        .map_err(|e| format!("Failed to parse mediainfo output: {}", e))?;
-
-    // Sanitize the "Complete name" field
-    if let Some(start) = result.find("Complete name") {
-        if let Some(end) = result[start..].find('\n') {
-            let full_line = &result[start..start + end];
-            if let Some(_separator) = full_line.find(':') {
-                let sanitized_line = format!(
-                    "Complete name                            : {}",
-                    Path::new(video_file).file_name().unwrap_or_default().to_string_lossy()
-                );
-                result = result.replace(full_line, &sanitized_line);
-            }
-        }
-    }
-
-    Ok(result)
-}
 
 pub fn process_file(
     file_path: &Path,
     video_files: &mut Vec<String>,
     nfo_file: &mut Option<String>,
-    supported_extensions: &[&str],
+    _supported_extensions: &[&str], // Legacy parameter, now unused
     exclusions_enabled: bool,
 ) -> Result<(), String> {
     let file_name = file_path.file_name().unwrap_or_default().to_string_lossy().to_string();
 
     if let Some(ext) = file_path.extension() {
         let ext = ext.to_string_lossy().to_lowercase();
-        if supported_extensions.contains(&ext.as_str()) {
+        if VideoType::from_extension(&ext).is_some() {
             video_files.push(file_path.to_string_lossy().to_string());
         } else if ext == "nfo" && nfo_file.is_none() {
             *nfo_file = Some(file_path.to_string_lossy().to_string());
@@ -216,189 +247,519 @@ pub fn generate_description(
     _base_url: &str,
     _release_name: &str,
 ) -> String {
-    let mut description = String::new();
-
-    // Add screenshots in a 2x2 table pattern
+    use crate::description::{DescriptionBuilder, DescriptionConfig};
+    use crate::types::ImageLayout;
+    
+    // Create config for video screenshots
+    let mut config = DescriptionConfig::default();
+    config.image_layout = ImageLayout::Grid2x2;
+    
+    let mut builder = DescriptionBuilder::with_config(
+        crate::types::MediaType::Video(crate::types::VideoType::Mkv),
+        config
+    );
+    
+    // Add screenshots
     if !screenshots.is_empty() {
-        description.push_str("[center][tr]\n");
+        builder = builder.images(screenshots.to_vec());
+    }
+    
+    // Add sample
+    if !sample_url.is_empty() {
+        if let Some(filename) = Path::new(sample_url).file_name().and_then(|f| f.to_str()) {
+            builder = builder.sample(sample_url, filename);
+        }
+    }
+    
+    // Add trailer
+    if let Some(trailer_url) = youtube_trailer_url {
+        builder = builder.trailer(trailer_url, "YouTube");
+    }
+    
+    // Add custom description
+    if let Some(custom_desc) = custom_description {
+        builder = builder.raw(custom_desc);
+    }
+    
+    builder.build()
+}
 
-        for (i, screenshot) in screenshots.iter().enumerate() {
-            description.push_str(&format!(
-                "        [td][url={}][img width=720]{}[/img][/url][/td]\n",
-                screenshot, screenshot
+
+
+/// Process video file(s) from a path (file or directory) and classify content
+pub fn process_video(
+    input_path: &str,
+    _config: &crate::types::Config,
+    _dry_run: bool,
+) -> Result<Vec<(VideoFile, VideoMetadata)>, String> {
+    use crate::utils::find_and_read_nfo;
+    
+    let path = Path::new(input_path);
+    
+    if !path.exists() {
+        return Err(format!("Path not found: {}", input_path));
+    }
+    
+    // Extract any archives first and get the path to process
+    let processing_path = process_and_extract_archives(input_path)?;
+
+    // Now process the path (which may contain extracted files)
+    let mut results = Vec::new();
+    let mut rejected_files = Vec::new();
+    
+    // Update path to use the processing path
+    let path = Path::new(&processing_path);
+    
+    if path.is_file() {
+        // Single file case (non-archive video file)
+        let extension = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .ok_or_else(|| "Could not determine file extension".to_string())?;
+
+        let video_type = VideoType::from_extension(extension)
+            .ok_or_else(|| format!("Unsupported video file type: {}", extension))?;
+        
+        let video_file = VideoFile {
+            path: path.to_path_buf(),
+            video_type,
+        };
+        
+        let filename = path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        
+        let metadata = classify_video_content(filename);
+        
+        if metadata.category == VideoCategory::Unknown {
+            return Err(format!(
+                "Unable to determine video category for '{}'. File must have recognizable TV show (S##E##), movie (year), anime, sports, documentary, or concert patterns in the filename.", 
+                filename
             ));
-
-            // Add a new row every 2 images
-            if (i + 1) % 2 == 0 {
-                description.push_str("    [/tr]\n    [tr]\n");
+        }
+        
+        results.push((video_file, metadata));
+        
+    } else if path.is_dir() {
+        // Handle directory - process all video files (including extracted ones)
+        for entry in fs::read_dir(path)
+            .map_err(|e| format!("Failed to read directory: {}", e))? 
+        {
+            let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+            let file_path = entry.path();
+            
+            if file_path.is_file() {
+                if let Some(extension) = file_path.extension().and_then(|ext| ext.to_str()) {
+                    if let Some(video_type) = VideoType::from_extension(extension) {
+                        let video_file = VideoFile {
+                            path: file_path.clone(),
+                            video_type,
+                        };
+                        
+                        let filename = file_path.file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("");
+                        
+                        let metadata = classify_video_content(filename);
+                        
+                        if metadata.category == VideoCategory::Unknown {
+                            rejected_files.push(filename.to_string());
+                            warn!("Rejected video file with unknown category: {}", filename);
+                            continue;
+                        }
+                        
+                        info!("Processed video: {} -> Category: {:?}, Source: {:?}", 
+                              filename, metadata.category, metadata.source_type);
+                        
+                        results.push((video_file, metadata));
+                    }
+                }
             }
         }
-
-        // Close the last row properly
-        if screenshots.len() % 2 != 0 {
-            description.push_str("    [/center][/tr]\n");
+        
+        if results.is_empty() {
+            if !rejected_files.is_empty() {
+                return Err(format!(
+                    "No valid video files found. {} file(s) rejected due to unrecognizable naming patterns: {}",
+                    rejected_files.len(),
+                    rejected_files.join(", ")
+                ));
+            } else {
+                return Err("No video files found in directory".to_string());
+            }
         }
-    }
-
-    // Add a blank line after screenshots
-    description.push_str("\n");
-
-    // Add sample link if available
-    if !sample_url.is_empty() {
-        description.push_str(&format!(
-            "[b][spoiler=Sample: {}]{}[/spoiler][/b]\n\n",
-            Path::new(sample_url).file_name().unwrap_or_default().to_string_lossy(),
-            sample_url
-        ));
-    }
-
-    // Add YouTube trailer link if available
-    if let Some(trailer_url) = youtube_trailer_url {
-        description.push_str(&format!(
-            "[center][b][url={}][Trailer on YouTube][/url][/b][/center]\n\n",
-            trailer_url
-        ));
-    }
-
-    // Add custom description (not centered)
-    if let Some(custom_desc) = custom_description {
-        description.push_str(custom_desc);
-        description.push_str("\n\n");
-    }
-
-    // Append the default non-video description
-    description.push_str(&default_non_video_description());
-
-    description
-}
-
-pub fn generate_screenshots(
-    video_file: &str,
-    output_dir: &str,
-    ffmpeg_path: &str,
-    ffprobe_path: &str,
-    remote_path: &str,
-    image_path: &str,
-    input_name: &str,
-    dry_run: bool,
-) -> Result<(Vec<String>, Vec<String>), String> {
-    let mut screenshots_list = Vec::new();
-    let mut thumbnails_list = Vec::new();
-
-    // Ensure the output directory exists
-    fs::create_dir_all(output_dir).map_err(|e| format!("Failed to create output directory: {}", e))?;
-
-    let sanitized_input_name = generate_release_name(input_name); // Sanitize the input name
-    let duration = get_video_duration(video_file, ffprobe_path)?;
-    let timestamps = generate_random_timestamps(duration, 4);
-
-    for (i, shot_time) in timestamps.iter().enumerate() {
-        // Generate sanitized filenames for screenshots and thumbnails
-        let screenshot_file = format!("{}/{}_{}.jpg", output_dir, sanitized_input_name, i + 1);
-        let thumbnail_file = format!("{}/{}_{}_thumb.jpg", output_dir, sanitized_input_name, i + 1);
-
-        // Generate screenshot
-        generate_screenshot(video_file, ffmpeg_path, shot_time, &screenshot_file)?;
-        generate_thumbnail(ffmpeg_path, &screenshot_file, &thumbnail_file)?;
-
-        // Set permissions to 777 for the screenshot and thumbnail locally
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&screenshot_file, fs::Permissions::from_mode(0o777))
-                .map_err(|e| format!("Failed to set permissions for {}: {}", screenshot_file, e))?;
-            fs::set_permissions(&thumbnail_file, fs::Permissions::from_mode(0o777))
-                .map_err(|e| format!("Failed to set permissions for {}: {}", thumbnail_file, e))?;
+        
+        if !rejected_files.is_empty() {
+            warn!("Processed {} valid video files, rejected {} files with unknown categories", 
+                  results.len(), rejected_files.len());
         }
-
-        // Upload files to the CDN
-        if !dry_run {
-            crate::utils::upload_to_cdn(&screenshot_file, &format!("{}/screenshots/", remote_path.trim_end_matches('/')))?;
-            crate::utils::upload_to_cdn(&thumbnail_file, &format!("{}/screenshots/", remote_path.trim_end_matches('/')))?;
-        } else {
+    } else {
+        return Err("Path is neither a file nor a directory".to_string());
+    }
+    
+    // After we have the results, build the upload data if we have videos
+    if !results.is_empty() {
+        use crate::upload::create_video_upload;
+        use std::sync::Arc;
+        
+        let (_video_file, metadata) = &results[0];
+        
+        // Build upload data directly using UploadBuilder
+        use crate::description::DescriptionConfig;
+        use crate::types::ImageLayout;
+        
+        // Configure description for video
+        let mut desc_config = DescriptionConfig::default();
+        desc_config.image_layout = ImageLayout::Grid2x2; // Videos use 2x2 grid for screenshots
+        desc_config.max_images = 8;
+        
+        let _upload_data = create_video_upload(
+            &processing_path,
+            Arc::new((*_config).clone()),
+            metadata.clone()
+        )
+        .with_description_config(desc_config)
+        .dry_run(_dry_run)
+        .build()?;
+        
+        info!("Built upload data for video processing");
+        
+        // Create the upload processor - it will auto-detect the active tracker
+        let mut processor = crate::upload::UploadProcessor::new(
+            _upload_data,
+            std::sync::Arc::new(_config.clone()),
+        )
+        .dry_run(_dry_run);
+        
+        // Get media classification for mapping
+        if !results.is_empty() {
+            let (_, metadata) = &results[0];
+            let category_str = format!("VideoCategory::{:?}", metadata.category);
+            let source_str = Some(format!("VideoSourceType::{:?}", metadata.source_type));
             
-            info!("[DRY RUN] Skipping screenshot/thumbnail upload to CDN: {} {}", &format!("{}/screenshots/", remote_path.trim_end_matches('/')), screenshot_file);
+            processor = processor.with_media_classification(
+                Some(category_str),
+                source_str,
+            );
         }
-
-        // Add public-facing URLs to the lists
-        screenshots_list.push(format!("{}/{}", image_path, Path::new(&screenshot_file).file_name().unwrap().to_string_lossy()));
-        thumbnails_list.push(format!("{}/{}", image_path, Path::new(&thumbnail_file).file_name().unwrap().to_string_lossy()));
+        
+        // Process the upload - it handles tracker detection and mapping internally
+        let upload_result = processor.process()?;
+        
+        if upload_result.success {
+            info!("Upload completed successfully to {}", upload_result.tracker);
+            if let Some(torrent_id) = upload_result.torrent_id {
+                info!("Torrent ID: {}", torrent_id);
+            }
+        } else {
+            warn!("Upload failed: {}", upload_result.message);
+        }
     }
-
-    Ok((screenshots_list, thumbnails_list))
+    
+    Ok(results)
 }
 
-fn generate_random_timestamps(duration: f64, count: usize) -> Vec<u32> {
-    let start_time = (duration * 0.15) as u32;
-    let end_time = (duration * 0.85) as u32;
+/// Detect video files in a path (without classification)
+pub fn detect_video_files(path: &str) -> Result<Vec<VideoFile>, String> {
+    let mut video_files = Vec::new();
+    let search_path = Path::new(path);
+    
+    if search_path.is_file() {
+        let extension = search_path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .ok_or_else(|| "Could not determine file extension".to_string())?;
 
-    let mut rng = rand::thread_rng();
-    let mut timestamps: Vec<u32> = (0..count).map(|_| rng.gen_range(start_time..end_time)).collect();
-    timestamps.sort();
-    timestamps
+        if let Some(video_type) = VideoType::from_extension(extension) {
+            video_files.push(VideoFile {
+                path: search_path.to_path_buf(),
+                video_type,
+            });
+        }
+    } else if search_path.is_dir() {
+        for entry in fs::read_dir(search_path)
+            .map_err(|e| format!("Failed to read directory: {}", e))? 
+        {
+            let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+            let file_path = entry.path();
+            
+            if file_path.is_file() {
+                if let Some(extension) = file_path.extension().and_then(|ext| ext.to_str()) {
+                    if let Some(video_type) = VideoType::from_extension(extension) {
+                        video_files.push(VideoFile {
+                            path: file_path,
+                            video_type,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok(video_files)
 }
 
-fn generate_screenshot(video_file: &str, ffmpeg_path: &str, timestamp: &u32, output_file: &str) -> Result<(), String> {
-    Command::new(ffmpeg_path)
-        .args(&[
-            "-y", "-loglevel", "error", "-ss", &timestamp.to_string(),
-            "-i", video_file, "-vframes", "1", "-qscale:v", "2", output_file,
-        ])
-        .status()
-        .map_err(|e| format!("Failed to run ffmpeg for screenshot: {}", e))?;
-    Ok(())
+/// Convert VideoFile to MediaFile
+pub fn to_media_file(video_file: &VideoFile) -> MediaFile {
+    MediaFile {
+        path: video_file.path.clone(),
+        media_type: MediaType::Video(video_file.video_type.clone()),
+    }
 }
 
-fn generate_thumbnail(ffmpeg_path: &str, input_file: &str, output_file: &str) -> Result<(), String> {
-    Command::new(ffmpeg_path)
-        .args(&[
-            "-y", "-loglevel", "error", "-i", input_file,
-            "-vf", "scale=720:-1", output_file,
-        ])
-        .status()
-        .map_err(|e| format!("Failed to run ffmpeg for thumbnail: {}", e))?;
-    Ok(())
+/// Classify video content based on filename patterns
+/// Enhanced version of determine_release_type_and_title from seedpool.rs
+pub fn classify_video_content(filename: &str) -> VideoMetadata {
+    let mut metadata = VideoMetadata::default();
+    
+    // Initialize regex patterns (enhanced from seedpool.rs)
+    let season_episode_regex = Regex::new(r"(?i)S(\d{1,2})E(\d{1,3})").unwrap();
+    let season_only_regex = Regex::new(r"(?i)S(\d{1,2})").unwrap();
+    let episode_only_regex = Regex::new(r"(?i)\bE(\d{1,4})\b").unwrap();  // Support E1-E9999 for anime
+    let boxset_regex = Regex::new(r"(?i)\b(boxset|complete|collection|season\s*\d+.*complete)\b").unwrap();
+    let year_regex = Regex::new(r"\b(19|20)\d{2}\b").unwrap();
+    let full_date_regex = Regex::new(r"\b((19|20)\d{2})[.\-](0[1-9]|1[0-2])[.\-](0[1-9]|[12][0-9]|3[01])\b").unwrap();
+    
+    // Enhanced pattern matching for anime, sports, documentaries
+    // Common anime titles and keywords
+    let anime_regex = Regex::new(r"(?i)\b(anime|dubbed|subbed|jpn|japanese|[Ss]ub|[Dd]ub|naruto|one\.piece|attack\.on\.titan|bleach|dragon\.ball|demon\.slayer|jujutsu\.kaisen|my\.hero\.academia|boku\.no\.hero|death\.note|hunter\.x\.hunter|fullmetal\.alchemist|sword\.art\.online|tokyo\.ghoul|steins\.gate|evangelion|cowboy\.bebop|one\.punch\.man|mob\.psycho|chainsaw\.man|spy\.x\.family|vinland\.saga|haikyuu|fairy\.tail|black\.clover|boruto|shippuden|kimetsu\.no\.yaiba)\b").unwrap();
+    
+    // Sports patterns - more specific to avoid false positives
+    let sports_regex = Regex::new(r"(?i)\b(nba|nfl|nhl|mlb|uefa|fifa|premier\.league|bundesliga|la\.liga|serie\.a|ligue\.1|championship|tournament|vs\.|boxing|mma|ufc|wwe|aew|f1|formula\.1|formula\.one|olympics?|world\.cup|super\.bowl|wrestlemania|summerslam|grand\.prix|tennis|wimbledon|golf|pga|cricket|rugby)\b").unwrap();
+    
+    let documentary_regex = Regex::new(r"(?i)\b(documentary|docu|national\.geographic|discovery|history|nature|wildlife|science|biography|bio)\b").unwrap();
+    let concert_regex = Regex::new(r"(?i)\b(concert|live\.at|tour|festival|acoustic|unplugged|live\.from)\b").unwrap();
+    
+    // Source type patterns - order matters for proper detection
+    let uhd_bluray_regex = Regex::new(r"(?i)\b(uhd\.?blu.?ray|4k\.?blu.?ray)\b").unwrap();
+    let bluray_regex = Regex::new(r"(?i)\b(blu.?ray|bd|m2ts)\b").unwrap();
+    let dvd_regex = Regex::new(r"(?i)\b(dvd|dvdrip)\b").unwrap();
+    let remux_regex = Regex::new(r"(?i)\b(remux)\b").unwrap();
+    let full_disc_regex = Regex::new(r"(?i)\b(full\.?disc|complete\.?disc|bdmv|disc\.?image)\b").unwrap();
+    let iso_regex = Regex::new(r"(?i)\.iso$").unwrap();
+    let web_dl_regex = Regex::new(r"(?i)\b(web[\.\-]?dl|webdl|amzn|nf|hmax|dsnp|atvp|hulu|pcok|pmtp)\b").unwrap();
+    let web_rip_regex = Regex::new(r"(?i)\b(web[\.\-]?rip|webrip)\b").unwrap();
+    let hdtv_regex = Regex::new(r"(?i)\b(hdtv)\b").unwrap();
+    let pdtv_regex = Regex::new(r"(?i)\b(pdtv)\b").unwrap();
+    let sdtv_regex = Regex::new(r"(?i)\b(sdtv)\b").unwrap();
+    let encode_regex = Regex::new(r"(?i)\b(encode|x264|x265|h264|h265|hevc|xvid|divx)\b").unwrap();
+    let upscale_regex = Regex::new(r"(?i)\b(upscale|upscaled|ai.?upscale)\b").unwrap();
+    
+    // Resolution patterns
+    let resolution_regex = Regex::new(r"\b(2160p|1080p|720p|480p|360p|4K|UHD)\b").unwrap();
+    
+    // Codec patterns
+    let codec_regex = Regex::new(r"\b(x264|x265|h264|h265|hevc|avc|xvid|divx|av1)\b").unwrap();
+    
+    debug!("Classifying video content for: {}", filename);
+    
+    // 1. First check for TV show patterns (S##E## takes priority)
+    if let Some(captures) = season_episode_regex.captures(filename) {
+        debug!("Matched SxxEyy pattern: {:?}", captures);
+        metadata.category = VideoCategory::TvShow;
+        metadata.season = captures.get(1).and_then(|m| m.as_str().parse::<u32>().ok());
+        metadata.episode = captures.get(2).and_then(|m| m.as_str().parse::<u32>().ok());
+        metadata.title = extract_title_before_pattern(filename, &season_episode_regex);
+    } else if let Some(captures) = episode_only_regex.captures(filename) {
+        debug!("Matched Eyy pattern: {:?}", captures);
+        metadata.category = VideoCategory::TvShow;
+        metadata.season = Some(1);
+        metadata.episode = captures.get(1).and_then(|m| m.as_str().parse::<u32>().ok());
+        metadata.title = extract_title_before_pattern(filename, &episode_only_regex);
+    } else if let Some(captures) = season_only_regex.captures(filename) {
+        debug!("Matched Sxx pattern: {:?}", captures);
+        metadata.category = VideoCategory::TvShow;
+        metadata.season = captures.get(1).and_then(|m| m.as_str().parse::<u32>().ok());
+        metadata.title = extract_title_before_pattern(filename, &season_only_regex);
+    } else if boxset_regex.is_match(filename) {
+        debug!("Matched boxset keywords in filename: {}", filename);
+        metadata.category = VideoCategory::TvShow;
+        metadata.is_boxset = true;
+        metadata.season = Some(1);
+        metadata.episode = Some(0);
+        metadata.title = extract_title_before_pattern(filename, &boxset_regex);
+    } else if let Some(date_caps) = full_date_regex.captures(filename) {
+        debug!("Matched full date pattern in filename: {}", filename);
+        metadata.category = VideoCategory::TvShow;
+        metadata.is_dated_tv = true;
+        // Use the full year (group 1)
+        if let Some(year_str) = date_caps.get(1).map(|m| m.as_str()) {
+            if let Ok(year) = year_str.parse::<u32>() {
+                metadata.year = Some(year);
+                metadata.season = Some(year);
+                metadata.episode = Some(0);
+            }
+        }
+        metadata.title = extract_title_before_pattern(filename, &full_date_regex);
+    } else if year_regex.is_match(filename) {
+        debug!("Matched year pattern in filename: {}", filename);
+        metadata.category = VideoCategory::Movie;
+        
+        // Find all year matches and pick the most likely release year
+        let year_matches: Vec<u32> = year_regex.find_iter(filename)
+            .filter_map(|m| m.as_str().parse::<u32>().ok())
+            .collect();
+        
+        if !year_matches.is_empty() {
+            // Prefer years between 1960 and current year + 1
+            let current_year = 2024; // Or use chrono to get actual current year
+            let valid_year = year_matches.iter()
+                .find(|&&y| y >= 1960 && y <= current_year + 1)
+                .or_else(|| year_matches.first());
+            
+            if let Some(&year) = valid_year {
+                metadata.year = Some(year);
+            }
+        }
+        
+        metadata.title = extract_title_before_pattern(filename, &year_regex);
+    } else {
+        // No clear pattern, extract full title
+        metadata.title = clean_title(filename);
+        
+        // For ISO files without clear patterns, check for movie-like titles
+        if iso_regex.is_match(filename) && (
+            filename.to_lowercase().contains("trilogy") ||
+            filename.to_lowercase().contains("collection") ||
+            filename.to_lowercase().contains("saga") ||
+            bluray_regex.is_match(filename) ||
+            dvd_regex.is_match(filename)
+        ) {
+            metadata.category = VideoCategory::Movie;
+        }
+    }
+    
+    // 2. Refine category based on content-specific patterns
+    // Check anime first as it often has episode patterns
+    if anime_regex.is_match(filename) {
+        debug!("Detected anime patterns in filename");
+        metadata.category = VideoCategory::Anime;
+    } else if documentary_regex.is_match(filename) {
+        debug!("Detected documentary patterns in filename");
+        metadata.category = VideoCategory::Documentary;
+    } else if concert_regex.is_match(filename) {
+        debug!("Detected concert patterns in filename");
+        metadata.category = VideoCategory::Concert;
+    } else if sports_regex.is_match(filename) {
+        debug!("Detected sports patterns in filename");
+        metadata.category = VideoCategory::Sports;
+    }
+    
+    // 3. Determine source type (priority order matters)
+    if iso_regex.is_match(filename) || full_disc_regex.is_match(filename) {
+        metadata.source_type = VideoSourceType::FullDisc;
+    } else if uhd_bluray_regex.is_match(filename) {
+        metadata.source_type = VideoSourceType::UHDBluRay;
+    } else if bluray_regex.is_match(filename) {
+        metadata.source_type = VideoSourceType::BluRay;
+    } else if dvd_regex.is_match(filename) {
+        metadata.source_type = VideoSourceType::DVD;
+    } else if remux_regex.is_match(filename) {
+        metadata.source_type = VideoSourceType::Remux;
+    } else if web_dl_regex.is_match(filename) {
+        metadata.source_type = VideoSourceType::WebDL;
+    } else if web_rip_regex.is_match(filename) {
+        metadata.source_type = VideoSourceType::WebRip;
+    } else if hdtv_regex.is_match(filename) {
+        metadata.source_type = VideoSourceType::HDTV;
+    } else if pdtv_regex.is_match(filename) {
+        metadata.source_type = VideoSourceType::PDTV;
+    } else if sdtv_regex.is_match(filename) {
+        metadata.source_type = VideoSourceType::SDTV;
+    } else if upscale_regex.is_match(filename) {
+        metadata.source_type = VideoSourceType::Upscale;
+    } else if encode_regex.is_match(filename) {
+        metadata.source_type = VideoSourceType::Encode;
+    }
+    
+    // 4. Extract resolution
+    if let Some(res_match) = resolution_regex.find(filename) {
+        metadata.resolution = Some(res_match.as_str().to_uppercase());
+    }
+    
+    // 5. Extract codec
+    if let Some(codec_match) = codec_regex.find(filename) {
+        metadata.codec = Some(codec_match.as_str().to_uppercase());
+    }
+    
+    debug!("Video classification result: {:?}", metadata);
+    metadata
 }
 
+/// Extract title before a regex pattern match
+fn extract_title_before_pattern(filename: &str, pattern: &Regex) -> String {
+    if let Some(pattern_match) = pattern.find(filename) {
+        clean_title(&filename[..pattern_match.start()])
+    } else {
+        clean_title(filename)
+    }
+}
 
-pub fn generate_screenshots_imgbb(
-    video_file: &str,
-    ffmpeg_path: &Path,
-    ffprobe_path: &Path,
-    imgbb_api_key: &str,
+/// Clean up title by only replacing separators, preserving technical info
+fn clean_title(title: &str) -> String {
+    let cleaned = title
+        .trim()
+        .replace('.', " ")
+        .replace('_', " ")
+        .replace('-', " ");
+    
+    // Only clean up extra whitespace, preserve all technical indicators
+    let whitespace_regex = Regex::new(r"\s+").unwrap();
+    whitespace_regex.replace_all(&cleaned, " ").trim().to_string()
+}
+
+/// Process video files with enhanced categorization
+pub fn process_video_with_metadata(
+    input_path: &str,
+    config: &crate::types::Config,
     dry_run: bool,
-) -> Result<(Vec<String>, Vec<String>), String> {
-    let mut screenshots = Vec::new();
-    let mut thumbnails = Vec::new();
-
-    // Get video duration
-    let duration = get_video_duration(video_file, ffprobe_path.to_str().unwrap())?;
-    let timestamps = generate_random_timestamps(duration, 4);
-
-    // Generate sanitized base name for screenshots
-    let base_name = Path::new(video_file)
-        .file_stem()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-    let sanitized_base_name = generate_release_name(&base_name);
-
-    for (i, timestamp) in timestamps.iter().enumerate() {
-        // Generate screenshot file name
-        let screenshot_name = format!("{}_{}.jpg", sanitized_base_name, i + 1);
-        let screenshot_path = format!("/tmp/{}", screenshot_name);
-
-        // Generate screenshot
-        generate_screenshot(video_file, ffmpeg_path.to_str().unwrap(), timestamp, &screenshot_path)?;
-
-        // Upload screenshot to ImgBB
-        let (full_image_url, thumb_url) = crate::utils::upload_to_imgbb(&screenshot_path, imgbb_api_key, dry_run)?;
-        screenshots.push(full_image_url); // Use full_image_url for the description
-        thumbnails.push(thumb_url);
-
-        // Clean up the local screenshot file
-        fs::remove_file(&screenshot_path).map_err(|e| format!("Failed to delete temporary screenshot: {}", e))?;
+) -> Result<(VideoFile, VideoMetadata), String> {
+    let results = process_video(input_path, config, dry_run)?;
+    
+    // For single file processing, return the first result
+    if results.len() == 1 {
+        Ok(results.into_iter().next().unwrap())
+    } else if results.is_empty() {
+        Err("No video files found".to_string())
+    } else {
+        // Return the first valid video file
+        Ok(results.into_iter().next().unwrap())
     }
+}
 
-    Ok((screenshots, thumbnails))
+
+/// Test function to verify video classification behavior
+pub fn test_video_classification() {
+    let test_cases = vec![
+        // TV Shows
+        "The.Show.S01E05.1080p.BluRay.x264-GROUP",
+        "Another.Series.S02E12.HDTV.x265-TEAM", 
+        "Anime.Show.S01E01.WEB-DL.1080p.x264-SUB",
+        "Sports.Match.2023.12.25.HDTV.720p-SPORTS",
+        "Documentary.Series.S01.Complete.1080p.WEB-DL-DOC",
+        
+        // Movies
+        "The.Movie.2023.1080p.BluRay.x264-GROUP",
+        "Action.Film.2022.4K.UHD.BluRay.x265-TEAM",
+        "Horror.Movie.1999.720p.WEB-DL.h264-WEB",
+        
+        // Edge cases
+        "Random.File.Without.Patterns.mkv",
+        "Just.A.Title.mp4",
+    ];
+    
+    println!("=== Video Classification Test Results ===");
+    for filename in test_cases {
+        let metadata = classify_video_content(filename);
+        println!("File: {}", filename);
+        println!("  Title: '{}'", metadata.title);
+        println!("  Category: {:?}", metadata.category);
+        println!("  Source: {:?}", metadata.source_type);
+        println!("  Season: {:?}, Episode: {:?}", metadata.season, metadata.episode);
+        println!("  Year: {:?}", metadata.year);
+        println!("  Resolution: {:?}", metadata.resolution);
+        println!("  Codec: {:?}", metadata.codec);
+        println!("  Boxset: {}, Dated TV: {}", metadata.is_boxset, metadata.is_dated_tv);
+        println!("---");
+    }
 }

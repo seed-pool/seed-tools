@@ -3,20 +3,53 @@ use std::path::Path;
 use std::process::Command;
 use walkdir::WalkDir;
 use reqwest::blocking::multipart::Form;
-use log::{info, warn};
+use log::{info, warn, debug};
 use epub::doc::EpubDoc;
-use zip::ZipArchive;
-use std::fs::File;
-use std::io::copy;
-use lopdf::{Document, Object};
 use regex::Regex;
-use serde_json::Value;
 
-use crate::types::{Config, SeedpoolConfig, EbookType, EbookFile};
+use crate::types::{Config, SeedpoolConfig, EbookType, EbookFile, MediaFile, MediaType, EbookCategory};
 use crate::torrent::create_torrent;
-use crate::archive::extract_archives_in_directory;
+use crate::extraction::process_and_extract_archives;
 use crate::naming::generate_release_name;
 use urlencoding;
+
+
+
+/// Metadata extracted from ebook filename and content
+#[derive(Debug, Clone)]
+pub struct EbookMetadata {
+    pub title: String,
+    pub author: Option<String>,
+    pub year: Option<u32>,
+    pub edition: Option<String>,
+    pub volume: Option<String>,
+    pub issue: Option<String>,
+    pub category: EbookCategory,
+    pub format_type: Option<EbookType>,
+    pub series: Option<String>,
+    pub publisher: Option<String>,
+    pub isbn: Option<String>,
+    pub language: Option<String>,
+}
+
+impl Default for EbookMetadata {
+    fn default() -> Self {
+        Self {
+            title: String::new(),
+            author: None,
+            year: None,
+            edition: None,
+            volume: None,
+            issue: None,
+            category: EbookCategory::Unknown,
+            format_type: None,
+            series: None,
+            publisher: None,
+            isbn: None,
+            language: None,
+        }
+    }
+}
 
 
 
@@ -61,6 +94,7 @@ fn find_all_ebook_files(working_dir: &str) -> Result<Vec<EbookFile>, String> {
             EbookType::Cbz => 1,
             EbookType::Cbr => 2,
             EbookType::Pdf => 3,
+            EbookType::Mobi | EbookType::Azw | EbookType::Azw3 | EbookType::Lit | EbookType::Pdb => 4,
         });
         Ok(vec![found_files.into_iter().next().unwrap()])
     }
@@ -72,6 +106,10 @@ fn extract_ebook_metadata(ebook_file: &EbookFile) -> Result<(Option<String>, Opt
         EbookType::Pdf => extract_metadata_from_pdf(ebook_file.path.to_str().unwrap()),
         EbookType::Epub => extract_metadata_from_epub(ebook_file.path.to_str().unwrap()),
         EbookType::Cbz | EbookType::Cbr => extract_metadata_from_comic(&ebook_file.path),
+        EbookType::Mobi | EbookType::Azw | EbookType::Azw3 | EbookType::Lit | EbookType::Pdb => {
+            // For now, return generic metadata for these formats
+            Ok((Some("Unknown Title".to_string()), Some("Unknown Author".to_string())))
+        },
     }
 }
 
@@ -377,28 +415,23 @@ pub fn generate_ebook_description(
         }
     }
 
-    // Build BBCode description
-    let mut description = format!(
-        "[center][b][size=18][color=#2E86C1]{}[/color][/size][/b]\n\n[table]\n",
-        torrent_name
-    );
-    for (i, url) in image_urls.iter().enumerate() {
-        if i % 2 == 0 {
-            description.push_str("  [tr]\n");
-        }
-        description.push_str(&format!("    [td][img width=720]{}[/img][/td]\n", url));
-        if i % 2 == 1 {
-            description.push_str("  [/tr]\n");
-        }
-    }
-    // If odd number of images, close the last row
-    if image_urls.len() % 2 != 0 {
-        description.push_str("    [td][/td]\n  [/tr]\n");
-    }
-    description.push_str("[/table][/center]\n\n");
-    description.push_str(&format!("[center]{}[/center]", crate::utils::default_non_video_description()));
-
-    Ok(description)
+    // Build BBCode description using the new builder
+    use crate::description::{DescriptionBuilder, DescriptionConfig};
+    use crate::types::ImageLayout;
+    use crate::types::{MediaType, EbookType};
+    
+    let mut config = DescriptionConfig::default();
+    config.image_layout = ImageLayout::TwoColumn;
+    config.title_color = "#2E86C1".to_string();
+    
+    let builder = DescriptionBuilder::with_config(
+        MediaType::Ebook(EbookType::Pdf), // Using PDF as generic for image-based ebooks
+        config
+    )
+    .title(torrent_name)
+    .images(image_urls);
+    
+    Ok(builder.build())
 }
 
 /// Generate BBCode description for ebooks using Open Library API
@@ -410,8 +443,10 @@ pub fn generate_ebook_bbcode_description(
     client: &reqwest::blocking::Client,
 ) -> Result<(String, Vec<String>), String> {
     use serde_json::Value;
+    use crate::description::DescriptionBuilder;
+    use crate::types::SectionFormat;
+    use crate::types::{MediaType, EbookType};
     
-    let mut description = String::new();
     let mut subjects = Vec::new();
 
     // Fetch book details from Open Library
@@ -442,15 +477,13 @@ pub fn generate_ebook_bbcode_description(
         .json()
         .map_err(|e| format!("Failed to parse author details: {}", e))?;
 
-    // Add book title and author
-    description.push_str(&format!(
-        "[center][b][size=32][color=#2E86C1]{}[/color][/size][/b][/center]\n\n",
-        work_json["title"].as_str().unwrap_or(title)
-    ));
-    description.push_str(&format!(
-        "[center][b][size=16][color=#117A65]By:[/color][/size][/b] [i]{}[/i][/center]\n\n",
-        author_json["name"].as_str().unwrap_or(author)
-    ));
+    // Start building description
+    let final_title = work_json["title"].as_str().unwrap_or(title);
+    let final_author = author_json["name"].as_str().unwrap_or(author);
+    
+    let mut builder = DescriptionBuilder::new(MediaType::Ebook(EbookType::Epub))
+        .title(final_title)
+        .author(final_author);
 
     // Add book description
     if let Some(book_description) = work_json["description"]
@@ -476,22 +509,23 @@ pub fn generate_ebook_bbcode_description(
             .collect::<Vec<_>>()
             .join("\n");
 
-        // Add the sanitized description to the quote block
-        description.push_str("[b][size=15][color=#6C3483]Synopsis:[/color][/size][/b]\n");
-        description.push_str("[quote]\n");
-        description.push_str(&sanitized_description.trim());
-        description.push_str("\n[/quote]\n\n");
+        builder = builder.synopsis(sanitized_description.trim());
 
-        // Append the extracted links below the quote block
+        // Add extracted links as a custom section
         if !extracted_links.is_empty() {
-            description.push_str("[b][size=14][color=#2874A6]Additional Editions:[/color][/size][/b]\n");
-            for link in extracted_links {
-                description.push_str(&format!("- [url={}][color=#1ABC9C]{}[/color][/url]\n", link.trim_end_matches(')'), link.trim_end_matches(')')));
-            }
-            description.push_str("\n");
+            let links_content = extracted_links.iter()
+                .map(|link| format!("- [url={}][color=#1ABC9C]{}[/color][/url]", 
+                    link.trim_end_matches(')'), 
+                    link.trim_end_matches(')')))
+                .collect::<Vec<_>>()
+                .join("\n");
+            
+            builder = builder.raw(&format!(
+                "[b][size=14][color=#2874A6]Additional Editions:[/color][/size][/b]\n{}",
+                links_content
+            ));
         }
     }
-
 
     // Add author bio
     if let Some(author_bio) = author_json["bio"]
@@ -504,20 +538,14 @@ pub fn generate_ebook_bbcode_description(
             .replace_all(author_bio, "")
             .to_string()
             .lines()
-            .filter(|line| !line.trim().is_empty()) // Remove blank lines
+            .filter(|line| !line.trim().is_empty())
             .collect::<Vec<_>>()
             .join("\n");
 
-        description.push_str("[b][size=15][color=#F39C12]About the Author:[/color][/size][/b]\n");
-        description.push_str("[quote]\n");
-        description.push_str(&sanitized_bio.trim());
-        description.push_str("\n[/quote]\n\n");
+        builder = builder.custom_section("About the Author", sanitized_bio.trim(), SectionFormat::Quoted);
     }
-    
-    // Add footer
-    description.push_str(&format!("[center]{}[/center]", crate::utils::default_non_video_description()));
 
-    Ok((description, subjects))
+    Ok((builder.build(), subjects))
 }
 
 /// Main function to process ebook uploads
@@ -546,151 +574,29 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
     // Store archive files that will be extracted and deleted for later restoration
     let mut backup_extracted_archive_buffers = Vec::new();
     
-    // Handle archive extraction for both files and directories
-    if is_file {
-        // If processing a specific file, check if it's an archive that needs extraction
-        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            let ext_lower = ext.to_lowercase();
-            if ext_lower == "zip" || ext_lower == "rar" || ext_lower == "r00" || ext_lower == "r01" {
-                log::info!("Extracting archive file: {}", path.display());
-                
-                // Backup the archive file before extraction
-                log::info!("Reading archive into memory buffer: {}", path.display());
-                let file_content = fs::read(path)
-                    .map_err(|e| format!("Failed to read archive file '{}' into memory: {}", path.display(), e))?;
-                backup_extracted_archive_buffers.push((path.to_path_buf(), file_content));
-                
-                if ext_lower == "zip" {
-                    let output = Command::new("unzip")
-                        .arg("-o")
-                        .arg(path)
-                        .arg("-d")
-                        .arg(&working_dir)
-                        .output()
-                        .map_err(|e| format!("Failed to execute unzip: {}", e))?;
-                    if !output.status.success() {
-                        return Err(format!(
-                            "Failed to extract ZIP archive: {}. Error: {}",
-                            path.display(),
-                            String::from_utf8_lossy(&output.stderr)
-                        ));
-                    }
-                } else {
-                    // RAR files
-                    let output = Command::new("unrar")
-                        .args(&["x", "-o+", path.to_str().unwrap(), &working_dir])
-                        .output()
-                        .map_err(|e| format!("Failed to execute unrar: {}", e))?;
-                    if !output.status.success() {
-                        return Err(format!(
-                            "Failed to extract RAR archive: {}. Error: {}",
-                            path.display(),
-                            String::from_utf8_lossy(&output.stderr)
-                        ));
-                    }
-                }
-                log::info!("Successfully extracted archive: {}", path.display());
-                
-                // Remove the original archive file to keep working directory clean
-                log::info!("Temporarily removing archive from disk: {}", path.display());
-                fs::remove_file(path)
-                    .map_err(|e| format!("Failed to remove original archive file '{}': {}", path.display(), e))?;
-            }
-        }
+    // Extract any archives first using centralized extraction and get the processing path
+    let processing_path = process_and_extract_archives(input_path)?;
+    
+    // Update working_dir to use the processing path if it was a file that got extracted
+    let working_dir = if is_file && Path::new(&processing_path).is_dir() {
+        processing_path.clone()
     } else {
-        // Extract archives in the directory
-        extract_archives_in_directory(&working_dir)?;
-    }
-
-    // Only do iterative archive extraction for directory processing, not single files
-    if !is_file {
-        // After archive extraction, iteratively extract any newly extracted archives
-        let mut extraction_rounds = 0;
-        let max_extraction_rounds = 3; // Prevent infinite loops
-        
-        loop {
-            extraction_rounds += 1;
-            if extraction_rounds > max_extraction_rounds {
-                log::warn!("Maximum extraction rounds ({}) reached, stopping archive extraction", max_extraction_rounds);
-                break;
-            }
-            
-            // Check for more archives in the working directory
-            let mut found_archives = false;
-            for entry in fs::read_dir(&working_dir).map_err(|e| format!("Failed to read directory '{}': {}", working_dir, e))? {
-                let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
-                let file_path = entry.path();
-                
-                if file_path.is_file() {
-                    if let Some(ext) = file_path.extension().and_then(|e| e.to_str()) {
-                        let ext_lower = ext.to_lowercase();
-                        if ext_lower == "zip" || ext_lower == "rar" || ext_lower == "r00" || ext_lower == "r01" {
-                            found_archives = true;
-                            log::info!("Found archive in round {}: {}", extraction_rounds, file_path.display());
-                            
-                            // Backup the archive file before extraction
-                            log::info!("Reading archive into memory buffer: {}", file_path.display());
-                            if let Ok(file_content) = fs::read(&file_path) {
-                                backup_extracted_archive_buffers.push((file_path.clone(), file_content));
-                            } else {
-                                log::warn!("Failed to backup archive file: {}", file_path.display());
-                                continue;
-                            }
-                            
-                            if ext_lower == "zip" {
-                                let output = Command::new("unzip")
-                                    .arg("-o")
-                                    .arg(&file_path)
-                                    .arg("-d")
-                                    .arg(&working_dir)
-                                    .output()
-                                    .map_err(|e| format!("Failed to execute unzip: {}", e))?;
-                                if !output.status.success() {
-                                    log::warn!("Failed to extract ZIP archive: {}. Error: {}", 
-                                        file_path.display(), String::from_utf8_lossy(&output.stderr));
-                                    continue;
-                                }
-                            } else {
-                                // RAR files
-                                let output = Command::new("unrar")
-                                    .args(&["x", "-o+", file_path.to_str().unwrap(), &working_dir])
-                                    .output()
-                                    .map_err(|e| format!("Failed to execute unrar: {}", e))?;
-                                if !output.status.success() {
-                                    log::warn!("Failed to extract RAR archive: {}. Error: {}", 
-                                        file_path.display(), String::from_utf8_lossy(&output.stderr));
-                                    continue;
-                                }
-                            }
-                            log::info!("Successfully extracted archive: {}", file_path.display());
-                            
-                            // Remove the extracted archive file to keep working directory clean
-                            log::info!("Temporarily removing archive from disk: {}", file_path.display());
-                            if let Err(e) = fs::remove_file(&file_path) {
-                                log::warn!("Failed to remove extracted archive file '{}': {}", file_path.display(), e);
-                            }
-                        }
-                    }
-                }
-            }
-            
-            // If no more archives found, break the loop
-            if !found_archives {
-                break;
-            }
-        }
-    }
+        working_dir
+    };
     
     // Now find ebook files - if we started with a single file, only process that file and its extracted content
     let ebook_files = if is_file {
+        // Update path to use the processing path
+        let path = Path::new(&processing_path);
+        
         // If we started with a single file, look for that specific file or any files extracted from it
-        let original_filename = path.file_stem()
+        let original_filename = Path::new(input_path).file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown");
         
         // Check if the original file still exists (if it wasn't an archive)
         let mut files = Vec::new();
-        if path.exists() {
+        if path.exists() && path.is_file() {
             let ebook_type = path.extension()
                 .and_then(|ext| ext.to_str())
                 .and_then(|ext| EbookType::from_extension(ext))
@@ -875,6 +781,11 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
                     info!("Detected type: Regular ebook (20) - EPUB file");
                     "20" // Regular ebook
                 }
+            },
+            EbookType::Mobi | EbookType::Azw | EbookType::Azw3 | EbookType::Lit | EbookType::Pdb => {
+                // Other ebook formats default to regular ebook
+                info!("Detected type: Regular ebook (20) - {:?} file", main_ebook_file.ebook_type);
+                "20" // Regular ebook
             }
         };
         detected_type
@@ -938,6 +849,10 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
                     info!("Detected type: Regular ebook (20) - EPUB file");
                     "20"
                 }
+            },
+            EbookType::Mobi | EbookType::Azw | EbookType::Azw3 | EbookType::Lit | EbookType::Pdb => {
+                info!("Detected type: Regular ebook (20) - {:?} file", main_ebook_file.ebook_type);
+                "20"
             }
         };
         detected_type
@@ -1355,4 +1270,447 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
     // Files will be automatically restored by the RestoreGuard when function exits
 
     Ok(())
+}
+
+/// Process ebook file(s) from a path (file or directory) and classify content
+pub fn process_ebook(
+    input_path: &str,
+    _config: &crate::types::Config,
+    _dry_run: bool,
+) -> Result<Vec<(EbookFile, EbookMetadata)>, String> {
+    let path = Path::new(input_path);
+    
+    if !path.exists() {
+        return Err(format!("Path not found: {}", input_path));
+    }
+    
+    // Extract any archives first and get the path to process
+    let processing_path = process_and_extract_archives(input_path)?;
+    
+    let mut results = Vec::new();
+    let mut rejected_files = Vec::new();
+    
+    // Update path to use the processing path
+    let path = Path::new(&processing_path);
+    
+    if path.is_file() {
+        // Single file case (non-archive ebook file)
+        let extension = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .ok_or_else(|| "Could not determine file extension".to_string())?;
+
+        let ebook_type = EbookType::from_extension(extension)
+            .ok_or_else(|| format!("Unsupported ebook file type: {}", extension))?;
+        
+        let ebook_file = EbookFile {
+            path: path.to_path_buf(),
+            ebook_type,
+        };
+        
+        let filename = path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        
+        let metadata = classify_ebook_content(filename, extension);
+        
+        if metadata.category == EbookCategory::Unknown {
+            return Err(format!(
+                "Unable to determine ebook category for '{}'. File must have recognizable novel, comic, magazine, technical, educational, or manga patterns in the filename.", 
+                filename
+            ));
+        }
+        
+        results.push((ebook_file, metadata));
+        
+    } else if path.is_dir() {
+        // Handle directory - process all ebook files (including extracted ones)
+        for entry in fs::read_dir(path).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let entry_path = entry.path();
+            
+            if entry_path.is_file() {
+                if let Some(extension) = entry_path.extension().and_then(|ext| ext.to_str()) {
+                    if let Some(ebook_type) = EbookType::from_extension(extension) {
+                        let ebook_file = EbookFile {
+                            path: entry_path.clone(),
+                            ebook_type,
+                        };
+                        
+                        let filename = entry_path.file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("");
+                        
+                        let metadata = classify_ebook_content(filename, extension);
+                        
+                        if metadata.category == EbookCategory::Unknown {
+                            rejected_files.push(filename.to_string());
+                            continue;
+                        }
+                        
+                        results.push((ebook_file, metadata));
+                    }
+                }
+            }
+        }
+        
+        if results.is_empty() && !rejected_files.is_empty() {
+            return Err(format!(
+                "No valid ebook files found. {} file(s) rejected due to unknown category: {}",
+                rejected_files.len(),
+                rejected_files.join(", ")
+            ));
+        }
+    }
+    
+    if results.is_empty() {
+        return Err("No ebook files found in the specified path".to_string());
+    }
+    
+    // After we have the results, build the upload data if we have ebook files
+    if !results.is_empty() {
+        use crate::upload::UploadBuilder;
+        use std::sync::Arc;
+        
+        let (ebook_file, metadata) = &results[0];
+        
+        // Build upload data directly using UploadBuilder
+        use crate::description::DescriptionConfig;
+        use crate::types::ImageLayout;
+        
+        // Configure description based on ebook type
+        let mut desc_config = DescriptionConfig::default();
+        
+        // Different layouts for different ebook types
+        match metadata.category {
+            EbookCategory::Comic => {
+                desc_config.image_layout = ImageLayout::TwoColumn; // Comics use 2 column for preview pages
+                desc_config.max_images = 10; // Show more preview pages
+                desc_config.image_width = 350; // Smaller width for comic pages
+            }
+            EbookCategory::Magazine | EbookCategory::Newspaper => {
+                desc_config.image_layout = ImageLayout::TwoColumn; // Magazines/newspapers use 2 column
+                desc_config.max_images = 6; // Show several pages
+                desc_config.image_width = 400;
+            }
+            _ => {
+                desc_config.image_layout = ImageLayout::SingleColumn; // Regular books use single column for cover
+                desc_config.max_images = 2; // Front and back cover
+                desc_config.image_width = 500;
+            }
+        }
+        
+        // Create the upload builder with ebook-specific components
+        let mut builder = UploadBuilder::new(
+            &processing_path,
+            MediaType::Ebook(ebook_file.ebook_type.clone()),
+            Arc::new((*_config).clone())
+        )
+        .with_extensions(EbookType::all_extensions())
+        .with_description_config(desc_config)
+        .dry_run(_dry_run);
+        
+        // Add title info
+        builder = builder.with_title_info(
+            &metadata.title, 
+            metadata.year.map(|y| y.to_string()).as_deref()
+        );
+        
+        // Add ebook-specific metadata
+        let mut ebook_metadata = std::collections::HashMap::new();
+        if let Some(author) = &metadata.author {
+            ebook_metadata.insert("author".to_string(), author.clone());
+        }
+        if let Some(publisher) = &metadata.publisher {
+            ebook_metadata.insert("publisher".to_string(), publisher.clone());
+        }
+        if let Some(isbn) = &metadata.isbn {
+            ebook_metadata.insert("isbn".to_string(), isbn.clone());
+        }
+        if let Some(edition) = &metadata.edition {
+            ebook_metadata.insert("edition".to_string(), edition.clone());
+        }
+        if let Some(volume) = &metadata.volume {
+            ebook_metadata.insert("volume".to_string(), volume.clone());
+        }
+        if let Some(issue) = &metadata.issue {
+            ebook_metadata.insert("issue".to_string(), issue.clone());
+        }
+        if let Some(series) = &metadata.series {
+            ebook_metadata.insert("series".to_string(), series.clone());
+        }
+        if let Some(language) = &metadata.language {
+            ebook_metadata.insert("language".to_string(), language.clone());
+        }
+        ebook_metadata.insert("category".to_string(), format!("{:?}", metadata.category));
+        ebook_metadata.insert("format".to_string(), format!("{:?}", ebook_file.ebook_type));
+        
+        builder = builder
+            .with_nfo()
+            .with_mediainfo()
+            .with_duplicate_check()
+            .with_custom_component("ebook_metadata", crate::types::UploadComponent::Metadata(ebook_metadata));
+        
+        // Add screenshots for comics/magazines (extract preview pages)
+        if matches!(metadata.category, EbookCategory::Comic | EbookCategory::Magazine | EbookCategory::Newspaper) {
+            builder = builder.with_screenshots(6); // Extract 6 preview pages
+        }
+        
+        // For comics, also handle comic image extraction if needed
+        if ebook_file.ebook_type.is_comic() {
+            // TODO: Extract comic images for preview
+            // This would be handled by the upload builder's screenshot component
+        }
+        
+        let _upload_data = builder.build()?;
+        
+        info!("Built upload data for ebook processing");
+        
+        // Create the upload processor - it will auto-detect the active tracker
+        let mut processor = crate::upload::UploadProcessor::new(
+            _upload_data,
+            std::sync::Arc::new(_config.clone()),
+        )
+        .dry_run(_dry_run);
+        
+        // Get media classification for mapping
+        if !results.is_empty() {
+            let (_, metadata) = &results[0];
+            let category_str = format!("EbookCategory::{:?}", metadata.category);
+            
+            processor = processor.with_media_classification(
+                Some(category_str),
+                None, // Ebooks don't have source types
+            );
+        }
+        
+        // Process the upload - it handles tracker detection and mapping internally
+        let upload_result = processor.process()?;
+        
+        if upload_result.success {
+            info!("Upload completed successfully to {}", upload_result.tracker);
+            if let Some(torrent_id) = upload_result.torrent_id {
+                info!("Torrent ID: {}", torrent_id);
+            }
+        } else {
+            warn!("Upload failed: {}", upload_result.message);
+        }
+    }
+    
+    Ok(results)
+}
+
+/// Detect ebook files in a path (without metadata classification)
+pub fn detect_ebook_files(path: &str) -> Result<Vec<EbookFile>, String> {
+    let mut ebook_files = Vec::new();
+    let search_path = Path::new(path);
+    
+    if search_path.is_file() {
+        if let Some(extension) = search_path.extension().and_then(|ext| ext.to_str()) {
+            if let Some(ebook_type) = EbookType::from_extension(extension) {
+                ebook_files.push(EbookFile {
+                    path: search_path.to_path_buf(),
+                    ebook_type,
+                });
+            }
+        }
+    } else if search_path.is_dir() {
+        for entry in fs::read_dir(search_path)
+            .map_err(|e| format!("Failed to read directory: {}", e))? 
+        {
+            let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+            let file_path = entry.path();
+            
+            if file_path.is_file() {
+                if let Some(extension) = file_path.extension().and_then(|ext| ext.to_str()) {
+                    if let Some(ebook_type) = EbookType::from_extension(extension) {
+                        ebook_files.push(EbookFile {
+                            path: file_path.to_path_buf(),
+                            ebook_type,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok(ebook_files)
+}
+
+/// Convert EbookFile to MediaFile
+pub fn to_media_file(ebook_file: &EbookFile) -> MediaFile {
+    MediaFile {
+        path: ebook_file.path.clone(),
+        media_type: MediaType::Ebook(ebook_file.ebook_type.clone()),
+    }
+}
+
+/// Classify ebook content based on filename patterns
+pub fn classify_ebook_content(filename: &str, extension: &str) -> EbookMetadata {
+    let mut metadata = EbookMetadata::default();
+    
+    // Set format type based on extension
+    metadata.format_type = EbookType::from_extension(extension);
+    
+    // Initialize regex patterns
+    let author_title_regex = Regex::new(r"^([^-]+?)\s*-\s*(.+?)(?:\s*\((\d{4})\))?(?:\s*\[(.+?)\])?$").unwrap();
+    let year_regex = Regex::new(r"\b(19|20)\d{2}\b").unwrap();
+    let edition_regex = Regex::new(r"(?i)\b(\d+)(?:st|nd|rd|th)?\s*(?:edition|ed\.?)\b").unwrap();
+    let volume_regex = Regex::new(r"(?i)\b(?:vol|volume)\.?\s*(\d+)\b").unwrap();
+    let issue_regex = Regex::new(r"(?i)\b(?:issue|#)\s*(\d+)\b").unwrap();
+    let isbn_regex = Regex::new(r"(?i)\b(?:isbn[-\s]?(?:10|13)?:?\s*)([\d-]+)\b").unwrap();
+    
+    // Category patterns
+    let comic_regex = Regex::new(r"(?i)\b(comic|comics|manga|graphic\.novel|cbr|cbz)\b").unwrap();
+    let magazine_regex = Regex::new(r"(?i)\b(magazine|mag|periodical|journal|monthly|weekly|quarterly|review|economist|geographic|nature|psychology|car\s+and\s+driver)\b").unwrap();
+    let newspaper_regex = Regex::new(r"(?i)\b(newspaper|news|daily|times|post|gazette|herald|tribune)\b").unwrap();
+    let technical_regex = Regex::new(r"(?i)\b(programming|coding|software|computer|technology|technical|engineering|mathematics|physics|chemistry|algorithm|python|java|javascript|mit\s+press|introduction\s+to\s+algorithms)\b").unwrap();
+    let educational_regex = Regex::new(r"(?i)\b(textbook|course|tutorial|guide|manual|handbook|education|learning|study|exam|test\.prep)\b").unwrap();
+    let biography_regex = Regex::new(r"(?i)\b(biography|autobiography|memoir|life\.of|story\.of)\b").unwrap();
+    let history_regex = Regex::new(r"(?i)\b(history|historical|ancient|medieval|war|battle|civilization)\b").unwrap();
+    let science_regex = Regex::new(r"(?i)\b(science|scientific|biology|astronomy|geology|research|medical|medicine|health|clinic|anatomy|physics|einstein)\b").unwrap();
+    let religion_regex = Regex::new(r"(?i)\b(bible|quran|torah|religion|religious|spiritual|theology|buddhism|christianity|islam|hindu)\b").unwrap();
+    let cookbook_regex = Regex::new(r"(?i)\b(cookbook|cooking|recipe|recipes|cuisine|culinary|baking|food|crocker|ramsay|oliver)\b").unwrap();
+    let travel_regex = Regex::new(r"(?i)\b(travel|guide|lonely\.planet|frommer|tourism|vacation|michelin|rick\s+steves|through\s+the\s+back\s+door)\b").unwrap();
+    let children_regex = Regex::new(r"(?i)\b(children|kids|juvenile|young\.adult|ya|picture\.book|seuss)\b").unwrap();
+    
+    // Series patterns
+    let series_regex = Regex::new(r"(?i)\b(?:book|part|series)\s*(\d+)\b").unwrap();
+    
+    debug!("Classifying ebook content for: {}", filename);
+    
+    // Clean filename for processing
+    let clean_name = filename
+        .trim()
+        .trim_end_matches(&format!(".{}", extension));
+    
+    // 1. Try to extract author and title pattern (Author - Title)
+    if let Some(captures) = author_title_regex.captures(clean_name) {
+        if let Some(author) = captures.get(1) {
+            metadata.author = Some(author.as_str().trim().to_string());
+        }
+        if let Some(title) = captures.get(2) {
+            metadata.title = title.as_str().trim().to_string();
+        }
+        if let Some(year) = captures.get(3) {
+            metadata.year = year.as_str().parse::<u32>().ok();
+        }
+        if let Some(extra) = captures.get(4) {
+            // Extra info in brackets might be publisher, edition, etc.
+            let extra_str = extra.as_str();
+            if extra_str.chars().all(|c| c.is_alphanumeric() || c == '-') && extra_str.len() == 13 {
+                metadata.isbn = Some(extra_str.to_string());
+            } else {
+                metadata.publisher = Some(extra_str.to_string());
+            }
+        }
+    } else {
+        // Fallback: use the whole filename as title
+        metadata.title = clean_name.replace('_', " ").replace('.', " ").trim().to_string();
+    }
+    
+    // 2. Extract additional metadata
+    if metadata.year.is_none() {
+        if let Some(year_match) = year_regex.find(clean_name) {
+            metadata.year = year_match.as_str().parse::<u32>().ok();
+        }
+    }
+    
+    if let Some(edition_match) = edition_regex.captures(clean_name) {
+        if let Some(edition_num) = edition_match.get(1) {
+            metadata.edition = Some(format!("{} edition", edition_num.as_str()));
+        }
+    }
+    
+    if let Some(volume_match) = volume_regex.captures(clean_name) {
+        if let Some(vol_num) = volume_match.get(1) {
+            metadata.volume = Some(vol_num.as_str().to_string());
+        }
+    }
+    
+    if let Some(issue_match) = issue_regex.captures(clean_name) {
+        if let Some(issue_num) = issue_match.get(1) {
+            metadata.issue = Some(issue_num.as_str().to_string());
+        }
+    }
+    
+    if let Some(isbn_match) = isbn_regex.captures(clean_name) {
+        if let Some(isbn) = isbn_match.get(1) {
+            metadata.isbn = Some(isbn.as_str().replace("-", ""));
+        }
+    }
+    
+    if let Some(series_match) = series_regex.captures(clean_name) {
+        if let Some(series_num) = series_match.get(1) {
+            metadata.series = Some(format!("Book {}", series_num.as_str()));
+        }
+    }
+    
+    // 3. Determine category based on content patterns and format
+    // Comics have highest priority
+    if metadata.format_type.as_ref().map(|t| t.is_comic()).unwrap_or(false) || comic_regex.is_match(filename) {
+        metadata.category = EbookCategory::Comic;
+    } else if newspaper_regex.is_match(filename) {
+        metadata.category = EbookCategory::Newspaper;
+    } else if cookbook_regex.is_match(filename) {
+        metadata.category = EbookCategory::Cookbook;
+    } else if travel_regex.is_match(filename) {
+        metadata.category = EbookCategory::Travel;
+    } else if children_regex.is_match(filename) {
+        metadata.category = EbookCategory::Children;
+    } else if technical_regex.is_match(filename) {
+        metadata.category = EbookCategory::Technical;
+    } else if magazine_regex.is_match(filename) {
+        metadata.category = EbookCategory::Magazine;
+    } else if biography_regex.is_match(filename) {
+        metadata.category = EbookCategory::Biography;
+    } else if history_regex.is_match(filename) {
+        metadata.category = EbookCategory::History;
+    } else if science_regex.is_match(filename) {
+        metadata.category = EbookCategory::Science;
+    } else if religion_regex.is_match(filename) {
+        metadata.category = EbookCategory::Religion;
+    } else if educational_regex.is_match(filename) {
+        metadata.category = EbookCategory::Educational;
+    } else if metadata.author.is_some() && !metadata.title.is_empty() {
+        // If we have author and title, assume it's a novel
+        metadata.category = EbookCategory::Novel;
+    }
+    
+    debug!("Ebook classification result: {:?}", metadata);
+    metadata
+}
+
+/// Process ebook files with enhanced categorization
+pub fn process_ebook_with_metadata(
+    input_path: &str,
+    config: &crate::types::Config,
+    dry_run: bool,
+) -> Result<(EbookFile, EbookMetadata), String> {
+    let ebook_files = process_ebook(input_path, config, dry_run)?;
+    
+    // For single file processing, we expect exactly one result
+    if ebook_files.len() != 1 {
+        return Err(format!(
+            "Expected single ebook file, found {} files", 
+            ebook_files.len()
+        ));
+    }
+    
+    let (ebook_file, metadata) = ebook_files.into_iter().next().unwrap();
+    
+    info!("Processed ebook: {} -> Category: {:?}, Format: {:?}", 
+          ebook_file.path.display(), metadata.category, metadata.format_type);
+    
+    Ok((ebook_file, metadata))
+}
+
+/// Get all ebook files with their metadata from a path
+pub fn get_ebook_files_with_metadata(
+    path: &str,
+    config: &crate::types::Config,
+    dry_run: bool,
+) -> Result<Vec<(EbookFile, EbookMetadata)>, String> {
+    // Simply use the new process_ebook function which already does everything
+    process_ebook(path, config, dry_run)
 }

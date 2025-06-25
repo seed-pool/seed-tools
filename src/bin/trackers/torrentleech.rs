@@ -106,7 +106,7 @@ pub fn process_torrentleech_release(
     )?;
 
     let nfo_path = format!("{}/{}.nfo", config.paths.torrent_dir, release_name);
-    let mediainfo_output = generate_mediainfo(&video_files[0], &mediainfo_path.to_string_lossy())?;
+    let mediainfo_output = generate_mediainfo(&video_files[0], config)?;
     std::fs::write(&nfo_path, mediainfo_output).map_err(|e| format!("Failed to write NFO file: {}", e))?;
 
     // Determine metadata

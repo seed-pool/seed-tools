@@ -2,36 +2,38 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-use serde::Deserialize;
 use log::{info, error, debug, LevelFilter};
 use simplelog::{Config as SimpleLogConfig, CombinedLogger, WriteLogger};
 use std::error::Error;
-use reqwest::blocking::Client;
-use seed_tools::utils;
 use seed_tools::utils::{generate_release_name, validate_file_path};
 use seed_tools::types::{Config, SeedpoolConfig, TorrentLeechConfig, QbittorrentConfig, DelugeConfig};
+use seed_tools::definitions::seedpool::{SeedpoolTorrentInfo, parse_seedpool_category_type, print_seedpool_categories_and_types};
 use seed_tools::sync;
 use seed_tools::irc::launch_irc_client;
 use trackers::seedpool::preflight_check;
 use seed_tools::ui;
+use seed_tools::media::process::{process_upload, process_upload_with_info};
 mod trackers {
     pub mod seedpool;
     pub mod torrentleech;
     pub mod common;
 }
 use std::fs::OpenOptions;
-use trackers::common::{process_custom_upload, sanitize_game_title, process_game_upload, Tracker};
 use clap::{Parser, CommandFactory};
-#[derive(Deserialize)]
-struct GeneralConfig {
-    pub tmdb_api_key: String,
-}
 
 fn load_yaml_config<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, String> {
     let content = fs::read_to_string(path)
         .map_err(|e| format!("Failed to read config file '{}': {}", path, e))?;
     serde_yaml::from_str(&content)
         .map_err(|e| format!("Failed to parse YAML config '{}': {}", path, e))
+}
+
+fn parse_category_type_argument(category_type_arg: &str) -> Result<SeedpoolTorrentInfo, String> {
+    parse_seedpool_category_type(category_type_arg)
+}
+
+fn print_available_categories_and_types() {
+    print_seedpool_categories_and_types();
 }
 
 fn extract_binary_paths(config_path: &str) -> Result<(PathBuf, PathBuf, PathBuf, PathBuf), String> {
@@ -291,189 +293,57 @@ async fn main() -> Result<(), Box<dyn Error>> {
         );
         info!("Generated sanitized release name: {}", sanitized_name);
 
-        let mut errors = Vec::new();
-
-        // --- Custom Upload Mode ---
-        if let Some(category_type_arg) = cli.custom_cat_type {
-            info!("Running in custom upload mode with category/type: {}", category_type_arg);
-
-            // Validate and process custom upload
-            if !cli.sp && !cli.tl {
-                error!("Custom upload (-c/--custom-cat-type) requires either --SP or --TL to be specified.");
-                return Ok(()); // Exit cleanly
-            }
-
-            if category_type_arg == "0700" || category_type_arg == "0720" || category_type_arg == "0740" || category_type_arg == "0741" {
-                info!("Detected eBook upload mode with argument: {}", category_type_arg);
-            
-                // Assuming `config` and `seedpool_config` are already initialized
-                if let Err(e) = utils::process_ebook_upload(input_path_str, &main_config, &seedpool_config, Some(&category_type_arg), cli.dry_run) {
-                    error!("Error processing eBook upload: {}", e);
-                } else {
-                    info!("Successfully processed eBook upload.");
-                }
-                return Ok(()); // Exit after eBook upload
-            }
-
-            if category_type_arg == "0742" {
-                info!("Detected Newspaper upload mode with argument: {}", category_type_arg);
-
-                if let Err(e) = utils::process_newspaper_upload(input_path_str, &main_config, &seedpool_config, cli.dry_run) {
-                    error!("Error processing Newspaper upload: {}", e);
-                } else {
-                    info!("Successfully processed Newspaper upload.");
-                }
-                return Ok(()); // Exit after Newspaper upload
-            }
-
-            if category_type_arg == "0921" {
-                info!("Detected Audiobook upload mode with argument: {}", category_type_arg);
-
-                if let Err(e) = trackers::seedpool::process_audiobook_upload(
-                    input_path_str,
-                    &main_config,
-                    &seedpool_config,
-                    &mkbrr_path,
-                    &mediainfo_path,
-                    cli.dry_run,
-                ) {
-                    error!("Error processing Audiobook upload: {}", e);
-                } else {
-                    info!("Successfully processed Audiobook upload.");
-                }
-                return Ok(()); // Exit after Audiobook upload
-            }            
-
-            let category_id: u32 = category_type_arg[0..2].parse()?;
-            let type_id: u32 = category_type_arg[2..4].parse()?;
-            info!("Parsed Category ID: {}, Type ID: {}", category_id, type_id);
-
-            let target_tracker = if cli.sp {
-                "seedpool"
-            } else {
-                "torrentleech"
-            };
-
-            let base_name = input_path
-                .file_name()
-                .ok_or("Could not get filename from input path")?
-                .to_string_lossy()
-                .to_string();
-
-            if category_type_arg == "0316" || category_type_arg == "0415" || category_type_arg == "0334" || category_type_arg == "0333" {
-                let igdb_client_id = &main_config.general.igdb_client_id;
-                let igdb_bearer_token = &main_config.general.igdb_bearer_token;
-                let _game_title = &sanitize_game_title(&base_name);
-
-                if let Err(e) = process_game_upload(
-                    input_path_str,
-                    category_id,
-                    type_id,
-                    &main_config.qbittorrent,
-                    &main_config.deluge,
-                    target_tracker,
-                    Some(&seedpool_config),
-                    Some(&torrentleech_config),
-                    mkbrr_path.to_str().ok_or("Invalid mkbrr_path")?,
-                    &main_config.paths,
-                    igdb_client_id,
-                    igdb_bearer_token,
-                    cli.dry_run,
-                ) {
-                    error!("Error processing game upload for {}: {}", target_tracker, e);
-                } else {
-                    info!("Successfully processed game upload for {}.", target_tracker);
-                }
-                return Ok(());
-            }            
-            
-            if category_type_arg.len() != 4 || !category_type_arg.chars().all(|c| c.is_digit(10)) {
-                error!("Invalid format for custom upload specifier (-c/--custom-cat-type). Expected 4 digits (e.g., 0819), got: {}", category_type_arg);
-                return Ok(()); // Exit cleanly
-            }
-
-            let category_id: u32 = category_type_arg[0..2].parse()?;
-            let type_id: u32 = category_type_arg[2..4].parse()?;
-            info!("Parsed Category ID: {}, Type ID: {}", category_id, type_id);
-
-            let target_tracker = if cli.sp {
-                "seedpool"
-            } else {
-                "torrentleech"
-            };
-
-            if let Err(e) = process_custom_upload(
-                input_path_str,
-                category_id,
-                type_id,
-                &main_config.qbittorrent,
-                &main_config.deluge,
-                target_tracker,
-                Some(&seedpool_config),
-                Some(&torrentleech_config),
-                mkbrr_path.to_str().ok_or("Invalid mkbrr_path")?,
-                &main_config.paths,
-                cli.dry_run,
-            ) {
-                error!("Error processing custom upload for {}: {}", target_tracker, e);
-            } else {
-                info!("Successfully processed custom upload for {}.", target_tracker);
-            }
-            return Ok(()); // Exit after custom upload
-        }
-
-        // --- Standard Upload Mode ---
-        info!("Running in standard upload mode.");
-        let imgbb_api_key = main_config.imgbb.as_ref().map(|imgbb| imgbb.imgbb_api_key.clone());
-        debug!("Loaded imgbb API key: {:?}", imgbb_api_key);
-        
-        // Pass the imgbb_api_key to the relevant functions
-        if cli.sp {
-            if let Err(e) = trackers::seedpool::process_seedpool_release(
-                input_path_str,
-                &sanitized_name,
-                &mut main_config,
-                &seedpool_config,
-                &ffmpeg_path,
-                &ffprobe_path,
-                &mkbrr_path,
-                &mediainfo_path,
-                imgbb_api_key.as_deref(), // Pass the imgbb API key
-                cli.dry_run,
-            ) {
-                error!("Error processing Seedpool release: {}", e);
-                errors.push(format!("Seedpool: {}", e));
-            } else {
-                info!("Successfully processed Seedpool release for: {}", sanitized_name);
-            }
-        }
-
-        if cli.tl {
-            if let Err(e) = trackers::torrentleech::process_torrentleech_release(
-                input_path_str,
-                &sanitized_name,
-                &mut main_config,
-                &torrentleech_config,
-                &mkbrr_path,
-                &mediainfo_path,
-                cli.dry_run,
-            ) {
-                error!("Error processing TorrentLeech release: {}", e);
-                errors.push(format!("TorrentLeech: {}", e));
-            } else {
-                info!("Successfully processed TorrentLeech release for: {}", sanitized_name);
-            }
-        }
-
+        // Validate tracker selection
         if !cli.sp && !cli.tl {
-            error!("No tracker specified for upload (--SP or --TL required for standard upload).");
+            error!("No tracker specified. Please use --SP for Seedpool or --TL for TorrentLeech.");
+            return Ok(());
         }
 
-        if errors.is_empty() {
-            info!("Upload completed successfully for all specified trackers.");
+        // --- Process Upload with New Media Detection System ---
+        if let Some(category_type_arg) = cli.custom_cat_type {
+            // User provided a 4-digit code with -c flag
+            info!("Processing with provided category/type code: {}", category_type_arg);
+            
+            // Parse the 4-digit code (for now, we'll use Seedpool's parser since it's the most complete)
+            let torrent_info = match parse_category_type_argument(&category_type_arg) {
+                Ok(info) => {
+                    info!("Parsed torrent classification: {}", info.description());
+                    info
+                }
+                Err(e) => {
+                    error!("Failed to parse category/type argument: {}", e);
+                    println!("\n{}", e);
+                    print_available_categories_and_types();
+                    return Ok(());
+                }
+            };
+            
+            // Process with the explicit torrent info
+            if let Err(e) = process_upload_with_info(
+                input_path_str,
+                &torrent_info,
+                &main_config,
+                cli.dry_run,
+            ) {
+                error!("Error processing upload: {}", e);
+                return Err(e.into());
+            }
         } else {
-            error!("Upload completed with errors: {:?}", errors);
+            // No -c flag provided, use auto-detection
+            info!("No category/type code provided, using auto-detection for: {}", input_path_str);
+            
+            if let Err(e) = process_upload(
+                input_path_str,
+                None,
+                &main_config,
+                cli.dry_run,
+            ) {
+                error!("Error processing upload: {}", e);
+                return Err(e.into());
+            }
         }
+        
+        info!("Upload processing completed successfully.");
     } else {
         error!("Usage error: An input path is required unless using --sync.");
         Cli::command().print_help()?;

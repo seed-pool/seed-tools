@@ -5,20 +5,35 @@ use std::process::Command;
 use std::os::unix::fs::PermissionsExt;
 use std::fs;
 use chrono::NaiveTime;
-use crate::{Config, Client, SeedpoolConfig, Tracker};
+use crate::trackers::common::Tracker;
+use seed_tools::types::{Config, SeedpoolConfig};
 use seed_tools::utils::{
     generate_release_name, extract_rar_archives, upload_to_cdn, extract_torrent_id, find_video_files, create_torrent, generate_mediainfo, generate_sample,
-    generate_screenshots, fetch_tmdb_id, generate_screenshots_imgbb, default_non_video_description, fetch_external_ids, generate_description,
+    generate_screenshots, fetch_tmdb_id, default_non_video_description, fetch_external_ids, generate_description,
     add_torrent_to_all_qbittorrent_instances,
 };
 use regex::Regex;
 use log::{info, warn};
 use seed_tools::types::PreflightCheckResult;
+use seed_tools::definitions::seedpool::{check_seedpool_dupes, create_seedpool_mappings};
+use seed_tools::tracker_mappings::TrackerMappingEngine;
+use walkdir::WalkDir;
+
 pub struct Seedpool {
     pub upload_url: String,
     pub api_key: String,
+    pub mapping_engine: TrackerMappingEngine,
 }
-use walkdir::WalkDir;
+
+impl Seedpool {
+    pub fn new(upload_url: String, api_key: String) -> Self {
+        Self {
+            upload_url,
+            api_key,
+            mapping_engine: create_seedpool_mappings(),
+        }
+    }
+}
 
 pub fn process_seedpool_release(
     input_path: &str,
@@ -81,23 +96,24 @@ pub fn process_seedpool_release(
         .to_string_lossy()
         .to_string();
 
-    // Check for duplicates
-    if let Some(download_link) = check_seedpool_dupes(&base_name, &seedpool_config.general.api_key)? {
-        log::info!("Duplicate found for '{}'. Downloading and adding to clients.", base_name);
+    // Check for duplicates if enabled
+    if seedpool_config.settings.dupe_checks {
+        if let Some(download_link) = check_seedpool_dupes(&base_name, &seedpool_config.general.api_key)? {
+            log::info!("Duplicate found for '{}'. Downloading and adding to clients.", base_name);
 
-        let client = reqwest::blocking::Client::new();
-        let response = client
-            .get(&download_link)
-            .send()
-            .map_err(|e| format!("Failed to download torrent: {}", e))?;
-        if !response.status().is_success() {
-            return Err(format!("Failed to download torrent. HTTP Status: {}", response.status()));
-        }
+            let client = reqwest::blocking::Client::new();
+            let response = client
+                .get(&download_link)
+                .send()
+                .map_err(|e| format!("Failed to download torrent: {}", e))?;
+            if !response.status().is_success() {
+                return Err(format!("Failed to download torrent. HTTP Status: {}", response.status()));
+            }
 
-        let torrent_data = response
-            .bytes()
-            .map_err(|e| format!("Failed to read torrent data: {}", e))?;
-        let torrent_file_path = Path::new(&config.paths.torrent_dir).join(format!("{}.torrent", base_name));
+            let torrent_data = response
+                .bytes()
+                .map_err(|e| format!("Failed to read torrent data: {}", e))?;
+            let torrent_file_path = Path::new(&config.paths.torrent_dir).join(format!("{}.torrent", base_name));
         std::fs::write(&torrent_file_path, &torrent_data)
             .map_err(|e| format!("Failed to save torrent file: {}", e))?;
 
@@ -113,6 +129,9 @@ pub fn process_seedpool_release(
             info!("[DRY RUN] Skipping adding duplicate torrent to qBittorrent/Deluge clients");
         }
         return Ok(());
+        }
+    } else {
+        log::info!("Duplicate checks are disabled for Seedpool. Skipping duplicate check.");
     }
 
     // Adjust episode number if none
@@ -155,58 +174,27 @@ pub fn process_seedpool_release(
     )?];
 
     // Generate mediainfo
-    let mediainfo_output = generate_mediainfo(&video_files[0], &mediainfo_path.to_string_lossy())?;
+    let mediainfo_output = generate_mediainfo(&video_files[0], config)?;
 
-    // Generate screenshots using ImgBB or Seedpool CDN
-    let (screenshots, thumbnails) = if let Some(api_key) = imgbb_api_key {
-        if api_key.is_empty() {
-            log::warn!("ImgBB API key is empty. Falling back to Seedpool CDN for screenshots.");
-            match generate_screenshots(
-                &video_files[0],
-                &config.paths.screenshots_dir,
-                &_ffmpeg_path.to_string_lossy(),
-                &_ffprobe_path.to_string_lossy(),
-                &seedpool_config.screenshots.remote_path,
-                &seedpool_config.screenshots.image_path,
-                &_sanitized_name,
-                dry_run,
-            ) {
-                Ok(res) => res,
-                Err(e) => {
-                    log::error!("Screenshot generation failed: {e}. Proceeding without screenshots.");
-                    (vec![], vec![])
-                }
-            }
-        } else {
-            match generate_screenshots_imgbb(&video_files[0], _ffmpeg_path, _ffprobe_path, api_key, dry_run) {
-                Ok(res) => res,
-                Err(e) => {
-                    log::error!("Screenshot generation failed: {e}. Proceeding without screenshots.");
-                    (vec![], vec![])
-                }
-            }
-        }
-    } else {
-        match generate_screenshots(
-            &video_files[0],
-            &config.paths.screenshots_dir,
-            &_ffmpeg_path.to_string_lossy(),
-            &_ffprobe_path.to_string_lossy(),
-            &seedpool_config.screenshots.remote_path,
-            &seedpool_config.screenshots.image_path,
-            &_sanitized_name,
-            dry_run,
-        ) {
-            Ok(res) => res,
-            Err(e) => {
-                log::error!("Screenshot generation failed: {e}. Proceeding without screenshots.");
-                (vec![], vec![])
-            }
-        }
-    };
+    // Generate screenshots using the consolidated function
+    let (screenshots, thumbnails) = generate_screenshots(
+        &video_files[0],
+        config,
+        seedpool_config.screenshots.imgbb_api_key.as_deref().or(imgbb_api_key),
+        Some(&seedpool_config.screenshots.remote_path),
+        Some(&seedpool_config.screenshots.image_path),
+        &_sanitized_name,
+        dry_run,
+    )?;
 
     // Generate sample, but always proceed if it fails
-    let sample_url = if imgbb_api_key.is_some() && !imgbb_api_key.unwrap_or("").is_empty() {
+    // Skip sample generation if using ImgBB
+    let using_imgbb = seedpool_config.screenshots.imgbb_api_key.as_deref()
+        .or(imgbb_api_key)
+        .map(|key| !key.is_empty())
+        .unwrap_or(false);
+    
+    let sample_url = if using_imgbb {
         String::new()
     } else {
         match generate_sample(
@@ -247,6 +235,7 @@ pub fn process_seedpool_release(
     Seedpool {
         upload_url: seedpool_config.settings.upload_url.clone(),
         api_key: seedpool_config.general.api_key.clone(),
+        mapping_engine: create_seedpool_mappings(),
     }
     .upload(
         &torrent_files[0],
@@ -938,69 +927,6 @@ impl Tracker for Seedpool {
     }
 }
 
-fn check_seedpool_dupes(
-    name: &str,
-    seedpool_api_key: &str,
-) -> Result<Option<String>, String> {
-    let client = Client::new();
-
-    info!("Checking Seedpool for existing torrent with name: '{}'", name);
-
-    // Use the full input name as the search term
-    let search_term = generate_release_name(name);
-    info!("Search Term for Seedpool Query: '{}'", search_term);
-
-    let query_url = format!(
-        "https://seedpool.org/api/torrents/filter?name={}&perPage=10&sortField=name&sortDirection=asc&api_token={}",
-        urlencoding::encode(&search_term),
-        seedpool_api_key
-    );
-
-    info!("Seedpool API Query URL: {}", query_url);
-
-    let search_response = client
-        .get(&query_url)
-        .send()
-        .map_err(|e| format!("Failed to query Seedpool for '{}': {}", name, e))?;
-
-    if !search_response.status().is_success() {
-        return Err(format!(
-            "Failed to query Seedpool for '{}': HTTP {}",
-            name,
-            search_response.status()
-        ));
-    }
-
-    let raw_response = search_response.text().unwrap_or_else(|_| "Failed to read response body".to_string());
-    info!("Seedpool API Response: {}", raw_response);
-
-    let search_results: serde_json::Value = serde_json::from_str(&raw_response)
-        .map_err(|e| format!("Failed to parse Seedpool response for '{}': {}", name, e))?;
-
-    let empty_vec = vec![];
-    let data = search_results["data"].as_array().unwrap_or(&empty_vec);
-
-    for result in data {
-        if let Some(attributes) = result["attributes"].as_object() {
-            if let Some(result_title) = attributes.get("name").and_then(|t| t.as_str()) {
-                info!("Checking result title: {}", result_title);
-
-                // Check for an exact match with the search term
-                if result_title == search_term {
-                    if let Some(download_link) = attributes.get("download_link").and_then(|d| d.as_str()) {
-                        info!("Duplicate found for '{}'. Download link: {}", name, download_link);
-                        return Ok(Some(download_link.to_string()));
-                    }
-                } else {
-                    info!("Skipping result due to mismatched title: {}", result_title);
-                }
-            }
-        }
-    }
-
-    info!("No duplicate found for '{}'.", name);
-    Ok(None)
-}
 
 pub fn preflight_check(
     input_path: &str,
@@ -1154,41 +1080,42 @@ pub fn preflight_check(
         .to_string_lossy()
         .to_string();
     let generated_release_name = generate_release_name(&base_name);
-    // Step 3: Check for duplicates
-    if let Some(download_link) = check_seedpool_dupes(&title, &seedpool_config.general.api_key)? {
-        log::info!("Duplicate found for '{}'. Downloading and adding to clients.", title);
+    // Step 3: Check for duplicates if enabled
+    if seedpool_config.settings.dupe_checks {
+        if let Some(download_link) = check_seedpool_dupes(&title, &seedpool_config.general.api_key)? {
+            log::info!("Duplicate found for '{}'. Downloading and adding to clients.", title);
 
-        let client = reqwest::blocking::Client::new();
-        let response = client
-            .get(&download_link)
-            .send()
-            .map_err(|e| format!("Failed to download torrent: {}", e))?;
-        if !response.status().is_success() {
-            return Err(format!("Failed to download torrent. HTTP Status: {}", response.status()));
-        }
+            let client = reqwest::blocking::Client::new();
+            let response = client
+                .get(&download_link)
+                .send()
+                .map_err(|e| format!("Failed to download torrent: {}", e))?;
+            if !response.status().is_success() {
+                return Err(format!("Failed to download torrent. HTTP Status: {}", response.status()));
+            }
 
-        let torrent_data = response
-            .bytes()
-            .map_err(|e| format!("Failed to read torrent data: {}", e))?;
-        let torrent_file_path = Path::new(&config.paths.torrent_dir).join(format!("{}.torrent", title));
-        std::fs::write(&torrent_file_path, &torrent_data)
-            .map_err(|e| format!("Failed to save torrent file: {}", e))?;
+            let torrent_data = response
+                .bytes()
+                .map_err(|e| format!("Failed to read torrent data: {}", e))?;
+            let torrent_file_path = Path::new(&config.paths.torrent_dir).join(format!("{}.torrent", title));
+            std::fs::write(&torrent_file_path, &torrent_data)
+                .map_err(|e| format!("Failed to save torrent file: {}", e))?;
 
-        // This is a preflight check, don't add to torrent clients
-        // if !dry_run {
-        //     add_torrent_to_all_qbittorrent_instances(
-        //         &[torrent_file_path.to_string_lossy().to_string()],
-        //         &config.qbittorrent,
-        //         &config.deluge,
-        //         input_path,
-        //         &config.paths,
-        //     )?;
-        // }
+            // This is a preflight check, don't add to torrent clients
+            // if !dry_run {
+            //     add_torrent_to_all_qbittorrent_instances(
+            //         &[torrent_file_path.to_string_lossy().to_string()],
+            //         &config.qbittorrent,
+            //         &config.deluge,
+            //         input_path,
+            //         &config.paths,
+            //     )?;
+            // }
 
-        return Ok(PreflightCheckResult {
-            release_name: title.clone(),
-            generated_release_name: generated_release_name.clone(),
-            dupe_check: "FAIL".to_string(),
+            return Ok(PreflightCheckResult {
+                release_name: title.clone(),
+                generated_release_name: generated_release_name.clone(),
+                dupe_check: "FAIL".to_string(),
             tmdb_id: 0,
             imdb_id: None,
             tvdb_id: None,
@@ -1199,6 +1126,9 @@ pub fn preflight_check(
             season_number,
             episode_number,
         });
+        }
+    } else {
+        log::info!("Duplicate checks are disabled for Seedpool. Skipping duplicate check for preflight.");
     }
 
     // Step 4: Fetch TMDB ID
@@ -1227,7 +1157,7 @@ pub fn preflight_check(
     let mut audio_languages = Vec::new();
     let (video_files, _) = find_video_files(input_path, &config.paths, &seedpool_config.settings)?;
     for video_file in &video_files {
-        let mediainfo_output = generate_mediainfo(video_file, &mediainfo_path.to_string_lossy())?;
+        let mediainfo_output = generate_mediainfo(video_file, config)?;
         audio_languages.extend(extract_audio_languages(&mediainfo_output));
     }
     log::debug!("Audio languages: {:?}", audio_languages);
@@ -1362,7 +1292,7 @@ pub fn process_audiobook_upload(
     // 2. Run mediainfo and parse fields
     let mediainfo_output = generate_mediainfo(
         first_audio_file.to_str().unwrap(),
-        &mediainfo_path.to_string_lossy(),
+        config,
     )?;
     let metadata = parse_mediainfo_output(&mediainfo_output);
 
