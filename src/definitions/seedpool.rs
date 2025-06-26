@@ -466,119 +466,6 @@ impl super::TorrentInfo for SeedpoolTorrentInfo {
 use reqwest::blocking::Client;
 use log::info;
 use crate::utils::generate_release_name;
-use crate::tracker_mappings::{CategoryMapping, TrackerMappingEngine};
-use crate::mapping;
-
-/// Create the complete mapping array for Seedpool
-pub fn create_seedpool_mappings() -> TrackerMappingEngine {
-    let mappings = vec![
-        // Video Category Mappings
-        // Movies with specific source types
-        mapping!("VideoCategory::Movie", "VideoSourceType::UHDBluRay" => 1, 7),  // Movie category, UHD BluRay type
-        mapping!("VideoCategory::Movie", "VideoSourceType::BluRay" => 1, 8),     // Movie category, BluRay type
-        mapping!("VideoCategory::Movie", "VideoSourceType::Remux" => 1, 2),      // Movie category, Remux type
-        mapping!("VideoCategory::Movie", "VideoSourceType::WebDL" => 1, 4),      // Movie category, WebDL type
-        mapping!("VideoCategory::Movie", "VideoSourceType::WebRip" => 1, 5),     // Movie category, WebRip type
-        mapping!("VideoCategory::Movie", "VideoSourceType::HDTV" => 1, 6),       // Movie category, HDTV type
-        mapping!("VideoCategory::Movie", "VideoSourceType::DVD" => 1, 22),       // Movie category, Movie type (default)
-        mapping!("VideoCategory::Movie", "VideoSourceType::Encode" => 1, 3),     // Movie category, Encode type
-        mapping!("VideoCategory::Movie" => 1, 22),                               // Movie category, Movie type (default)
-        
-        // TV Shows with specific source types
-        ///Season packs will map to boxset automatically, should we map it some other way?
-        mapping!("VideoCategory::TvShow", "VideoSourceType::BluRay" => 2, 8),    // TV Show category, BluRay type
-        mapping!("VideoCategory::TvShow", "VideoSourceType::WebDL" => 2, 4),     // TV Show category, WebDL type
-        mapping!("VideoCategory::TvShow", "VideoSourceType::WebRip" => 2, 5),    // TV Show category, WebRip type
-        mapping!("VideoCategory::TvShow", "VideoSourceType::HDTV" => 2, 6),      // TV Show category, HDTV type
-        mapping!("VideoCategory::TvShow", "VideoSourceType::DVD" => 2, 8),       // TV Show category, BluRay type
-        mapping!("VideoCategory::TvShow" => 2, 24),                              // TV Show category, TvShow type (default)
-        
-        
-        // Other video categories
-        mapping!("VideoCategory::Anime" => 6, 27),                               // Anime category, Anime type
-        mapping!("VideoCategory::Sports" => 8, 19),                              // Sports category, Sports type
-        mapping!("VideoCategory::Documentary" => 1, 22),                         // Movie category, Movie type
-        mapping!("VideoCategory::Concert" => 5, 10),                             // Music category, Web type
-        mapping!("VideoCategory::Unknown" => 11, 17),                            // Other category, Other type
-        
-        // Audio Category Mappings
-        // Music with source types
-        // Audio will only put flace ext in flac and mp3 in mp3 regardless of these mappings unless it is a PACK
-        mapping!("AudioCategory::Album", "AudioSourceType::CD" => 5, 11),        // Music category, FLAC type
-        mapping!("AudioCategory::Album", "AudioSourceType::Web" => 5, 10),       // Music category, Web type
-        mapping!("AudioCategory::Album", "AudioSourceType::Vinyl" => 5, 11),     // Music category, FLAC type
-        mapping!("AudioCategory::Album" => 5, 11),                               // Music category, FLAC type (default)
-        
-        mapping!("AudioCategory::Single", "AudioSourceType::CD" => 5, 11),       // Music category, FLAC type
-        mapping!("AudioCategory::Single", "AudioSourceType::Web" => 5, 13),      // Music category, MP3 type
-        mapping!("AudioCategory::Single" => 5, 13),                              // Music category, MP3 type (default)
-        
-        mapping!("AudioCategory::EP", "AudioSourceType::CD" => 5, 11),           // Music category, FLAC type
-        mapping!("AudioCategory::EP", "AudioSourceType::Web" => 5, 13),          // Music category, MP3 type
-        mapping!("AudioCategory::EP" => 5, 13),                                  // Music category, MP3 type (default)
-        
-        mapping!("AudioCategory::Compilation" => 5, 29),                         // Music category, MusicPack type
-        mapping!("AudioCategory::Soundtrack" => 5, 10),                          // Music category, Web type
-        mapping!("AudioCategory::Live" => 5, 10),                                // Music category, Web type
-        mapping!("AudioCategory::Bootleg" => 5, 10),                             // Music category, Web type
-        mapping!("AudioCategory::Mix" => 5, 29),                                 // Music category, MusicPack type
-        mapping!("AudioCategory::Demo" => 5, 10),                                // Music category, Web type
-        mapping!("AudioCategory::Remix" => 5, 29),                               // Music category, MusicPack type
-        mapping!("AudioCategory::Classical" => 5, 11),                           // Music category, FLAC type
-
-        // Audiobooks
-        mapping!("AudioCategory::Audiobook" => 9, 21),                           // Audiobook category, Audiobook type
-        mapping!("AudioCategory::Podcast" => 9, 21),                             // Audiobook category, Audiobook type
-        
-        // Ebook Category Mappings
-        // Filetype routing supersedes this mapping
-        mapping!("EbookCategory::Novel" => 7, 20),                               // E-Book category, EPub type
-        mapping!("EbookCategory::Comic" => 7, 9),                                // E-Book category, EBook type
-        mapping!("EbookCategory::Magazine" => 7, 9),                             // E-Book category, EBook type
-        mapping!("EbookCategory::Newspaper" => 7, 9),                            // E-Book category, EBook type
-        mapping!("EbookCategory::Technical" => 15, 32),                          // Education category, Education type
-        mapping!("EbookCategory::Educational" => 15, 32),                        // Education category, Education type
-        mapping!("EbookCategory::Biography" => 7, 20),                           // E-Book category, EPub type
-        mapping!("EbookCategory::History" => 7, 20),                             // E-Book category, EPub type
-        mapping!("EbookCategory::Science" => 15, 32),                            // Education category, Education type
-        mapping!("EbookCategory::Religion" => 7, 9),                             // E-Book category, EBook type
-        mapping!("EbookCategory::Cookbook" => 12, 17),                           // Hobby category, Other type
-        mapping!("EbookCategory::Travel" => 12, 17),                             // Hobby category, Other type
-        mapping!("EbookCategory::Children" => 7, 20),                            // E-Book category, EPub type
-        mapping!("EbookCategory::Unknown" => 7, 9),                              // E-Book category, EBook type
-        
-        // Game Category Mappings
-        mapping!("GameCategory::PCGame" => 14, 16),                              // Games category, PCGame type
-        mapping!("GameCategory::PS4Game" => 14, 28),                             // Games category, PS4 type
-        mapping!("GameCategory::PS5Game" => 14, 28),                             // Games category, PS4 type (no PS5 yet)
-        mapping!("GameCategory::XboxGame" => 14, 35),                            // Games category, Xbox type
-        mapping!("GameCategory::NintendoSwitch" => 14, 15),                      // Games category, NSWGame type
-        mapping!("GameCategory::Mobile" => 14, 17),                              // Games category, Other type
-        mapping!("GameCategory::Retro" => 19, 17),                               // Games category, Other type
-        mapping!("GameCategory::VR" => 14, 16),                                  // Games category, PCGame type
-        mapping!("GameCategory::Unknown" => 14, 17),                             // Games category, Other type
-        
-        // Hobby Category Mappings
-        mapping!("HobbyCategory::Documents" => 12, 17),                          // Hobby category, Other type
-        mapping!("HobbyCategory::Images" => 12, 17),                             // Hobby category, Other type
-        mapping!("HobbyCategory::CAD3D" => 12, 38),                              // Hobby category, 3D Print Type
-        mapping!("HobbyCategory::Archives" => 12, 17),                           // Hobby category, Other type
-        mapping!("HobbyCategory::DataFiles" => 12, 17),                          // Hobby category, Other type
-        mapping!("HobbyCategory::Fonts" => 12, 17),                              // Hobby category, Other type
-        mapping!("HobbyCategory::Collection" => 12, 17),                         // Hobby category, Other type
-        mapping!("HobbyCategory::Tutorial" => 15, 32),                           // Education category, Education type
-        mapping!("HobbyCategory::Template" => 12, 17),                           // Hobby category, Other type
-        mapping!("HobbyCategory::Resource" => 12, 17),                           // Hobby category, Other type
-        mapping!("HobbyCategory::Unknown" => 11, 17),                            // Other category, Other type
-    ];
-    
-    TrackerMappingEngine::new(mappings)
-}
-
-/// Get the default category and type for unmapped content
-pub fn get_seedpool_defaults() -> (u32, Option<u32>) {
-    (11, Some(17)) // Other category, Other type
-}
 
 /// Create field mappings for Seedpool upload forms
 pub fn create_seedpool_field_mapping() -> crate::upload::TrackerFieldMapping {
@@ -696,4 +583,90 @@ pub fn check_seedpool_dupes(
 
     info!("No duplicate found for '{}'.", name);
     Ok(None)
+}
+
+/// Create a SeedpoolTorrentInfo from media classification strings
+pub fn create_torrent_info_from_media_strings(
+    media_category: Option<&str>,
+    media_source_type: Option<&str>,
+) -> Result<SeedpoolTorrentInfo, String> {
+    // Parse category and type from strings like "VideoCategory::Movie" and "VideoSourceType::BluRay"
+    let (category, torrent_type) = match media_category {
+        Some(cat_str) if cat_str.starts_with("VideoCategory::") => {
+            let cat_name = cat_str.strip_prefix("VideoCategory::").unwrap();
+            let seedpool_cat = match cat_name {
+                "Movie" => SeedpoolCategory::Movie,
+                "TvShow" => SeedpoolCategory::TvShow,
+                "Anime" => SeedpoolCategory::Anime,
+                "Sports" => SeedpoolCategory::Sports,
+                "Documentary" => SeedpoolCategory::Movie, // Map to Movie
+                "Concert" => SeedpoolCategory::Music,      // Map to Music
+                _ => SeedpoolCategory::Other,
+            };
+            
+            let seedpool_type = if let Some(type_str) = media_source_type {
+                if let Some(type_name) = type_str.strip_prefix("VideoSourceType::") {
+                    match (cat_name, type_name) {
+                        ("Movie", "UHDBluRay") => SeedpoolType::UHDBluRay,
+                        (_, "BluRay") => SeedpoolType::BluRay,
+                        (_, "Remux") => SeedpoolType::Remux,
+                        (_, "WebDL") => SeedpoolType::WebDL,
+                        (_, "WebRip") => SeedpoolType::WebRip,
+                        (_, "HDTV") => SeedpoolType::HDTV,
+                        (_, "DVD") => SeedpoolType::BluRay, // Map DVD to BluRay
+                        (_, "Encode") => SeedpoolType::Encode,
+                        ("Movie", _) => SeedpoolType::Movie,
+                        ("TvShow", _) => SeedpoolType::TvShow,
+                        _ => SeedpoolType::Other,
+                    }
+                } else {
+                    SeedpoolType::Other
+                }
+            } else {
+                match cat_name {
+                    "Movie" => SeedpoolType::Movie,
+                    "TvShow" => SeedpoolType::TvShow,
+                    "Anime" => SeedpoolType::Anime,
+                    "Sports" => SeedpoolType::Sports,
+                    _ => SeedpoolType::Other,
+                }
+            };
+            
+            (seedpool_cat, seedpool_type)
+        }
+        Some(cat_str) if cat_str.starts_with("AudioCategory::") => {
+            let cat_name = cat_str.strip_prefix("AudioCategory::").unwrap();
+            match cat_name {
+                "Audiobook" | "Podcast" => (SeedpoolCategory::Audiobook, SeedpoolType::Audiobook),
+                _ => (SeedpoolCategory::Music, SeedpoolType::Flac), // Default music to Flac
+            }
+        }
+        Some(cat_str) if cat_str.starts_with("EbookCategory::") => {
+            let cat_name = cat_str.strip_prefix("EbookCategory::").unwrap();
+            match cat_name {
+                "Technical" | "Educational" | "Science" => (SeedpoolCategory::Education, SeedpoolType::Education),
+                "Cookbook" | "Travel" => (SeedpoolCategory::Hobby, SeedpoolType::Other),
+                "Comic" => (SeedpoolCategory::Ebook, SeedpoolType::EBook),
+                _ => (SeedpoolCategory::Ebook, SeedpoolType::EPub), // Default to EPub
+            }
+        }
+        Some(cat_str) if cat_str.starts_with("GameCategory::") => {
+            let cat_name = cat_str.strip_prefix("GameCategory::").unwrap();
+            match cat_name {
+                "Retro" => (SeedpoolCategory::Retro, SeedpoolType::Other),
+                _ => (SeedpoolCategory::Games, SeedpoolType::PCGame), // Default to PC
+            }
+        }
+        Some(cat_str) if cat_str.starts_with("HobbyCategory::") => {
+            let cat_name = cat_str.strip_prefix("HobbyCategory::").unwrap();
+            match cat_name {
+                "Tutorial" => (SeedpoolCategory::Education, SeedpoolType::Education),
+                "CAD3D" => (SeedpoolCategory::Hobby, SeedpoolType::Print3D),
+                _ => (SeedpoolCategory::Hobby, SeedpoolType::Other),
+            }
+        }
+        _ => (SeedpoolCategory::Other, SeedpoolType::Other),
+    };
+    
+    Ok(SeedpoolTorrentInfo::new(category, torrent_type))
 }

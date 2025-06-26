@@ -9,6 +9,16 @@ settings:
   upload_url: "https://www.torrentleech.org/torrents/upload/apiupload"
   custom_description: |
     This description is rendered for you via config.yaml and is sponsored by Shrek.
+  
+  # Upload component settings
+  enable_mediainfo: true
+  enable_screenshots: false  # TorrentLeech doesn't usually need screenshots
+  enable_sample: false       # TorrentLeech doesn't usually need samples
+  enable_nfo: true
+  enable_tmdb: true
+  enable_torrent_creation: true
+  enable_duplicate_check: true
+  screenshot_count: 0        # Not used since screenshots are disabled
 
 categories:
   Anime: 34

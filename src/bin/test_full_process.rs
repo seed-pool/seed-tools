@@ -2,7 +2,6 @@ use seed_tools::media::process::{process_upload, process_upload_with_info};
 use seed_tools::types::Config;
 use clap::{Parser, ValueEnum};
 use std::fs;
-use std::path::Path;
 use rand::Rng;
 use std::io::Write;
 use simplelog::LevelFilter;

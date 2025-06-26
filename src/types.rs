@@ -507,6 +507,7 @@ pub struct FastResumeData {
 #[derive(Deserialize, Clone)]
 pub struct GeneralConfig {
     pub tmdb_api_key: String,
+    pub youtube_api_key: Option<String>,
     pub igdb_client_id: String,
     pub igdb_bearer_token: String,
 }
@@ -692,6 +693,7 @@ impl Default for Config {
         Config {
             general: GeneralConfig {
                 tmdb_api_key: String::new(),
+                youtube_api_key: None,
                 igdb_client_id: String::new(),
                 igdb_bearer_token: String::new(),
             },
@@ -825,6 +827,7 @@ pub enum UploadComponent {
         year: Option<String>,
     },
     Metadata(HashMap<String, String>), // Flexible metadata storage
+    Trailer { url: String, platform: String }, // YouTube/Vimeo trailer URL
 }
 
 impl ArchiveType {

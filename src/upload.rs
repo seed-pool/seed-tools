@@ -5,7 +5,7 @@ use std::fs;
 use crate::types::{MediaType, Config, UploadComponent};
 use crate::utils::{
     find_and_read_nfo, generate_mediainfo, check_all_duplicates,
-    fetch_tmdb_id, upload_to_cdn
+    fetch_tmdb_id, fetch_youtube_trailer
 };
 use log::{info, warn, error};
 
@@ -397,6 +397,31 @@ impl UploadBuilder {
                                     year: metadata.year.map(|y| y.to_string()),
                                 }
                             );
+                            
+                            // Fetch YouTube trailer if YouTube API key is configured
+                            if let Some(ref youtube_api_key) = self.config.general.youtube_api_key {
+                                if !youtube_api_key.is_empty() {
+                                    match fetch_youtube_trailer(
+                                        &metadata.title,
+                                        metadata.year.map(|y| y.to_string()).as_deref(),
+                                        youtube_api_key
+                                    ) {
+                                    Ok(trailer_url) => {
+                                        info!("Found YouTube trailer: {}", trailer_url);
+                                        self.components.insert(
+                                            "trailer".to_string(),
+                                            UploadComponent::Trailer { 
+                                                url: trailer_url, 
+                                                platform: "YouTube".to_string() 
+                                            }
+                                        );
+                                    }
+                                        Err(e) => {
+                                            info!("No YouTube trailer found: {}", e);
+                                        }
+                                    }
+                                }
+                            }
                         }
                         Err(e) => warn!("Failed to fetch TMDB ID: {}", e),
                     }
@@ -766,6 +791,11 @@ impl UploadBuilder {
             builder = builder.sample(url, filename);
         }
         
+        // Add trailer if available
+        if let Some(UploadComponent::Trailer { url, platform }) = self.components.get("trailer") {
+            builder = builder.trailer(url, platform);
+        }
+        
         // Add any custom description from tracker config
         if let Some(UploadComponent::Metadata(metadata)) = self.components.get("tracker_config") {
             if let Some(custom_desc) = metadata.get("custom_description") {
@@ -786,156 +816,10 @@ impl UploadBuilder {
     }
 }
 
-/// Helper function to create a video upload builder with sensible defaults
-/// Video uploads typically want: nfo, mediainfo, screenshots, sample, duplicate check, tmdb
-/// The actual inclusion of these components depends on tracker config settings
-pub fn create_video_upload(
-    input_path: &str, 
-    config: Arc<Config>,
-    metadata: crate::media::video::VideoMetadata,
-) -> UploadBuilder {
-    UploadBuilder::new(input_path, MediaType::Video(crate::types::VideoType::Mkv), config)
-        .with_extensions(crate::types::VideoType::all_extensions())
-        .with_video_metadata(metadata)
-        .with_nfo()
-        .with_mediainfo()
-        .with_screenshots(4)
-        .with_sample()
-        .with_duplicate_check()
-        .with_tmdb_lookup()
-}
 
-/// Helper function to create an ebook upload builder with sensible defaults
-/// Ebook uploads typically want: nfo, mediainfo, duplicate check
-/// Comics/magazines might also want screenshots (handled separately)
-/// The actual inclusion of these components depends on tracker config settings
-pub fn create_ebook_upload(
-    input_path: &str,
-    config: Arc<Config>,
-    title: &str,
-    author: Option<&str>,
-) -> UploadBuilder {
-    // Get all ebook extensions
-    let extensions: Vec<&str> = vec!["epub", "pdf", "cbz", "cbr", "mobi", "azw", "azw3", "lit", "pdb"];
-    
-    let mut builder = UploadBuilder::new(
-        input_path, 
-        MediaType::Ebook(crate::types::EbookType::Epub), 
-        config
-    )
-    .with_extensions(extensions)
-    .with_title_info(title, None::<String>)
-    .with_nfo()
-    .with_mediainfo()
-    .with_duplicate_check();
-    
-    // Add author to metadata if provided
-    if let Some(author) = author {
-        let mut metadata = HashMap::new();
-        metadata.insert("author".to_string(), author.to_string());
-        builder = builder.with_custom_component(
-            "metadata",
-            UploadComponent::Metadata(metadata)
-        );
-    }
-    
-    builder
-}
 
-/// Helper function to create a comic/magazine upload builder
-/// Comics and magazines typically want: nfo, mediainfo, duplicate check, screenshots
-/// The actual inclusion of these components depends on tracker config settings
-pub fn create_comic_upload(
-    input_path: &str,
-    config: Arc<Config>,
-    title: &str,
-    issue_number: Option<&str>,
-) -> UploadBuilder {
-    use crate::description::DescriptionConfig;
-    use crate::types::ImageLayout;
-    
-    // Configure description for comics/magazines
-    let mut desc_config = DescriptionConfig::default();
-    desc_config.image_layout = ImageLayout::TwoColumn; // Comics use 2 column layout
-    desc_config.max_images = 10; // Show more preview pages
-    desc_config.image_width = 350; // Smaller width for comic pages
-    
-    let mut builder = UploadBuilder::new(
-        input_path, 
-        MediaType::Ebook(crate::types::EbookType::Cbz), 
-        config
-    )
-    .with_extensions(vec!["cbz", "cbr"])
-    .with_title_info(title, None::<String>)
-    .with_description_config(desc_config)
-    .with_nfo()
-    .with_mediainfo()
-    .with_duplicate_check()
-    .with_screenshots(4); // Comics benefit from preview pages
-    
-    // Add issue metadata if provided
-    if let Some(issue) = issue_number {
-        let mut metadata = HashMap::new();
-        metadata.insert("issue".to_string(), issue.to_string());
-        builder = builder.with_custom_component(
-            "metadata",
-            UploadComponent::Metadata(metadata)
-        );
-    }
-    
-    builder
-}
 
-/// Helper function to create an audio upload builder
-/// Audio uploads typically want: nfo, mediainfo, duplicate check
-/// The actual inclusion of these components depends on tracker config settings
-pub fn create_audio_upload(
-    input_path: &str,
-    config: Arc<Config>,
-    album: &str,
-    artist: &str,
-    year: Option<&str>,
-) -> UploadBuilder {
-    let mut metadata = HashMap::new();
-    metadata.insert("album".to_string(), album.to_string());
-    metadata.insert("artist".to_string(), artist.to_string());
-    
-    UploadBuilder::new(
-        input_path,
-        MediaType::Audio(crate::types::AudioType::Flac),
-        config
-    )
-    .with_extensions(crate::types::AudioType::all_extensions())
-    .with_title_info(album, year)
-    .with_nfo()
-    .with_mediainfo()
-    .with_duplicate_check()
-    .with_custom_component("metadata", UploadComponent::Metadata(metadata))
-}
 
-/// Helper function to create a game upload builder
-/// Game uploads typically want: nfo, duplicate check
-/// Screenshots might be relevant for some games
-/// The actual inclusion of these components depends on tracker config settings
-pub fn create_game_upload(
-    input_path: &str,
-    config: Arc<Config>,
-    title: &str,
-    platform: &str,
-) -> UploadBuilder {
-    let mut metadata = HashMap::new();
-    metadata.insert("platform".to_string(), platform.to_string());
-    
-    UploadBuilder::new(
-        input_path,
-        MediaType::Game(crate::types::GameType::Directory),
-        config
-    )
-    .with_title_info(title, None::<String>)
-    .with_nfo()
-    .with_duplicate_check()
-    .with_custom_component("metadata", UploadComponent::Metadata(metadata))
-}
 
 /// Extension trait for UploadBuilder to add tracker-specific functionality
 /// 
@@ -1004,27 +888,6 @@ impl TrackerUploadExt for UploadBuilder {
     }
 }
 
-/// Process a cover image for ebooks/media
-pub fn process_cover_image(
-    builder: &mut UploadBuilder,
-    cover_path: &str,
-    upload_path: Option<&str>,
-    dry_run: bool,
-) -> Result<(), String> {
-    if let Some(upload_path) = upload_path {
-        if !dry_run {
-            // Upload the cover
-            upload_to_cdn(cover_path, upload_path)?;
-        }
-        
-        builder.components.insert(
-            "cover".to_string(),
-            UploadComponent::CoverImage(cover_path.to_string())
-        );
-    }
-    
-    Ok(())
-}
 
 /// Example of how to use UploadBuilder with automatic tracker detection
 /// 
@@ -1042,7 +905,6 @@ pub fn process_cover_image(
 /// 
 /// let upload_data = builder.build()?;
 /// ```
-pub fn example_usage() {}
 
 /// Result of an upload operation
 pub struct UploadResult {
@@ -1065,8 +927,6 @@ pub struct UploadProcessor {
     media_source_type: Option<String>,
     /// Field mapping override
     field_mapping: Option<TrackerFieldMapping>,
-    /// Mapping engine override
-    mapping_engine: Option<crate::tracker_mappings::TrackerMappingEngine>,
 }
 
 impl UploadProcessor {
@@ -1082,7 +942,6 @@ impl UploadProcessor {
             media_category: None,
             media_source_type: None,
             field_mapping: None,
-            mapping_engine: None,
         }
     }
     
@@ -1109,29 +968,19 @@ impl UploadProcessor {
         self
     }
     
-    /// Override mapping engine
-    pub fn with_mapping_engine(mut self, engine: crate::tracker_mappings::TrackerMappingEngine) -> Self {
-        self.mapping_engine = Some(engine);
-        self
-    }
     
     /// Process the upload to the active tracker
     pub fn process(self) -> Result<UploadResult, String> {
         // Determine active tracker and get its configuration
-        let (tracker_name, field_mapping, mapping_engine) = self.determine_active_tracker()?;
+        let (tracker_name, field_mapping) = self.determine_active_tracker()?;
         
         info!("Processing upload for tracker: {}", tracker_name);
         
-        // Use media classification if provided
-        let media_category = self.media_category.as_deref();
-        let media_type = self.media_source_type.as_deref();
-        
-        // Map internal categories/types to tracker-specific ones
-        let (tracker_category, tracker_type) = self.map_to_tracker_categories(
+        // Map media classification to tracker-specific codes
+        let (tracker_category, tracker_type) = self.map_to_tracker_codes(
             &tracker_name,
-            &mapping_engine,
-            media_category,
-            media_type,
+            self.media_category.as_deref(),
+            self.media_source_type.as_deref(),
         )?;
         
         // Build the form data based on tracker field mappings
@@ -1159,16 +1008,16 @@ impl UploadProcessor {
     }
     
     /// Determine which tracker is active and load its configuration
-    fn determine_active_tracker(&self) -> Result<(String, TrackerFieldMapping, crate::tracker_mappings::TrackerMappingEngine), String> {
+    fn determine_active_tracker(&self) -> Result<(String, TrackerFieldMapping), String> {
         // Use override mappings if provided
-        if let (Some(ref fm), Some(ref me)) = (&self.field_mapping, &self.mapping_engine) {
+        if let Some(ref fm) = &self.field_mapping {
             // Try to determine tracker from field mapping or default to seedpool
             let tracker_name = if fm.field_map.contains_key("descr") {
                 "torrentleech"
             } else {
                 "seedpool"
             };
-            return Ok((tracker_name.to_string(), fm.clone(), me.clone()));
+            return Ok((tracker_name.to_string(), fm.clone()));
         }
         
         // Load tracker configs and determine which is active
@@ -1181,7 +1030,6 @@ impl UploadProcessor {
             return Ok((
                 "seedpool".to_string(),
                 crate::definitions::seedpool::create_seedpool_field_mapping(),
-                crate::definitions::seedpool::create_seedpool_mappings(),
             ));
         }
         
@@ -1189,48 +1037,41 @@ impl UploadProcessor {
             return Ok((
                 "torrentleech".to_string(),
                 crate::definitions::torrentleech::create_torrentleech_field_mapping(),
-                crate::definitions::torrentleech::create_torrentleech_mappings(),
             ));
         }
         
         Err("No tracker is enabled in configuration".to_string())
     }
     
-    
-    /// Map internal categories/types to tracker-specific ones
-    fn map_to_tracker_categories(
+    /// Map media classification strings to tracker-specific category/type codes
+    fn map_to_tracker_codes(
         &self,
         tracker_name: &str,
-        engine: &crate::tracker_mappings::TrackerMappingEngine,
-        category: Option<&str>,
-        media_type: Option<&str>,
+        media_category: Option<&str>,
+        media_source_type: Option<&str>,
     ) -> Result<(u32, Option<u32>), String> {
-        if let (Some(cat), Some(typ)) = (category, media_type) {
-            // Try to find mapping with both category and type
-            if let Some((cat_id, type_id)) = engine.find_mapping(cat, Some(typ)) {
-                info!("Mapped {}:{} to category {} type {:?}", cat, typ, cat_id, type_id);
-                return Ok((cat_id, type_id));
+        match tracker_name {
+            "seedpool" => {
+                // Convert media strings to Seedpool TorrentInfo
+                let torrent_info = crate::definitions::seedpool::create_torrent_info_from_media_strings(
+                    media_category,
+                    media_source_type,
+                )?;
+                Ok((torrent_info.category_code() as u32, Some(torrent_info.type_code() as u32)))
+            }
+            "torrentleech" => {
+                // Convert media strings to TorrentLeech category
+                let category_code = crate::definitions::torrentleech::get_category_from_media_strings(
+                    media_category,
+                    media_source_type,
+                )?;
+                Ok((category_code as u32, None))
+            }
+            _ => {
+                // Default fallback
+                Ok((0, None))
             }
         }
-        
-        if let Some(cat) = category {
-            // Try category-only mapping
-            if let Some((cat_id, type_id)) = engine.find_mapping(cat, None) {
-                info!("Mapped {} to category {} type {:?}", cat, cat_id, type_id);
-                return Ok((cat_id, type_id));
-            }
-        }
-        
-        // Use defaults if no mapping found
-        let defaults = match tracker_name {
-            "seedpool" => crate::definitions::seedpool::get_seedpool_defaults(),
-            "torrentleech" => crate::definitions::torrentleech::get_torrentleech_defaults(),
-            _ => (11, Some(17)), // Generic other/other
-        };
-        
-        warn!("No mapping found for {:?}/{:?}, using defaults: {:?}", 
-              category, media_type, defaults);
-        Ok(defaults)
     }
     
     /// Build form data using field mappings

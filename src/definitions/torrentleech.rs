@@ -93,95 +93,7 @@ impl TorrentLeechCategory {
     }
 }
 
-use crate::tracker_mappings::{CategoryMapping, TrackerMappingEngine};
-use crate::mapping;
 
-/// Create the complete mapping array for TorrentLeech
-pub fn create_torrentleech_mappings() -> TrackerMappingEngine {
-    let mappings = vec![
-        // Video Category Mappings - TorrentLeech only uses category IDs
-        // Movies with quality distinctions
-        mapping!("VideoCategory::Movie", "VideoSourceType::UHDBluRay" => 47),  // Movies 4K
-        mapping!("VideoCategory::Movie", "VideoSourceType::BluRay" => 13),    // Movies BluRay
-        mapping!("VideoCategory::Movie", "VideoSourceType::DVD" => 12),       // Movies DVDRip
-        mapping!("VideoCategory::Movie", "VideoSourceType::WebDL" => 37),     // Movies Web-DL
-        mapping!("VideoCategory::Movie", "VideoSourceType::WebRip" => 37),    // Movies Web-DL
-        mapping!("VideoCategory::Movie", "VideoSourceType::HDTV" => 14),      // Movies HD
-        mapping!("VideoCategory::Movie", "VideoSourceType::Remux" => 13),     // Movies BluRay
-        mapping!("VideoCategory::Movie", "VideoSourceType::Encode" => 14),    // Movies HD
-        mapping!("VideoCategory::Movie" => 14),                               // Movies HD (default)
-        
-        // TV Shows
-        mapping!("VideoCategory::TvShow" => 32),                              // TV Shows
-        mapping!("VideoCategory::Sports" => 30),                              // TV Sports
-        mapping!("VideoCategory::Anime" => 34),                               // TV Animation
-        mapping!("VideoCategory::Documentary" => 32),                         // TV Shows
-        mapping!("VideoCategory::Concert" => 17),                             // Music
-        mapping!("VideoCategory::Unknown" => 0),                              // Other
-        
-        // Audio Category Mappings
-        mapping!("AudioCategory::Album" => 17),                               // Music
-        mapping!("AudioCategory::Single" => 17),                              // Music
-        mapping!("AudioCategory::EP" => 17),                                  // Music
-        mapping!("AudioCategory::Compilation" => 17),                         // Music
-        mapping!("AudioCategory::Soundtrack" => 17),                          // Music
-        mapping!("AudioCategory::Live" => 17),                                // Music
-        mapping!("AudioCategory::Bootleg" => 17),                             // Music
-        mapping!("AudioCategory::Mix" => 17),                                 // Music
-        mapping!("AudioCategory::Demo" => 17),                                // Music
-        mapping!("AudioCategory::Remix" => 17),                               // Music
-        mapping!("AudioCategory::Classical" => 17),                           // Music
-        mapping!("AudioCategory::Audiobook" => 35),                           // Audio Books
-        mapping!("AudioCategory::Podcast" => 35),                             // Audio Books
-        
-        // Ebook Category Mappings
-        mapping!("EbookCategory::Novel" => 45),                               // E-Books
-        mapping!("EbookCategory::Comic" => 45),                               // E-Books
-        mapping!("EbookCategory::Magazine" => 45),                            // E-Books
-        mapping!("EbookCategory::Newspaper" => 45),                           // E-Books
-        mapping!("EbookCategory::Technical" => 45),                           // E-Books
-        mapping!("EbookCategory::Educational" => 45),                         // E-Books
-        mapping!("EbookCategory::Biography" => 45),                           // E-Books
-        mapping!("EbookCategory::History" => 45),                             // E-Books
-        mapping!("EbookCategory::Science" => 45),                             // E-Books
-        mapping!("EbookCategory::Religion" => 45),                            // E-Books
-        mapping!("EbookCategory::Cookbook" => 45),                            // E-Books
-        mapping!("EbookCategory::Travel" => 45),                              // E-Books
-        mapping!("EbookCategory::Children" => 45),                            // E-Books
-        mapping!("EbookCategory::Unknown" => 45),                             // E-Books
-        
-        // Game Category Mappings
-        mapping!("GameCategory::PCGame" => 42),                               // Games
-        mapping!("GameCategory::PS4Game" => 40),                              // Games PS
-        mapping!("GameCategory::PS5Game" => 40),                              // Games PS
-        mapping!("GameCategory::XboxGame" => 41),                             // Games Xbox
-        mapping!("GameCategory::NintendoSwitch" => 39),                       // Games Nintendo
-        mapping!("GameCategory::Mobile" => 46),                               // Mobile
-        mapping!("GameCategory::Retro" => 42),                                // Games
-        mapping!("GameCategory::VR" => 42),                                   // Games
-        mapping!("GameCategory::Unknown" => 42),                              // Games
-        
-        // Hobby Category Mappings
-        mapping!("HobbyCategory::Documents" => 45),                           // E-Books
-        mapping!("HobbyCategory::Images" => 0),                               // Other
-        mapping!("HobbyCategory::CAD3D" => 0),                                // Other
-        mapping!("HobbyCategory::Archives" => 0),                             // Other
-        mapping!("HobbyCategory::DataFiles" => 0),                            // Other
-        mapping!("HobbyCategory::Fonts" => 0),                                // Other
-        mapping!("HobbyCategory::Collection" => 0),                           // Other
-        mapping!("HobbyCategory::Tutorial" => 45),                            // E-Books
-        mapping!("HobbyCategory::Template" => 0),                             // Other
-        mapping!("HobbyCategory::Resource" => 0),                             // Other
-        mapping!("HobbyCategory::Unknown" => 0),                              // Other
-    ];
-    
-    TrackerMappingEngine::new(mappings)
-}
-
-/// Get the default category for unmapped content
-pub fn get_torrentleech_defaults() -> (u32, Option<u32>) {
-    (0, None) // Other category, no type field
-}
 
 /// Create field mappings for TorrentLeech upload forms
 pub fn create_torrentleech_field_mapping() -> crate::upload::TrackerFieldMapping {
@@ -211,4 +123,60 @@ pub fn create_torrentleech_field_mapping() -> crate::upload::TrackerFieldMapping
         .add_optional("anonymous");
     
     mapping
+}
+
+/// Get TorrentLeech category code from media classification strings
+pub fn get_category_from_media_strings(
+    media_category: Option<&str>,
+    media_source_type: Option<&str>,
+) -> Result<u8, String> {
+    match media_category {
+        Some(cat_str) if cat_str.starts_with("VideoCategory::") => {
+            let cat_name = cat_str.strip_prefix("VideoCategory::").unwrap();
+            let source_name = media_source_type
+                .and_then(|s| s.strip_prefix("VideoSourceType::"))
+                .unwrap_or("");
+            
+            match (cat_name, source_name) {
+                ("Movie", "UHDBluRay") => Ok(47),          // Movies 4K
+                ("Movie", "BluRay") | ("Movie", "Remux") => Ok(13), // Movies BluRay
+                ("Movie", "DVD") => Ok(12),                // Movies DVDRip
+                ("Movie", "WebDL") | ("Movie", "WebRip") => Ok(37), // Movies Web-DL
+                ("Movie", _) => Ok(14),                    // Movies HD
+                ("TvShow", _) | ("Documentary", _) => Ok(32), // TV Shows
+                ("Sports", _) => Ok(30),                   // TV Sports
+                ("Anime", _) => Ok(34),                    // TV Animation
+                ("Concert", _) => Ok(17),                  // Music
+                _ => Ok(0),                                // Other
+            }
+        }
+        Some(cat_str) if cat_str.starts_with("AudioCategory::") => {
+            let cat_name = cat_str.strip_prefix("AudioCategory::").unwrap();
+            match cat_name {
+                "Audiobook" | "Podcast" => Ok(35), // Audio Books
+                _ => Ok(17),                       // Music
+            }
+        }
+        Some(cat_str) if cat_str.starts_with("EbookCategory::") => {
+            Ok(45) // All ebooks go to E-Books
+        }
+        Some(cat_str) if cat_str.starts_with("GameCategory::") => {
+            let cat_name = cat_str.strip_prefix("GameCategory::").unwrap();
+            match cat_name {
+                "PS4Game" | "PS5Game" => Ok(40),   // Games PS
+                "XboxGame" => Ok(41),              // Games Xbox
+                "NintendoSwitch" => Ok(39),        // Games Nintendo
+                "Mobile" => Ok(46),                // Mobile
+                _ => Ok(42),                       // Games (PC)
+            }
+        }
+        Some(cat_str) if cat_str.starts_with("HobbyCategory::") => {
+            let cat_name = cat_str.strip_prefix("HobbyCategory::").unwrap();
+            match cat_name {
+                "Documents" | "Tutorial" => Ok(45), // E-Books
+                _ => Ok(0),                        // Other
+            }
+        }
+        _ => Ok(0), // Other
+    }
 }

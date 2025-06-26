@@ -1,5 +1,5 @@
 use seed_tools::media::{auto_detect_content_type, DetectionResult};
-use seed_tools::types::{Config, AudioType, HobbyType, ContentCategory, ContentType};
+use seed_tools::types::{Config, ContentCategory, ContentType};
 use clap::{Parser, ValueEnum};
 use std::fs;
 use std::path::Path;
@@ -34,9 +34,6 @@ struct Args {
     #[arg(short = 'C', long, default_value = "config/config.yaml")]
     config: String,
     
-    /// Show tracker-specific mappings
-    #[arg(short = 't', long)]
-    show_tracker_mappings: bool,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -116,7 +113,6 @@ fn main() {
         Ok(_) => {
             log_println!(logger, "=== Test Process Classification Log ===");
             log_println!(logger, "Media type: {:?}", args.media_type);
-            log_println!(logger, "Show tracker mappings: {}", args.show_tracker_mappings);
             log_println!(logger, "");
         }
         Err(e) => {
@@ -141,9 +137,6 @@ fn main() {
     
     log_println!(logger, "Active tracker: {:?}", active_tracker);
     
-    // Load mapping engines
-    let seedpool_mappings = seed_tools::definitions::seedpool::create_seedpool_mappings();
-    let torrentleech_mappings = seed_tools::definitions::torrentleech::create_torrentleech_mappings();
     
     log_println!(logger, "");
     
@@ -209,22 +202,6 @@ fn main() {
                 let (category_str, source_str) = map_detection_to_classification(&detection);
                 log_println!(logger, "   Internal Classification: {} / {:?}", category_str, source_str);
                 
-                // Show tracker-specific mappings if requested
-                if args.show_tracker_mappings && active_tracker.is_some() {
-                    log_println!(logger, "");
-                    
-                    // Seedpool mapping
-                    if seedpool_config.as_ref().map(|c| c.general.enabled).unwrap_or(false) {
-                        log_println!(logger, "   Seedpool mapping:");
-                        show_tracker_mapping(&category_str, source_str.as_deref(), &seedpool_mappings, "seedpool", &mut logger);
-                    }
-                    
-                    // TorrentLeech mapping
-                    if torrentleech_config.as_ref().map(|c| c.general.enabled).unwrap_or(false) {
-                        log_println!(logger, "   TorrentLeech mapping:");
-                        show_tracker_mapping(&category_str, source_str.as_deref(), &torrentleech_mappings, "torrentleech", &mut logger);
-                    }
-                }
             }
             Err(e) => {
                 error_count += 1;
@@ -324,51 +301,6 @@ fn map_detection_to_classification(detection: &DetectionResult) -> (String, Opti
     }
 }
 
-fn show_tracker_mapping(
-    category: &str,
-    source_type: Option<&str>,
-    mapping_engine: &seed_tools::tracker_mappings::TrackerMappingEngine,
-    tracker_name: &str,
-    logger: &mut Logger
-) {
-    // Try to find mapping
-    if let Some((cat_id, type_id)) = mapping_engine.find_mapping(category, source_type) {
-        log_println!(logger, "     Category ID: {}", cat_id);
-        if let Some(tid) = type_id {
-            log_println!(logger, "     Type ID: {}", tid);
-        } else {
-            log_println!(logger, "     Type ID: None (tracker doesn't use types)");
-        }
-    } else {
-        // Try without source type
-        if source_type.is_some() {
-            if let Some((cat_id, type_id)) = mapping_engine.find_mapping(category, None) {
-                log_println!(logger, "     Category ID: {} (category-only match)", cat_id);
-                if let Some(tid) = type_id {
-                    log_println!(logger, "     Type ID: {}", tid);
-                }
-            } else {
-                log_println!(logger, "     No mapping found - would use defaults");
-                show_defaults(tracker_name, logger);
-            }
-        } else {
-            log_println!(logger, "     No mapping found - would use defaults");
-            show_defaults(tracker_name, logger);
-        }
-    }
-}
-
-fn show_defaults(tracker: &str, logger: &mut Logger) {
-    let (default_cat, default_type) = match tracker {
-        "seedpool" => seed_tools::definitions::seedpool::get_seedpool_defaults(),
-        "torrentleech" => seed_tools::definitions::torrentleech::get_torrentleech_defaults(),
-        _ => (11, Some(17)),
-    };
-    log_println!(logger, "     Default Category ID: {}", default_cat);
-    if let Some(dt) = default_type {
-        log_println!(logger, "     Default Type ID: {}", dt);
-    }
-}
 
 fn scan_directory(dir_path: &str, media_type: &MediaType) -> Result<Vec<String>, String> {
     let mut files = Vec::new();

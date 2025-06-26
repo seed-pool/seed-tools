@@ -389,15 +389,6 @@ fn looks_like_game_directory(path: &Path) -> bool {
     false
 }
 
-/// Check if this is an archive that needs extraction
-pub fn needs_extraction(game_file: &GameFile) -> bool {
-    game_file.game_type.is_archive()
-}
-
-/// Check if this is an executable installer
-pub fn is_installer(game_file: &GameFile) -> bool {
-    game_file.game_type.is_executable()
-}
 
 /// Convert GameFile to MediaFile
 pub fn to_media_file(game_file: &GameFile) -> MediaFile {

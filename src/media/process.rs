@@ -408,9 +408,9 @@ fn list_rar_contents(rar_path: &str) -> Result<Vec<ArchiveFileInfo>, String> {
 }
 
 /// List contents of a 7z archive (placeholder - requires external tool) 
-fn list_7z_contents(sevenZ_path: &str) -> Result<Vec<ArchiveFileInfo>, String> {
+fn list_7z_contents(seven_z_path: &str) -> Result<Vec<ArchiveFileInfo>, String> {
     // For now, return error as 7z support requires external tools
-    log::warn!("7z archive inspection not yet implemented: {}", sevenZ_path);
+    log::warn!("7z archive inspection not yet implemented: {}", seven_z_path);
     Err("7z archive inspection not yet implemented".to_string())
 }
 
@@ -502,11 +502,6 @@ fn detect_iso_from_filename(iso_path: &str) -> Result<DetectionResult, String> {
 }
 
 /// List contents of an ISO archive (placeholder)
-fn list_iso_contents(iso_path: &str) -> Result<Vec<ArchiveFileInfo>, String> {
-    // For now, return error as ISO support requires implementation
-    log::warn!("ISO archive content inspection not yet implemented: {}", iso_path);
-    Err("ISO archive content inspection not yet implemented".to_string())
-}
 
 /// Detect media type from file extension
 fn detect_media_type_from_extension(extension: &str) -> Result<MediaType, String> {

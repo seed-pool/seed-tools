@@ -1,40 +1,37 @@
 general:
-  tmdb_api_key: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-  igdb_client_id: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-  igdb_bearer_token: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  tmdb_api_key: "1501ee8a1e2f68bd09aeeace5f466acf"
+  igdb_client_id: "lhjnjn7iiyeyqoons4uv7n7zu0isbx"
+  igdb_bearer_token: "4pc5wo4oqqcntcmxa5bi3j11mjoaix"
 
 paths:
-  torrent_dir: "/home/user/seed-tools/torrents"
-  screenshots_dir: "/home/user/seed-tools/screenshots"
-  ffmpeg: "/home/user/seed-tools/bin/ffmpeg"
-  ffprobe: "/home/user/seed-tools/bin/ffprobe"
-  mkbrr: "/home/user/seed-tools/bin/mkbrr"
-  mediainfo: "/home/user/seed-tools/bin/mediainfo"
+  torrent_dir: "/mnt/c/Users/ashou/GitHub/seed-tools/torrents"
+  screenshots_dir: "/mnt/c/Users/ashou/GitHub/seed-tools/screenshots"
+  ffmpeg: "/mnt/c/Users/ashou/GitHub/seed-tools/bin/ffmpeg"
+  ffprobe: "/mnt/c/Users/ashou/GitHub/seed-tools/bin/ffprobe"
+  mkbrr: "/mnt/c/Users/ashou/GitHub/seed-tools/bin/mkbrr"
+  mediainfo: "/mnt/c/Users/ashou/GitHub/seed-tools/bin/mediainfo"
 
 qbittorrent:
-  - webui_url: "http://localhost:21540"
-    username: "user"
-    password: "xxxxxxxxxxxxxxxxxxxxxxx"
-    category: ""
-    default_save_path: "/home/user/files"
-    executable: "/usr/bin/qbittorrent-nox"
-    fastresumes: "/home/user/.local/share/qBittorrent/BT_backup"
+  - webui_url: "http://32.216.136.243:8080"
+    username: "thc"
+    password: "259242"
+    category: "TV"
+    default_save_path: "/home/thc/downloads"
+    executable: ""
+    fastresumes: "/home/thc/.local/share/qBittorrent/BT_backup"
 
-  - webui_url: "http://localhost:36518"
-    username: "xxxxxx"
-    password: "xxxxxxxxxxxxxxxxx"
+  - webui_url: ""
+    username: ""
+    password: ""
     category: ""
-    default_save_path: "/home/user/files"
-    executable: "/usr/bin/qbittorrent-nox"
-    fastresumes: "/home/user/.local/share/qBittorrent/BT_backup"
+    default_save_path: ""
+    executable: ""
+    fastresumes: ""
 
 deluge:
-    webui_url: "https://deluge.fastpanther.box.ca"
-    daemon_port: 19148
-    username: "user"
-    password: "xxxxxxxxxxxxxxxxx"
+    webui_url: ""
+    daemon_port: 24537
+    username: ""
+    password: ""
     label: ""
-    default_save_path: "/home/user/files"
-
-imgbb:
-  imgbb_api_key: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    default_save_path: ""

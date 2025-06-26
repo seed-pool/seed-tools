@@ -1,5 +1,4 @@
 use crate::types::{MediaFile, MediaType};
-use std::path::Path;
 
 use super::{audio, ebook, game, hobby, video};
 

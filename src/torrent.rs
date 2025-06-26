@@ -6,7 +6,7 @@ use log::{info, error};
 use reqwest::blocking::{multipart::Form, Client};
 use reqwest::blocking::ClientBuilder;
 use reqwest::cookie::Jar;
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::types::{QbittorrentConfig, DelugeConfig, PathsConfig};
 use crate::naming::generate_release_name;

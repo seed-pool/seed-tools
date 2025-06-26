@@ -572,7 +572,7 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
     }
 
     // Store archive files that will be extracted and deleted for later restoration
-    let mut backup_extracted_archive_buffers = Vec::new();
+    let backup_extracted_archive_buffers = Vec::new();
     
     // Extract any archives first using centralized extraction and get the processing path
     let processing_path = process_and_extract_archives(input_path)?;
@@ -1681,36 +1681,3 @@ pub fn classify_ebook_content(filename: &str, extension: &str) -> EbookMetadata 
     metadata
 }
 
-/// Process ebook files with enhanced categorization
-pub fn process_ebook_with_metadata(
-    input_path: &str,
-    config: &crate::types::Config,
-    dry_run: bool,
-) -> Result<(EbookFile, EbookMetadata), String> {
-    let ebook_files = process_ebook(input_path, config, dry_run)?;
-    
-    // For single file processing, we expect exactly one result
-    if ebook_files.len() != 1 {
-        return Err(format!(
-            "Expected single ebook file, found {} files", 
-            ebook_files.len()
-        ));
-    }
-    
-    let (ebook_file, metadata) = ebook_files.into_iter().next().unwrap();
-    
-    info!("Processed ebook: {} -> Category: {:?}, Format: {:?}", 
-          ebook_file.path.display(), metadata.category, metadata.format_type);
-    
-    Ok((ebook_file, metadata))
-}
-
-/// Get all ebook files with their metadata from a path
-pub fn get_ebook_files_with_metadata(
-    path: &str,
-    config: &crate::types::Config,
-    dry_run: bool,
-) -> Result<Vec<(EbookFile, EbookMetadata)>, String> {
-    // Simply use the new process_ebook function which already does everything
-    process_ebook(path, config, dry_run)
-}

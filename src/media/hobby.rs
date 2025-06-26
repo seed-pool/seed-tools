@@ -451,37 +451,7 @@ fn looks_like_hobby_collection(path: &Path) -> bool {
     file_count > 0 && hobby_file_count as f32 / file_count as f32 > 0.5
 }
 
-/// Check if this is an image file
-pub fn is_image_file(hobby_file: &HobbyFile) -> bool {
-    hobby_file.hobby_type.is_image()
-}
 
-/// Check if this is a document file
-pub fn is_document_file(hobby_file: &HobbyFile) -> bool {
-    hobby_file.hobby_type.is_document()
-}
-
-/// Group hobby files by type for better organization
-pub fn group_by_type(hobby_files: &[HobbyFile]) -> std::collections::HashMap<String, Vec<&HobbyFile>> {
-    let mut groups = std::collections::HashMap::new();
-    
-    for file in hobby_files {
-        let category = match &file.hobby_type {
-            HobbyType::Doc | HobbyType::Docx | HobbyType::Txt | HobbyType::Rtf => "Documents",
-            HobbyType::Jpg | HobbyType::Png | HobbyType::Gif | HobbyType::Bmp | 
-            HobbyType::Tiff | HobbyType::Svg => "Images",
-            HobbyType::Dwg | HobbyType::Dxf | HobbyType::Stl | HobbyType::Obj | HobbyType::Ply => "CAD/3D",
-            HobbyType::Zip | HobbyType::Rar | HobbyType::SevenZ => "Archives",
-            HobbyType::Csv | HobbyType::Json | HobbyType::Xml | HobbyType::Sql => "Data",
-            HobbyType::Ttf | HobbyType::Otf | HobbyType::Woff => "Fonts",
-            HobbyType::Directory => "Collections",
-        };
-        
-        groups.entry(category.to_string()).or_insert_with(Vec::new).push(file);
-    }
-    
-    groups
-}
 
 /// Convert HobbyFile to MediaFile
 pub fn to_media_file(hobby_file: &HobbyFile) -> MediaFile {

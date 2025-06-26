@@ -2,7 +2,6 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 use log::{info, error, debug, warn};
-use rand::Rng;
 use regex::Regex;
 
 use crate::types::{PathsConfig, VideoSettings, VideoFile, VideoType, MediaFile, MediaType, VideoCategory, VideoSourceType};
@@ -292,8 +291,7 @@ pub fn process_video(
     _config: &crate::types::Config,
     _dry_run: bool,
 ) -> Result<Vec<(VideoFile, VideoMetadata)>, String> {
-    use crate::utils::find_and_read_nfo;
-    
+        
     let path = Path::new(input_path);
     
     if !path.exists() {
@@ -399,10 +397,10 @@ pub fn process_video(
     
     // After we have the results, build the upload data if we have videos
     if !results.is_empty() {
-        use crate::upload::create_video_upload;
+        use crate::upload::UploadBuilder;
         use std::sync::Arc;
         
-        let (_video_file, metadata) = &results[0];
+        let (video_file, metadata) = &results[0];
         
         // Build upload data directly using UploadBuilder
         use crate::description::DescriptionConfig;
@@ -413,12 +411,20 @@ pub fn process_video(
         desc_config.image_layout = ImageLayout::Grid2x2; // Videos use 2x2 grid for screenshots
         desc_config.max_images = 8;
         
-        let _upload_data = create_video_upload(
+        let _upload_data = UploadBuilder::new(
             &processing_path,
-            Arc::new((*_config).clone()),
-            metadata.clone()
+            MediaType::Video(video_file.video_type.clone()),
+            Arc::new((*_config).clone())
         )
+        .with_extensions(VideoType::all_extensions())
+        .with_video_metadata(metadata.clone())
         .with_description_config(desc_config)
+        .with_nfo()
+        .with_mediainfo()
+        .with_screenshots(4)
+        .with_sample()
+        .with_duplicate_check()
+        .with_tmdb_lookup()
         .dry_run(_dry_run)
         .build()?;
         
@@ -706,60 +712,4 @@ fn clean_title(title: &str) -> String {
     // Only clean up extra whitespace, preserve all technical indicators
     let whitespace_regex = Regex::new(r"\s+").unwrap();
     whitespace_regex.replace_all(&cleaned, " ").trim().to_string()
-}
-
-/// Process video files with enhanced categorization
-pub fn process_video_with_metadata(
-    input_path: &str,
-    config: &crate::types::Config,
-    dry_run: bool,
-) -> Result<(VideoFile, VideoMetadata), String> {
-    let results = process_video(input_path, config, dry_run)?;
-    
-    // For single file processing, return the first result
-    if results.len() == 1 {
-        Ok(results.into_iter().next().unwrap())
-    } else if results.is_empty() {
-        Err("No video files found".to_string())
-    } else {
-        // Return the first valid video file
-        Ok(results.into_iter().next().unwrap())
-    }
-}
-
-
-/// Test function to verify video classification behavior
-pub fn test_video_classification() {
-    let test_cases = vec![
-        // TV Shows
-        "The.Show.S01E05.1080p.BluRay.x264-GROUP",
-        "Another.Series.S02E12.HDTV.x265-TEAM", 
-        "Anime.Show.S01E01.WEB-DL.1080p.x264-SUB",
-        "Sports.Match.2023.12.25.HDTV.720p-SPORTS",
-        "Documentary.Series.S01.Complete.1080p.WEB-DL-DOC",
-        
-        // Movies
-        "The.Movie.2023.1080p.BluRay.x264-GROUP",
-        "Action.Film.2022.4K.UHD.BluRay.x265-TEAM",
-        "Horror.Movie.1999.720p.WEB-DL.h264-WEB",
-        
-        // Edge cases
-        "Random.File.Without.Patterns.mkv",
-        "Just.A.Title.mp4",
-    ];
-    
-    println!("=== Video Classification Test Results ===");
-    for filename in test_cases {
-        let metadata = classify_video_content(filename);
-        println!("File: {}", filename);
-        println!("  Title: '{}'", metadata.title);
-        println!("  Category: {:?}", metadata.category);
-        println!("  Source: {:?}", metadata.source_type);
-        println!("  Season: {:?}, Episode: {:?}", metadata.season, metadata.episode);
-        println!("  Year: {:?}", metadata.year);
-        println!("  Resolution: {:?}", metadata.resolution);
-        println!("  Codec: {:?}", metadata.codec);
-        println!("  Boxset: {}, Dated TV: {}", metadata.is_boxset, metadata.is_dated_tv);
-        println!("---");
-    }
 }

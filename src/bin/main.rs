@@ -6,18 +6,13 @@ use log::{info, error, debug, LevelFilter};
 use simplelog::{Config as SimpleLogConfig, CombinedLogger, WriteLogger};
 use std::error::Error;
 use seed_tools::utils::{generate_release_name, validate_file_path};
-use seed_tools::types::{Config, SeedpoolConfig, TorrentLeechConfig, QbittorrentConfig, DelugeConfig};
+use seed_tools::types::{Config, SeedpoolConfig, TorrentLeechConfig};
 use seed_tools::definitions::seedpool::{SeedpoolTorrentInfo, parse_seedpool_category_type, print_seedpool_categories_and_types};
 use seed_tools::sync;
 use seed_tools::irc::launch_irc_client;
-use trackers::seedpool::preflight_check;
 use seed_tools::ui;
 use seed_tools::media::process::{process_upload, process_upload_with_info};
-mod trackers {
-    pub mod seedpool;
-    pub mod torrentleech;
-    pub mod common;
-}
+use seed_tools::preflight::{preflight_check, print_preflight_results};
 use std::fs::OpenOptions;
 use clap::{Parser, CommandFactory};
 
@@ -90,7 +85,7 @@ struct Cli {
     #[arg(long, conflicts_with_all = ["sync", "sp", "tl", "custom_cat_type", "ui"])]
     irc: bool, // Add the `irc` argument
 
-    #[arg(long, conflicts_with_all = ["sync", "sp", "tl", "custom_cat_type"])]
+    #[arg(long, conflicts_with_all = ["sync", "sp", "tl", "custom_cat_type"], requires = "input_path")]
     pre: bool, // Add the `pre` argument
 
     #[arg(long, help = "Enable dry-run mode - simulate uploads without actually uploading")]
@@ -183,58 +178,40 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let torrentleech_config_path_str = torrentleech_config_path.to_str()
         .ok_or_else(|| format!("Invalid non-UTF8 path for torrentleech config: {:?}", torrentleech_config_path))?;
 
-    let mut main_config: Config = load_yaml_config::<Config>(main_config_path_str)
+    let main_config: Config = load_yaml_config::<Config>(main_config_path_str)
         .map_err(|e| format!("Failed to load main config: {}", e))?;
     let seedpool_config: SeedpoolConfig = load_yaml_config(seedpool_config_path_str)
         .map_err(|e| format!("Failed to load seedpool config: {}", e))?;
-    let torrentleech_config: TorrentLeechConfig = load_yaml_config(torrentleech_config_path_str)
+    let _torrentleech_config: TorrentLeechConfig = load_yaml_config(torrentleech_config_path_str)
         .map_err(|e| format!("Failed to load torrentleech config: {}", e))?;
     info!("Configurations loaded.");
 
     if cli.pre {
-        info!("Running pre-flight check...");
-        if let Some(input_path) = cli.input_path {
-            let input_path_str = input_path.to_str().ok_or("Invalid input path string")?;
-            info!("Input path for pre-flight check: {}", input_path_str);
-    
-            match preflight_check(
-                input_path_str,
-                &main_config,
-                &seedpool_config,
-                &ffmpeg_path,
-                &ffprobe_path,
-                &mediainfo_path,
-            ) {
-                Ok(result) => {
-                    println!("Pre-flight Check Results:");
-                    println!("Title: {}", result.release_name);
-                    println!("Release Name: {}", result.generated_release_name);
-                    println!("Dupe Check: {}", result.dupe_check);
-                    println!("Release Type: {}", result.release_type); // New line
-                    println!(
-                        "Season Number: {}",
-                        result.season_number.map_or("N/A".to_string(), |s| s.to_string())
-                    ); // New line
-                    println!(
-                        "Episode Number: {}",
-                        result.episode_number.map_or("N/A".to_string(), |e| e.to_string())
-                    ); // New line
-                    println!("TMDB ID: {}", result.tmdb_id);
-                    println!("IMDb ID: {}", result.imdb_id.unwrap_or_else(|| "N/A".to_string()));
-                    println!("TVDB ID: {}", result.tvdb_id.map_or("N/A".to_string(), |id| id.to_string()));
-                    println!("Excluded Files: {}", result.excluded_files);
-                    println!("Audio Languages: {:?}", result.audio_languages);
-                }
-                Err(e) => {
-                    error!("Pre-flight check failed: {}", e);
-                    println!("Pre-flight check failed: {}", e);
-                }
-            }
-        } else {
-            error!("No input path provided for pre-flight check.");
-            println!("Error: No input path provided for pre-flight check.");
+        info!("Running preflight check mode...");
+        
+        // Require input path for preflight check
+        if cli.input_path.is_none() {
+            error!("Input path is required for preflight check.");
+            println!("Error: Please provide an input path for the preflight check.");
+            return Ok(());
         }
-        return Ok(()); // Exit after running pre-flight check
+        
+        let input_path = cli.input_path.unwrap();
+        let input_path_str = input_path.to_str().ok_or("Invalid input path string")?;
+        
+        // Run the preflight check
+        match preflight_check(input_path_str, &main_config, cli.dry_run) {
+            Ok(result) => {
+                // Print the results
+                print_preflight_results(&result);
+                return Ok(());
+            }
+            Err(e) => {
+                error!("Preflight check failed: {}", e);
+                println!("Error during preflight check: {}", e);
+                return Err(e.into());
+            }
+        }
     }
 
     // --- Handle Sync Mode ---

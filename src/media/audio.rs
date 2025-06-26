@@ -296,10 +296,6 @@ pub fn detect_audio_files(path: &str) -> Result<Vec<AudioFile>, String> {
     Ok(audio_files)
 }
 
-/// Check if this is a lossless audio collection
-pub fn is_lossless_collection(audio_files: &[AudioFile]) -> bool {
-    !audio_files.is_empty() && audio_files.iter().all(|f| f.audio_type.is_lossless())
-}
 
 /// Convert AudioFile to MediaFile
 pub fn to_media_file(audio_file: &AudioFile) -> MediaFile {
@@ -310,23 +306,6 @@ pub fn to_media_file(audio_file: &AudioFile) -> MediaFile {
 }
 
 /// Process audio files with enhanced categorization
-pub fn process_audio_with_metadata(
-    input_path: &str,
-    config: &crate::types::Config,
-    dry_run: bool,
-) -> Result<(AudioFile, AudioMetadata), String> {
-    let results = process_audio(input_path, config, dry_run)?;
-    
-    // For single file processing, return the first result
-    if results.len() == 1 {
-        Ok(results.into_iter().next().unwrap())
-    } else if results.is_empty() {
-        Err("No audio files found".to_string())
-    } else {
-        // Return the first valid audio file
-        Ok(results.into_iter().next().unwrap())
-    }
-}
 
 /// Classify audio content based on filename and folder patterns
 pub fn classify_audio_content(path: &Path, audio_type: &AudioType) -> AudioMetadata {
@@ -354,7 +333,7 @@ pub fn classify_audio_content(path: &Path, audio_type: &AudioType) -> AudioMetad
     // Initialize regex patterns
     let year_regex = Regex::new(r"\b(19|20)\d{2}\b").unwrap();
     let track_regex = Regex::new(r"^(\d{1,2})[\s\-._]").unwrap();
-    let disc_regex = Regex::new(r"(?i)\b(?:CD|Disc)[\s_-]?(\d+)\b").unwrap();
+    let _disc_regex = Regex::new(r"(?i)\b(?:CD|Disc)[\s_-]?(\d+)\b").unwrap();
     let catalog_regex = Regex::new(r"\[([A-Z]{2,}[\-\s]?\d{3,}[A-Z0-9\-]*)\]").unwrap();
     let bit_depth_regex = Regex::new(r"\b(16|24|32)[\s\-]?bit\b").unwrap();
     let sample_rate_regex = Regex::new(r"\b(\d{2,3})[\s\-]?khz\b").unwrap();

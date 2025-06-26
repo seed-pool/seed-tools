@@ -3,14 +3,28 @@ general:
   username: "username"
   passkey: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
   api_key: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-
+ 
 settings:
   stripshit_from_videos: true
   announce_url: "https://seedpool.org/announce/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
   upload_url: "https://seedpool.org/api/torrents/upload?api_token=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  # Optional: Enable/disable duplicate checks (defaults to true)
+  # dupe_checks: true
   custom_description: |
     This description is rendered for you via config.yaml and is sponsored by Shrek.
+  
+  # Upload component settings (all default to true except torrent_creation)
+  enable_mediainfo: true
+  enable_screenshots: true
+  enable_sample: true
+  enable_nfo: true
+  enable_tmdb: true
+  enable_torrent_creation: true  # Set to true to create torrents
+  enable_duplicate_check: true
+  screenshot_count: 4
 
 screenshots:
   remote_path: "seedpool@xxxxxxxxxxxxxxxxxxxxxxxx"
   image_path: "https://cdn.seedpool.org"
+  # Optional: Add ImgBB API key here to use ImgBB instead of CDN
+  # imgbb_api_key: "your_imgbb_api_key_here"
