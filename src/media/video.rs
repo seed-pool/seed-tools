@@ -228,7 +228,7 @@ pub fn get_video_duration(video_file: &str, ffprobe_path: &str) -> Result<f64, S
 
 pub fn default_non_video_description() -> String {
     format!(
-        "[b][size=12][color=#757575]Created with mkbrr, ffmpeg, and mediainfo. Posted to this fine tracker with seed-tools.[/color][/size][/b]
+        "[b][size=12][color=#757575]Created with mkbrr, ffmpeg, and mediainfo. Posted to this fine tracker with seedbrr.[/color][/size][/b]
         
         [url=https://github.com/seed-pool/seed-tools][img]https://cdn.seedpool.org/sp.png[/img][/url]  \
         [url=https://github.com/autobrr/mkbrr][img]https://cdn.seedpool.org/mkbrr.png[/img][/url]  \
@@ -285,6 +285,54 @@ pub fn generate_description(
 
 
 
+/// Recursively process a directory for video files
+fn process_directory_recursive(
+    dir: &Path,
+    results: &mut Vec<(VideoFile, VideoMetadata)>,
+    rejected_files: &mut Vec<String>,
+) -> Result<(), String> {
+    for entry in fs::read_dir(dir)
+        .map_err(|e| format!("Failed to read directory {:?}: {}", dir, e))? 
+    {
+        let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+        let entry_path = entry.path();
+        
+        if entry_path.is_dir() {
+            // Recursively process subdirectories
+            process_directory_recursive(&entry_path, results, rejected_files)?;
+        } else if entry_path.is_file() {
+            if let Some(extension) = entry_path.extension().and_then(|ext| ext.to_str()) {
+                if let Some(video_type) = VideoType::from_extension(extension) {
+                    let video_file = VideoFile {
+                        path: entry_path.clone(),
+                        video_type,
+                    };
+                    
+                    let filename = entry_path.file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("");
+                    
+                    // Pass the full path for classification
+                    let metadata = classify_video_content(entry_path.to_str().unwrap_or(filename));
+                    
+                    if metadata.category == VideoCategory::Unknown {
+                        rejected_files.push(filename.to_string());
+                        warn!("Rejected video file with unknown category: {}", filename);
+                        continue;
+                    }
+                    
+                    info!("Processed video: {} -> Category: {:?}, Source: {:?}", 
+                          filename, metadata.category, metadata.source_type);
+                    
+                    results.push((video_file, metadata));
+                }
+            }
+        }
+    }
+    
+    Ok(())
+}
+
 /// Process video file(s) from a path (file or directory) and classify content
 pub fn process_video(
     input_path: &str,
@@ -327,7 +375,8 @@ pub fn process_video(
             .and_then(|name| name.to_str())
             .unwrap_or("");
         
-        let metadata = classify_video_content(filename);
+        // Pass the full path for classification
+        let metadata = classify_video_content(path.to_str().unwrap_or(filename));
         
         if metadata.category == VideoCategory::Unknown {
             return Err(format!(
@@ -339,41 +388,8 @@ pub fn process_video(
         results.push((video_file, metadata));
         
     } else if path.is_dir() {
-        // Handle directory - process all video files (including extracted ones)
-        for entry in fs::read_dir(path)
-            .map_err(|e| format!("Failed to read directory: {}", e))? 
-        {
-            let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
-            let file_path = entry.path();
-            
-            if file_path.is_file() {
-                if let Some(extension) = file_path.extension().and_then(|ext| ext.to_str()) {
-                    if let Some(video_type) = VideoType::from_extension(extension) {
-                        let video_file = VideoFile {
-                            path: file_path.clone(),
-                            video_type,
-                        };
-                        
-                        let filename = file_path.file_name()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or("");
-                        
-                        let metadata = classify_video_content(filename);
-                        
-                        if metadata.category == VideoCategory::Unknown {
-                            rejected_files.push(filename.to_string());
-                            warn!("Rejected video file with unknown category: {}", filename);
-                            continue;
-                        }
-                        
-                        info!("Processed video: {} -> Category: {:?}, Source: {:?}", 
-                              filename, metadata.category, metadata.source_type);
-                        
-                        results.push((video_file, metadata));
-                    }
-                }
-            }
-        }
+        // Handle directory - recursively process all video files
+        process_directory_recursive(path, &mut results, &mut rejected_files)?;
         
         if results.is_empty() {
             if !rejected_files.is_empty() {
@@ -468,41 +484,34 @@ pub fn process_video(
 /// Detect video files in a path (without classification)
 pub fn detect_video_files(path: &str) -> Result<Vec<VideoFile>, String> {
     let mut video_files = Vec::new();
-    let search_path = Path::new(path);
-    
-    if search_path.is_file() {
-        let extension = search_path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .ok_or_else(|| "Could not determine file extension".to_string())?;
+    detect_video_files_recursive(Path::new(path), &mut video_files)?;
+    Ok(video_files)
+}
 
-        if let Some(video_type) = VideoType::from_extension(extension) {
-            video_files.push(VideoFile {
-                path: search_path.to_path_buf(),
-                video_type,
-            });
+/// Recursively search for video files in a directory tree
+fn detect_video_files_recursive(path: &Path, video_files: &mut Vec<VideoFile>) -> Result<(), String> {
+    if path.is_file() {
+        if let Some(extension) = path.extension().and_then(|ext| ext.to_str()) {
+            if let Some(video_type) = VideoType::from_extension(extension) {
+                video_files.push(VideoFile {
+                    path: path.to_path_buf(),
+                    video_type,
+                });
+            }
         }
-    } else if search_path.is_dir() {
-        for entry in fs::read_dir(search_path)
-            .map_err(|e| format!("Failed to read directory: {}", e))? 
+    } else if path.is_dir() {
+        for entry in fs::read_dir(path)
+            .map_err(|e| format!("Failed to read directory {:?}: {}", path, e))? 
         {
             let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
-            let file_path = entry.path();
+            let entry_path = entry.path();
             
-            if file_path.is_file() {
-                if let Some(extension) = file_path.extension().and_then(|ext| ext.to_str()) {
-                    if let Some(video_type) = VideoType::from_extension(extension) {
-                        video_files.push(VideoFile {
-                            path: file_path,
-                            video_type,
-                        });
-                    }
-                }
-            }
+            // Recursively process subdirectories and files
+            detect_video_files_recursive(&entry_path, video_files)?;
         }
     }
     
-    Ok(video_files)
+    Ok(())
 }
 
 /// Convert VideoFile to MediaFile
@@ -515,8 +524,25 @@ pub fn to_media_file(video_file: &VideoFile) -> MediaFile {
 
 /// Classify video content based on filename patterns
 /// Enhanced version of determine_release_type_and_title from seedpool.rs
-pub fn classify_video_content(filename: &str) -> VideoMetadata {
+pub fn classify_video_content(path: &str) -> VideoMetadata {
     let mut metadata = VideoMetadata::default();
+    
+    // Determine what to classify - prioritize directory name for directories
+    let path_obj = Path::new(path);
+    let filename_str = if path_obj.is_dir() {
+        // Use directory name for classification
+        path_obj.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string()
+    } else {
+        // Use filename for single files
+        path_obj.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string()
+    };
+    let filename = filename_str.as_str();
     
     // Initialize regex patterns (enhanced from seedpool.rs)
     let season_episode_regex = Regex::new(r"(?i)S(\d{1,2})E(\d{1,3})").unwrap();
@@ -576,6 +602,8 @@ pub fn classify_video_content(filename: &str) -> VideoMetadata {
         debug!("Matched Sxx pattern: {:?}", captures);
         metadata.category = VideoCategory::TvShow;
         metadata.season = captures.get(1).and_then(|m| m.as_str().parse::<u32>().ok());
+        metadata.episode = Some(0);  // Season pack has no specific episode
+        metadata.is_boxset = true;   // Season-only pattern indicates a boxset/season pack
         metadata.title = extract_title_before_pattern(filename, &season_only_regex);
     } else if boxset_regex.is_match(filename) {
         debug!("Matched boxset keywords in filename: {}", filename);
@@ -652,7 +680,10 @@ pub fn classify_video_content(filename: &str) -> VideoMetadata {
     }
     
     // 3. Determine source type (priority order matters)
-    if iso_regex.is_match(filename) || full_disc_regex.is_match(filename) {
+    // First check if this is a boxset/season pack
+    if metadata.is_boxset {
+        metadata.source_type = VideoSourceType::SeasonPack;
+    } else if iso_regex.is_match(filename) || full_disc_regex.is_match(filename) {
         metadata.source_type = VideoSourceType::FullDisc;
     } else if uhd_bluray_regex.is_match(filename) {
         metadata.source_type = VideoSourceType::UHDBluRay;
@@ -675,7 +706,11 @@ pub fn classify_video_content(filename: &str) -> VideoMetadata {
     } else if upscale_regex.is_match(filename) {
         metadata.source_type = VideoSourceType::Upscale;
     } else if encode_regex.is_match(filename) {
+        // Only set to Encode if no other source type was detected
         metadata.source_type = VideoSourceType::Encode;
+    } else {
+        // Default to Unknown if nothing matches
+        metadata.source_type = VideoSourceType::Unknown;
     }
     
     // 4. Extract resolution
@@ -686,6 +721,45 @@ pub fn classify_video_content(filename: &str) -> VideoMetadata {
     // 5. Extract codec
     if let Some(codec_match) = codec_regex.find(filename) {
         metadata.codec = Some(codec_match.as_str().to_uppercase());
+    }
+    
+    // Additional check for directories - see if it's a season pack
+    if path_obj.is_dir() && metadata.category == VideoCategory::TvShow {
+        // Check if directory contains multiple episodes from same season
+        if let Ok(entries) = fs::read_dir(path_obj) {
+            let mut seasons = std::collections::HashSet::new();
+            let mut episodes = std::collections::HashSet::new();
+            let mut video_count = 0;
+            
+            for entry in entries.flatten().take(20) { // Check first 20 files
+                if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
+                    if VideoType::from_extension(ext).is_some() {
+                        video_count += 1;
+                        let file_path = entry.path();
+                        if let Some(file_path_str) = file_path.to_str() {
+                            let file_metadata = classify_video_content(file_path_str);
+                            if let Some(season) = file_metadata.season {
+                                seasons.insert(season);
+                            }
+                            if let Some(episode) = file_metadata.episode {
+                                if episode > 0 {
+                                    episodes.insert(episode);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // If we have multiple episodes from the same season, it's a boxset
+            if seasons.len() == 1 && episodes.len() > 1 && video_count > 1 {
+                metadata.is_boxset = true;
+                if metadata.episode.is_none() || metadata.episode == Some(0) {
+                    // Keep episode as 0 for season packs
+                    metadata.episode = Some(0);
+                }
+            }
+        }
     }
     
     debug!("Video classification result: {:?}", metadata);
@@ -712,4 +786,50 @@ fn clean_title(title: &str) -> String {
     // Only clean up extra whitespace, preserve all technical indicators
     let whitespace_regex = Regex::new(r"\s+").unwrap();
     whitespace_regex.replace_all(&cleaned, " ").trim().to_string()
+}
+
+/// Classify video content for upload pipeline
+pub fn classify_for_upload(input_path: &str, metadata: &serde_json::Value) -> Result<(Option<String>, Option<String>, serde_json::Value), String> {
+    // If we already have classification data in metadata, use it
+    if metadata.get("category").is_some() {
+        let category = metadata.get("category")
+            .and_then(|c| c.as_str())
+            .map(|c| format!("VideoCategory::{}", c.replace("VideoCategory::", "")));
+            
+        let source_type = metadata.get("source_type")
+            .and_then(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("VideoSourceType::{}", s.replace("VideoSourceType::", "")));
+        
+        return Ok((category, source_type, metadata.clone()));
+    }
+    
+    // Otherwise, run classification
+    let video_metadata = classify_video_content(input_path);
+    
+    let category = Some(format!("VideoCategory::{:?}", video_metadata.category));
+    let source_type = Some(format!("VideoSourceType::{:?}", video_metadata.source_type));
+    
+    // Manually create JSON metadata
+    let mut json_metadata = serde_json::json!({
+        "title": video_metadata.title,
+        "year": video_metadata.year,
+        "season": video_metadata.season,
+        "episode": video_metadata.episode,
+        "category": format!("{:?}", video_metadata.category),
+        "source_type": format!("{:?}", video_metadata.source_type),
+        "is_boxset": video_metadata.is_boxset,
+        "is_dated_tv": video_metadata.is_dated_tv,
+        "resolution": video_metadata.resolution,
+        "codec": video_metadata.codec,
+    });
+    
+    // Merge with existing metadata
+    if let (Some(json_obj), Some(existing_obj)) = (json_metadata.as_object_mut(), metadata.as_object()) {
+        for (key, value) in existing_obj {
+            json_obj.entry(key.clone()).or_insert(value.clone());
+        }
+    }
+    
+    Ok((category, source_type, json_metadata))
 }

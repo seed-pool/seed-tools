@@ -1,1341 +1,1569 @@
 // --- External Crates ---
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Alignment},
     style::{Color, Modifier, Style},
     text::{Span, Line},
     widgets::{Block, Borders, List, ListItem, Paragraph},
     Terminal,
 };
 use crossterm::{
-    event::{self, Event, KeyCode},
+    event::{self, Event, KeyCode, KeyModifiers, MouseEvent, MouseEventKind, EnableMouseCapture, DisableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::layout::Rect;
-use walkdir::WalkDir;
-use std::sync::mpsc;
-use serde::Deserialize;
 // --- Standard Library ---
 use std::{
-    fs::File,
-    io::{self, Seek, SeekFrom, BufRead, BufReader},
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
-    sync::{Arc, Mutex, Once},
+    io::{self},
+    path::PathBuf,
+    sync::{Arc, Mutex},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
-use crate::types::PreflightCheckResult;
-// --- Static Variables ---
-static INIT_LOGGER: Once = Once::new();
-use crate::types::{GeneralConfig, PathsConfig};
 
-#[derive(Deserialize)]
-struct AppConfig {
-    general: GeneralConfig,
-    paths: PathsConfig,
+// --- Internal Modules ---
+use crate::{
+    types::{Config, PreflightCheckResult},
+    preflight::preflight_check,
+    media::detector::detect_media_type,
+    process_builder,
+    definitions::{seedpool::parse_seedpool_category_type, TorrentInfo},
+};
+
+// --- State Management ---
+#[derive(Debug, Clone, PartialEq)]
+enum UIState {
+    Main,
+    FileSelection,
+    TrackerSelection,
+    CategoryInput,
+    ViewingLog,
 }
 
-fn load_config() -> AppConfig {
-    serde_yaml::from_str(&std::fs::read_to_string("config/config.yaml").expect("Failed to read config file"))
-        .expect("Failed to parse YAML config")
-}
-// --- Enum Definitions ---
-/// Enum to wrap different widget types for rendering.
-enum UIContent<'a> {
-    List(List<'a>),
-    Paragraph(Paragraph<'a>),
+#[derive(Debug, Clone)]
+enum ActionAvailability {
+    Available,
+    RequiresInput,    // Needs input path
+    RequiresTracker,  // Needs tracker selection
+    RequiresBoth,     // Needs both input and tracker
+    InProgress,       // Currently running
 }
 
-impl<'a> UIContent<'a> {
-    /// Renders the UIContent (List or Paragraph) in the specified area.
-    fn render(self, f: &mut ratatui::Frame, area: ratatui::layout::Rect) {
-        match self {
-            UIContent::List(list) => f.render_widget(list, area),
-            UIContent::Paragraph(paragraph) => f.render_widget(paragraph, area),
+struct AppState {
+    current_state: UIState,
+    current_dir: PathBuf,
+    file_list: Vec<String>,
+    filtered_file_list: Vec<String>,
+    selected_file_index: usize,
+    scroll_offset: usize,
+    selected_trackers: Vec<String>,
+    input_path: Option<PathBuf>,
+    category_code: Option<String>,
+    log_output: Arc<Mutex<Vec<String>>>,
+    log_scroll_offset: usize,
+    preflight_result: Option<PreflightCheckResult>,
+    upload_running: bool,
+    preflight_running: bool,
+    input_buffer: String,
+    show_help: bool,
+    dry_run: bool,
+    preflight_receiver: Option<std::sync::mpsc::Receiver<PreflightCheckResult>>,
+    file_filter: String,
+    filter_active: bool,
+    last_click_time: std::time::Instant,
+    last_clicked_item: Option<usize>,
+    file_list_lowercase: Vec<String>, // Pre-computed lowercase versions for faster filtering
+    filter_debounce_time: std::time::Instant,
+}
+
+impl AppState {
+    fn new() -> io::Result<Self> {
+        let current_dir = std::env::current_dir()?;
+        let file_list = get_files_in_dir(&current_dir);
+        let filtered_file_list = file_list.clone();
+        let file_list_lowercase = file_list.iter().map(|s| s.to_lowercase()).collect();
+        
+        Ok(Self {
+            current_state: UIState::Main,
+            current_dir,
+            file_list,
+            filtered_file_list,
+            selected_file_index: 0,
+            scroll_offset: 0,
+            selected_trackers: vec![],
+            input_path: None,
+            category_code: None,
+            log_output: Arc::new(Mutex::new(Vec::new())),
+            log_scroll_offset: 0,
+            preflight_result: None,
+            upload_running: false,
+            preflight_running: false,
+            input_buffer: String::new(),
+            show_help: false,
+            dry_run: false,
+            preflight_receiver: None,
+            file_filter: String::new(),
+            filter_active: false,
+            last_click_time: std::time::Instant::now(),
+            last_clicked_item: None,
+            file_list_lowercase,
+            filter_debounce_time: std::time::Instant::now(),
+        })
+    }
+
+    fn apply_file_filter(&mut self) {
+        if self.file_filter.is_empty() {
+            self.filtered_file_list = self.file_list.clone();
+            self.filter_active = false;
+        } else {
+            let filter = self.file_filter.to_lowercase();
+            
+            // Collect matches with priority scoring
+            let mut matches: Vec<(usize, u8)> = Vec::new(); // (index, priority)
+            
+            for (i, lowercase_name) in self.file_list_lowercase.iter().enumerate() {
+                if lowercase_name.contains(&filter) {
+                    let priority = if lowercase_name.starts_with(&filter) {
+                        1 // Highest priority: starts with filter
+                    } else if lowercase_name.split_whitespace().any(|word| word.starts_with(&filter)) {
+                        2 // Medium priority: word starts with filter
+                    } else {
+                        3 // Lowest priority: contains filter somewhere
+                    };
+                    matches.push((i, priority));
+                }
+            }
+            
+            // Sort by priority, then alphabetically within each priority
+            matches.sort_by(|a, b| {
+                match a.1.cmp(&b.1) {
+                    std::cmp::Ordering::Equal => {
+                        // Same priority - sort alphabetically
+                        self.file_list[a.0].to_lowercase().cmp(&self.file_list[b.0].to_lowercase())
+                    }
+                    other => other
+                }
+            });
+            
+            // Build the filtered list
+            self.filtered_file_list = matches
+                .into_iter()
+                .map(|(i, _)| self.file_list[i].clone())
+                .collect();
+            
+            self.filter_active = true;
+        }
+        self.selected_file_index = 0;
+        self.scroll_offset = 0;
+    }
+
+    fn apply_file_filter_debounced(&mut self) {
+        // Only apply filter if enough time has passed since last keystroke
+        let now = Instant::now();
+        self.filter_debounce_time = now;
+        
+        // Apply filter immediately for very short lists, or after debounce for large lists
+        if self.file_list.len() < 100 {
+            self.apply_file_filter();
+        } else {
+            // For large directories, we'll check the debounce in the main loop
+            // This prevents lag on every keystroke
+        }
+    }
+
+    fn check_and_apply_filter_debounce(&mut self) {
+        if self.filter_active || !self.file_filter.is_empty() {
+            let now = Instant::now();
+            if now.duration_since(self.filter_debounce_time) > Duration::from_millis(150) {
+                self.apply_file_filter();
+            }
+        }
+    }
+
+    fn update_file_list(&mut self, new_dir: &std::path::PathBuf) {
+        self.file_list = get_files_in_dir(new_dir);
+        self.file_list_lowercase = self.file_list.iter().map(|s| s.to_lowercase()).collect();
+        // Clear filter when navigating to new directory
+        self.file_filter.clear();
+        self.apply_file_filter();
+    }
+
+    fn get_current_file_list(&self) -> &Vec<String> {
+        &self.filtered_file_list
+    }
+
+    fn add_log(&self, message: String) {
+        self.log_output.lock().unwrap().push(message);
+    }
+
+    fn clear_logs(&self) {
+        self.log_output.lock().unwrap().clear();
+    }
+
+    fn get_action_availability(&self, action: &str) -> ActionAvailability {
+        match action {
+            "preflight" => {
+                if self.preflight_running {
+                    ActionAvailability::InProgress
+                } else if self.input_path.is_none() {
+                    ActionAvailability::RequiresInput
+                } else {
+                    ActionAvailability::Available
+                }
+            }
+            "upload" | "upload_dry" => {
+                if self.upload_running {
+                    ActionAvailability::InProgress
+                } else if self.input_path.is_none() && self.selected_trackers.is_empty() {
+                    ActionAvailability::RequiresBoth
+                } else if self.input_path.is_none() {
+                    ActionAvailability::RequiresInput
+                } else if self.selected_trackers.is_empty() {
+                    ActionAvailability::RequiresTracker
+                } else {
+                    ActionAvailability::Available
+                }
+            }
+            "select_file" | "select_tracker" | "view_log" | "clear_log" | "help" => {
+                ActionAvailability::Available
+            }
+            _ => ActionAvailability::Available
         }
     }
 }
 
-struct TerminalEmulator {
-    buffer: Arc<Mutex<Vec<String>>>,
-}
-
-impl TerminalEmulator {
-    fn new() -> Self {
-        Self {
-            buffer: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-
-    fn feed(&self, data: &str) {
-        let mut buffer = self.buffer.lock().unwrap();
-        buffer.push(data.to_string());
-        if buffer.len() > 100 {
-            buffer.remove(0); // Keep the buffer size manageable
-        }
-    }
-
-    fn render(&self) -> Vec<String> {
-        let buffer = self.buffer.lock().unwrap();
-        buffer.clone()
-    }
-}
-
+// --- Main UI Function ---
 pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
-    // Set up a panic hook to restore the terminal state on panic
+    // Initialize logging if not already initialized
+    use log::LevelFilter;
+    use simplelog::{Config as SimpleLogConfig, CombinedLogger, WriteLogger};
+    use std::fs::OpenOptions;
+    
+    let log_path = std::path::Path::new("seedbrr.log");
+    let _ = CombinedLogger::init(vec![WriteLogger::new(
+        LevelFilter::Debug,
+        SimpleLogConfig::default(),
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)?,
+    )]);
+    
+    // Log UI startup
+    log::info!("🚀 seedbrr UI launched");
+    
+    // Set up panic hook
     let original_hook = std::panic::take_hook();
-    let config = load_config();
-
-    // Extract the TMDB API key and mediainfo path
-    let _tmdb_api_key = config.general.tmdb_api_key;
-    let _mediainfo_path = config.paths.mediainfo.clone();
     std::panic::set_hook(Box::new(move |panic_info| {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::event::DisableMouseCapture);
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
         original_hook(panic_info);
     }));
 
-    // Enable raw mode and set up the terminal
+    // Enable raw mode and set up terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, crossterm::event::EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // Initialize state variables
-    let mut current_dir = std::env::current_dir()?;
-    let mut file_list = get_files_in_dir(&current_dir);
-    let mut selected_file_index = 0;
-    let mut scroll_offset = 0;
-    let tracker_scroll_offset = 0;
-    let mut selected_trackers = Vec::<String>::new();
-    let mut input_path = None::<PathBuf>;
-    let mut exit_requested = false;
-    let mut showing_log = false; // Flag to indicate if we're showing the log
-
-    let tracker_options = vec!["✔️ Select All", "🐳 seedpool [SP]", "🐛 TorrentLeech [TL]"];
-    let log_output = Arc::new(Mutex::new(Vec::<String>::new()));
-    let log_scroll_offset = Arc::new(Mutex::new(0)); // Shared scroll offset for logs
-    let preflight_check_result: Option<PreflightCheckResult> = None;
-    let mut upload_running = false; // Tracks if the upload process is running
-    let preflight_check_running = false;
-    let terminal_emulator = Arc::new(TerminalEmulator::new());
-    let log_file_path = "seed-tools.log";
-    start_log_tail(Arc::clone(&terminal_emulator), log_file_path);
-    // Channel for notifying the main loop of log updates
-    let (_tx, rx) = mpsc::channel::<()>();
-    let mut terminal_scroll_offset = 0; 
-    // Initial UI render
-    terminal.draw(|f| {
-        render_ui(
-            f,
-            &input_path,
-            &selected_trackers,
-            &file_list,
-            selected_file_index,
-            scroll_offset,
-            tracker_scroll_offset,
-            &tracker_options,
-            showing_log,
-            &terminal_emulator, // Pass the terminal emulator for logs
-            &log_scroll_offset, // Add the missing argument
-            &preflight_check_result,
-            upload_running,
-            preflight_check_running,
-        );
-    })?;
+    // Initialize state
+    let mut state = AppState::new()?;
+    
+    // Load config for preflight checks
+    let config = load_config()?;
 
     // Main loop
     loop {
-        if exit_requested {
-            break;
+        // Check for preflight results
+        if let Some(ref receiver) = state.preflight_receiver {
+            if let Ok(result) = receiver.try_recv() {
+                state.preflight_result = Some(result);
+                state.preflight_running = false;
+                state.preflight_receiver = None; // Clear the receiver
+            }
         }
+        
+        // Draw UI
+        terminal.draw(|f| render_ui(f, &state, &config))?;
 
-        // Check for log updates and redraw the UI if necessary
-        if let Ok(_) = rx.try_recv() {
-            terminal.draw(|f| {
-                render_ui(
-                    f,
-                    &input_path,
-                    &selected_trackers,
-                    &file_list,
-                    selected_file_index,
-                    scroll_offset,
-                    tracker_scroll_offset,
-                    &tracker_options,
-                    showing_log,
-                    &terminal_emulator, // Pass the terminal emulator for logs
-                    &log_scroll_offset, // Add the missing argument
-                    &preflight_check_result,
-                    upload_running,
-                    preflight_check_running,
-                );
-            })?;
-        }
-
-        if let Event::Mouse(mouse_event) = event::read()? {
-            match mouse_event.kind {
-                crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                    let y = mouse_event.row.saturating_sub(1); // Adjust for offset
-                    let x = mouse_event.column;
-        
-                    // Define layout for click handling
-                    let size = terminal.size()?;
-                    let area = Rect::new(0, 0, size.width, size.height);
-                    let chunks = Layout::default()
-                        .direction(Direction::Vertical)
-                        .constraints([
-                            Constraint::Length(5),  // Top section (Status + Buttons)
-                            Constraint::Length(1),  // Section for "Files" and "Logs" buttons
-                            Constraint::Min(1),     // Middle section (File List or Terminal + Tracker List)
-                            Constraint::Length(5),  // Pre-flight Check section
-                            Constraint::Length(3),  // Bottom section (Quit message)
-                        ])
-                        .split(area);
-        
-                    let top_chunks = Layout::default()
-                        .direction(Direction::Horizontal)
-                        .constraints([
-                            Constraint::Percentage(80), // Status section
-                            Constraint::Percentage(20), // Button section
-                        ])
-                        .split(chunks[0]);
-        
-                    let middle_chunks = Layout::default()
-                        .direction(Direction::Horizontal)
-                        .constraints([
-                            Constraint::Percentage(80), // File List or Terminal content
-                            Constraint::Percentage(20), // Tracker List
-                        ])
-                        .split(chunks[2]);
-        
-                    let files_logs_section = chunks[1]; // Section for "Files" and "Logs" buttons
-                    let buttons_y = files_logs_section.y -1; // Fixed Y position for the buttons
-        
-                    // Define the X ranges for the buttons
-                    let files_button_start_x = files_logs_section.x + 2; // Start X position of "🖥️ Files" button
-                    let files_button_end_x = files_button_start_x + 5;  // End X position of "🖥️ Files" button
-                    let logs_button_start_x = files_button_end_x + 5;   // Start X position of "📃 Logs" button
-                    let logs_button_end_x = logs_button_start_x + 8;    // End X position of "📃 Logs" button
-        
-                    // Handle "Files" and "Logs" button clicks
-                    if y == buttons_y {
-                        if x >= files_button_start_x && x < files_button_end_x {
-                            // "Files" button clicked
-                            showing_log = false;
-                        } else if x >= logs_button_start_x && x < logs_button_end_x {
-                            // "Logs" button clicked
-                            showing_log = true;
-        
-                            // Start tailing the log file in the terminal emulator
-                            let log_file_path = "seed-tools.log";
-                            start_log_tail(Arc::clone(&terminal_emulator), log_file_path);
-                        }
+        // Handle events
+        if event::poll(Duration::from_millis(100))? {
+            match event::read()? {
+                Event::Key(key) => {
+                    match state.current_state {
+                        UIState::Main => handle_main_input(key, &mut state)?,
+                        UIState::FileSelection => handle_file_selection_input(key, &mut state)?,
+                        UIState::TrackerSelection => handle_tracker_selection_input(key, &mut state)?,
+                        UIState::CategoryInput => handle_category_input(key, &mut state)?,
+                        UIState::ViewingLog => handle_log_view_input(key, &mut state)?,
                     }
-        
-                    // Handle button clicks in the top section
-                    if x >= top_chunks[1].x && x < top_chunks[1].x + top_chunks[1].width && y >= top_chunks[1].y && y < top_chunks[1].y + top_chunks[1].height {
-                        let relative_y = y - top_chunks[1].y;
-                        if relative_y == 0 {
-                            // Upload button clicked
-                            if input_path.is_some() && !selected_trackers.is_empty() {
-                                showing_log = true; // Switch to log view
-                                upload_running = true; // Set spinner state to true
-        
-                                // Start tailing the log file in the terminal emulator
-                                let log_file_path = "seed-tools.log";
-                                start_log_tail(Arc::clone(&terminal_emulator), log_file_path);
-        
-                                // Start the upload process in a separate thread
-                                let input_path = input_path.clone();
-                                let selected_trackers = selected_trackers.clone();
-                                thread::spawn({
-                                    let log_output = Arc::clone(&log_output);
-                                    move || {
-                                        let _ = activate_upload(
-                                            &input_path,
-                                            &selected_trackers,
-                                            &None,
-                                            log_output,
-                                        );
-        
-                                        // Upload completed
-                                    }
-                                });
-                            } else {
-                                log_output.lock().unwrap().push("Error: Input path or trackers not selected.".to_string());
-                            }
-                        } else if relative_y == 1 {
-                            if let Some(input_path) = &input_path {
-                                let input_path = input_path.clone();
-                                let log_output = Arc::clone(&log_output);
-        
-                                thread::spawn(move || {
-                                    log_output.lock().unwrap().push("Running Pre-flight Check...".to_string());
-        
-                                    // Define the pre-flight log file path
-                                    let preflight_log_path = PathBuf::from("pre-flight.log");
-        
-                                    // Run the seed-tools command with --pre and redirect output to pre-flight.log
-                                    let status = Command::new("./seed-tools")
-                                        .arg("--pre")
-                                        .arg(input_path.display().to_string())
-                                        .stdout(Stdio::from(
-                                            File::create(&preflight_log_path).expect("Failed to create pre-flight.log"),
-                                        ))
-                                        .stderr(Stdio::from(
-                                            File::create(&preflight_log_path).expect("Failed to create pre-flight.log"),
-                                        ))
-                                        .status();
-        
-                                    match status {
-                                        Ok(status) if status.success() => {
-                                            log_output.lock().unwrap().push("Pre-flight Check completed.".to_string());
-                                        }
-                                        Ok(status) => {
-                                            log_output.lock().unwrap().push(format!(
-                                                "Pre-flight Check failed with exit code: {}",
-                                                status.code().unwrap_or(-1)
-                                            ));
-                                        }
-                                        Err(err) => {
-                                            log_output.lock().unwrap().push(format!("Failed to run Pre-flight Check: {}", err));
-                                        }
-                                    }
-                                });
-                            } else {
-                                log_output.lock().unwrap().push("Error: No input path selected.".to_string());
-                            }
-                        }
+                    
+                    // Global key handlers
+                    match key.code {
+                        KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                        KeyCode::F(1) => state.show_help = !state.show_help,
+                        _ => {}
                     }
-        
-                    // Handle tracker list clicks
-                    if x >= middle_chunks[1].x && x < middle_chunks[1].x + middle_chunks[1].width && y >= middle_chunks[1].y && y < middle_chunks[1].y + middle_chunks[1].height {
-                        let relative_y = y - middle_chunks[1].y;
-                        let clicked_index = tracker_scroll_offset + relative_y as usize;
-                        if clicked_index < tracker_options.len() {
-                            let tracker = tracker_options[clicked_index].to_string();
-                            if tracker == "✔️ Select All" {
-                                if selected_trackers.len() == tracker_options.len() - 1 {
-                                    selected_trackers.clear(); // Deselect all trackers
-                                } else {
-                                    selected_trackers = tracker_options[1..]
-                                        .iter()
-                                        .map(|&t| t.to_string())
-                                        .collect(); // Select all trackers
-                                }
-                            } else if selected_trackers.contains(&tracker) {
-                                selected_trackers.retain(|t| t != &tracker); // Deselect the clicked tracker
-                            } else {
-                                selected_trackers.push(tracker); // Select the clicked tracker
-                            }
-                        }
+                },
+                Event::Mouse(mouse) => {
+                    match state.current_state {
+                        UIState::Main => handle_mouse_input(mouse, &mut state)?,
+                        UIState::FileSelection => handle_file_selection_mouse(mouse, &mut state)?,
+                        UIState::TrackerSelection => handle_tracker_selection_mouse(mouse, &mut state)?,
+                        UIState::CategoryInput => handle_category_input_mouse(mouse, &mut state)?,
+                        UIState::ViewingLog => handle_log_view_mouse(mouse, &mut state)?,
                     }
-        
-                    // Handle file list clicks
-                    if !showing_log && x < middle_chunks[0].x + middle_chunks[0].width && y >= middle_chunks[0].y && y < middle_chunks[0].y + middle_chunks[0].height {
-                        let relative_y = y - middle_chunks[0].y;
-                        let clicked_index = scroll_offset + relative_y as usize;
-                        if clicked_index < file_list.len() {
-                            selected_file_index = clicked_index;
-                            let selected_path = current_dir.join(&file_list[selected_file_index]);
-                            if file_list[selected_file_index] == "🗂️ .." {
-                                if let Some(parent) = current_dir.parent() {
-                                    current_dir = parent.to_path_buf();
-                                    file_list = get_files_in_dir(&current_dir);
-                                    selected_file_index = 0;
-                                    scroll_offset = 0;
-                                }
-                            } else if selected_path.is_dir() {
-                                current_dir = selected_path.clone();
-                                file_list = get_files_in_dir(&current_dir);
-                                selected_file_index = 0;
-                                scroll_offset = 0;
-                                input_path = Some(selected_path); // Set as input path
-                            } else if selected_path.is_file() {
-                                input_path = Some(selected_path);
-                            }
-                        }
-                    }
-        
-                    // Redraw the UI after handling a click
-                    terminal.draw(|f| {
-                        render_ui(
-                            f,
-                            &input_path,
-                            &selected_trackers,
-                            &file_list,
-                            selected_file_index,
-                            scroll_offset,
-                            tracker_scroll_offset,
-                            &tracker_options,
-                            showing_log,
-                            &terminal_emulator, // Pass the terminal emulator for logs
-                            &log_scroll_offset, // Add the missing argument
-                            &preflight_check_result,
-                            upload_running,
-                            preflight_check_running,
-                        );
-                    })?;
-                }
-                crossterm::event::MouseEventKind::ScrollUp => {
-                    if showing_log {
-                        if terminal_scroll_offset > 0 {
-                            terminal_scroll_offset -= 1; // Scroll up in the terminal window
-                        }
-                    } else if scroll_offset > 0 {
-                        scroll_offset -= 1; // Scroll up in the file list
-                    }
-                }
-                crossterm::event::MouseEventKind::ScrollDown => {
-                    if showing_log {
-                        let terminal_output = terminal_emulator.render();
-                        if terminal_scroll_offset + 1 < terminal_output.len() {
-                            terminal_scroll_offset += 1; // Scroll down in the terminal window
-                        }
-                    } else if scroll_offset + 1 < file_list.len() {
-                        scroll_offset += 1; // Scroll down in the file list
-                    }
-                }
+                },
                 _ => {}
             }
+        }
         
-            // Redraw the UI after handling scroll events
-            terminal.draw(|f| {
-                render_ui(
-                    f,
-                    &input_path,
-                    &selected_trackers,
-                    &file_list,
-                    selected_file_index,
-                    scroll_offset,
-                    tracker_scroll_offset,
-                    &tracker_options,
-                    showing_log,
-                    &terminal_emulator, // Pass the terminal emulator for logs
-                    &log_scroll_offset, // Add the missing argument
-                    &preflight_check_result,
-                    upload_running,
-                    preflight_check_running,
-                );
-            })?;
-        } else if let Event::Key(key) = event::read()? {
-            match key.code {
-                KeyCode::Esc => {
-                    exit_requested = true;
+        // Check for debounced filter updates (for large directories)
+        state.check_and_apply_filter_debounce();
+    }
+
+    // Cleanup
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    
+    Ok(())
+}
+
+// --- Input Handlers ---
+fn handle_main_input(key: event::KeyEvent, state: &mut AppState) -> io::Result<()> {
+    match key.code {
+        KeyCode::Char('f') | KeyCode::Char('F') => {
+            state.current_state = UIState::FileSelection;
+        }
+        KeyCode::Char('t') | KeyCode::Char('T') => {
+            state.current_state = UIState::TrackerSelection;
+        }
+        KeyCode::Char('c') | KeyCode::Char('C') => {
+            state.current_state = UIState::CategoryInput;
+            state.input_buffer.clear();
+        }
+        KeyCode::Char('p') | KeyCode::Char('P') => {
+            let availability = state.get_action_availability("preflight");
+            match availability {
+                ActionAvailability::Available => start_preflight_check(state)?,
+                ActionAvailability::InProgress => state.add_log("⏳ Preflight check already running".to_string()),
+                ActionAvailability::RequiresInput => state.add_log("❌ Please select an input path first (press F)".to_string()),
+                _ => {}
+            }
+        }
+        KeyCode::Char('u') | KeyCode::Char('U') => {
+            let availability = state.get_action_availability("upload");
+            match availability {
+                ActionAvailability::Available => start_upload(state)?,
+                ActionAvailability::InProgress => state.add_log("⏳ Upload already running".to_string()),
+                ActionAvailability::RequiresInput => state.add_log("❌ Please select an input path first (press F)".to_string()),
+                ActionAvailability::RequiresTracker => state.add_log("❌ Please select at least one tracker (press T)".to_string()),
+                ActionAvailability::RequiresBoth => state.add_log("❌ Please select both input path (F) and trackers (T)".to_string()),
+            }
+        }
+        KeyCode::Char('l') | KeyCode::Char('L') => {
+            state.current_state = UIState::ViewingLog;
+        }
+        KeyCode::Char('d') | KeyCode::Char('D') => {
+            state.dry_run = !state.dry_run;
+            state.add_log(format!("🔄 Dry-run mode: {}", if state.dry_run { "ENABLED" } else { "DISABLED" }));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_mouse_input(mouse: MouseEvent, state: &mut AppState) -> io::Result<()> {
+    if let MouseEventKind::Down(crossterm::event::MouseButton::Left) = mouse.kind {
+        // The UI layout has:
+        // - Header: lines 0-2 (3 lines)
+        // - Info panel: lines 3-10 (8 lines) 
+        // - Preflight area: lines 11-22+ (Min 12 lines)
+        // - Actions area: lines 23+ (10 lines)
+        
+        // Check if click is in the info panel area (lines 4-9, accounting for borders)
+        if mouse.row >= 4 && mouse.row <= 9 {
+            match mouse.row {
+                4 => {
+                    // Input path line clicked (first line in info panel)
+                    state.current_state = UIState::FileSelection;
+                }
+                5 => {
+                    // Trackers line clicked (second line in info panel)
+                    state.current_state = UIState::TrackerSelection;
+                }
+                6 => {
+                    // Category code line clicked (third line in info panel)
+                    state.current_state = UIState::CategoryInput;
+                    state.input_buffer.clear();
+                }
+                7 => {
+                    // Dry-run mode line clicked (fourth line in info panel)
+                    state.dry_run = !state.dry_run;
+                    state.add_log(format!("🔄 Dry-run mode: {}", if state.dry_run { "ENABLED" } else { "DISABLED" }));
                 }
                 _ => {}
             }
         }
     }
-
-    // Restore the terminal state
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, crossterm::event::DisableMouseCapture)?;
-    terminal.show_cursor()?;
     Ok(())
 }
 
-fn render_ui(
-    f: &mut ratatui::Frame,
-    input_path: &Option<PathBuf>,
-    selected_trackers: &Vec<String>,
-    file_list: &Vec<String>,
-    selected_file_index: usize,
-    scroll_offset: usize,
-    tracker_scroll_offset: usize,
-    tracker_options: &[&str],
-    showing_log: bool,
-    terminal_emulator: &Arc<TerminalEmulator>, // Pass terminal_emulator instead of log_output
-    _log_scroll_offset: &Arc<Mutex<usize>>,
-    _preflight_check_result: &Option<PreflightCheckResult>,
-    _upload_running: bool,
-    _preflight_check_running: bool,
-) {
-    // Define the layout
-    let size = f.area();
+// Continue with remaining input handlers...
+fn handle_file_selection_input(key: event::KeyEvent, state: &mut AppState) -> io::Result<()> {
+    match key.code {
+        KeyCode::Up => {
+            if state.selected_file_index > 0 {
+                state.selected_file_index -= 1;
+                if state.selected_file_index < state.scroll_offset {
+                    state.scroll_offset = state.selected_file_index;
+                }
+            }
+        }
+        KeyCode::Down => {
+            let current_file_list = state.get_current_file_list();
+            if state.selected_file_index < current_file_list.len().saturating_sub(1) {
+                state.selected_file_index += 1;
+                let visible_height = 15; // Approximate visible items
+                if state.selected_file_index >= state.scroll_offset + visible_height {
+                    state.scroll_offset = state.selected_file_index - visible_height + 1;
+                }
+            }
+        }
+        KeyCode::Enter => {
+            let current_file_list = state.get_current_file_list();
+            if let Some(selected) = current_file_list.get(state.selected_file_index) {
+                let path = state.current_dir.join(selected);
+                if path.is_dir() && selected == ".." {
+                    if let Some(parent) = state.current_dir.parent() {
+                        state.current_dir = parent.to_path_buf();
+                        state.update_file_list(&state.current_dir.clone());
+                        state.selected_file_index = 0;
+                        state.scroll_offset = 0;
+                    }
+                } else if path.is_dir() {
+                    state.current_dir = path;
+                    state.update_file_list(&state.current_dir.clone());
+                    state.selected_file_index = 0;
+                    state.scroll_offset = 0;
+                } else {
+                    state.input_path = Some(path);
+                    state.current_state = UIState::Main;
+                    
+                    // Auto-detect media type
+                    if let Ok(media_files) = detect_media_type(&state.input_path.as_ref().unwrap().to_string_lossy()) {
+                        if !media_files.is_empty() {
+                            state.add_log(format!("Detected {} media files", media_files.len()));
+                            // Show dominant media type
+                            if let Some(first) = media_files.first() {
+                                state.add_log(format!("Primary type: {:?}", first.media_type));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        KeyCode::Char(' ') => {
+            // Space to select current directory
+            let current_file_list = state.get_current_file_list();
+            if let Some(selected) = current_file_list.get(state.selected_file_index) {
+                let path = state.current_dir.join(selected);
+                if path.is_dir() && selected != ".." {
+                    state.input_path = Some(path);
+                    state.current_state = UIState::Main;
+                    
+                    // Auto-detect media type for directory
+                    if let Ok(media_files) = detect_media_type(&state.input_path.as_ref().unwrap().to_string_lossy()) {
+                        if !media_files.is_empty() {
+                            state.add_log(format!("Detected {} media files", media_files.len()));
+                            // Show dominant media type
+                            if let Some(first) = media_files.first() {
+                                state.add_log(format!("Primary type: {:?}", first.media_type));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        KeyCode::Char('/') => {
+            // Start filter mode
+            state.input_buffer = state.file_filter.clone();
+            state.current_state = UIState::CategoryInput; // Reuse category input for filter
+        }
+        KeyCode::Char(c) if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' => {
+            // Quick filter by typing (allow common filename characters)
+            state.file_filter.push(c);
+            state.apply_file_filter_debounced();
+        }
+        KeyCode::Backspace => {
+            // Remove last character from filter
+            if !state.file_filter.is_empty() {
+                state.file_filter.pop();
+                state.apply_file_filter_debounced();
+            }
+        }
+        KeyCode::Esc => {
+            if !state.file_filter.is_empty() {
+                // Clear filter first if active
+                state.file_filter.clear();
+                state.apply_file_filter();
+            } else {
+                // Exit to main if no filter
+                state.current_state = UIState::Main;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
 
-    // Render a full-screen block with the background color
-    let background_block = Block::default().style(Style::default().bg(Color::Rgb(8, 8, 32))); // Background color
-    f.render_widget(background_block, size);
+fn handle_tracker_selection_input(key: event::KeyEvent, state: &mut AppState) -> io::Result<()> {
+    let trackers = vec!["seedpool", "torrentleech"];
+    
+    match key.code {
+        KeyCode::Char(' ') => {
+            // Toggle selection
+            if let Some(index) = state.selected_file_index.checked_sub(1) {
+                if index < trackers.len() {
+                    let tracker = trackers[index].to_string();
+                    if let Some(pos) = state.selected_trackers.iter().position(|x| x == &tracker) {
+                        state.selected_trackers.remove(pos);
+                    } else {
+                        state.selected_trackers.push(tracker);
+                    }
+                }
+            } else if state.selected_file_index == 0 {
+                // Select all
+                if state.selected_trackers.len() == trackers.len() {
+                    state.selected_trackers.clear();
+                } else {
+                    state.selected_trackers = trackers.iter().map(|s| s.to_string()).collect();
+                }
+            }
+        }
+        KeyCode::Up => {
+            if state.selected_file_index > 0 {
+                state.selected_file_index -= 1;
+            }
+        }
+        KeyCode::Down => {
+            if state.selected_file_index <= trackers.len() {
+                state.selected_file_index += 1;
+            }
+        }
+        KeyCode::Enter | KeyCode::Esc => {
+            state.current_state = UIState::Main;
+            state.selected_file_index = 0;
+        }
+        _ => {}
+    }
+    Ok(())
+}
 
+fn handle_category_input(key: event::KeyEvent, state: &mut AppState) -> io::Result<()> {
+    match key.code {
+        KeyCode::Char(c) if c.is_numeric() => {
+            if state.input_buffer.len() < 4 {
+                state.input_buffer.push(c);
+            }
+        }
+        KeyCode::Backspace => {
+            state.input_buffer.pop();
+        }
+        KeyCode::Enter => {
+            if state.input_buffer.len() == 4 {
+                state.category_code = Some(state.input_buffer.clone());
+                state.add_log(format!("Category code set to: {}", state.input_buffer));
+            }
+            state.current_state = UIState::Main;
+        }
+        KeyCode::Esc => {
+            state.current_state = UIState::Main;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_log_view_input(key: event::KeyEvent, state: &mut AppState) -> io::Result<()> {
+    let log_len = state.log_output.lock().unwrap().len();
+    match key.code {
+        KeyCode::Up => {
+            if state.log_scroll_offset > 0 {
+                state.log_scroll_offset -= 1;
+            }
+        }
+        KeyCode::Down => {
+            if state.log_scroll_offset < log_len.saturating_sub(1) {
+                state.log_scroll_offset += 1;
+            }
+        }
+        KeyCode::PageUp => {
+            state.log_scroll_offset = state.log_scroll_offset.saturating_sub(10);
+        }
+        KeyCode::PageDown => {
+            state.log_scroll_offset = (state.log_scroll_offset + 10).min(log_len.saturating_sub(1));
+        }
+        KeyCode::Esc | KeyCode::Char('l') | KeyCode::Char('L') => {
+            state.current_state = UIState::Main;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+// --- Mouse Input Handlers ---
+fn handle_file_selection_mouse(mouse: MouseEvent, state: &mut AppState) -> io::Result<()> {
+    if let MouseEventKind::Down(crossterm::event::MouseButton::Left) = mouse.kind {
+        // File selection area starts after header (3 lines) and has borders
+        // Content area is inside the border, so clickable area is from row 4 to area height - 1
+        if mouse.row >= 4 {
+            let clicked_index = (mouse.row - 4) as usize + state.scroll_offset;
+            let current_file_list_len = state.get_current_file_list().len();
+            
+            if clicked_index < current_file_list_len {
+                let now = Instant::now();
+                let double_click_threshold = Duration::from_millis(500); // 500ms for double-click
+                
+                // Check if this is a double-click on the same item
+                let is_double_click = if let Some(last_item) = state.last_clicked_item {
+                    last_item == clicked_index && now.duration_since(state.last_click_time) < double_click_threshold
+                } else {
+                    false
+                };
+                
+                // Update click tracking
+                state.last_click_time = now;
+                state.last_clicked_item = Some(clicked_index);
+                state.selected_file_index = clicked_index;
+                
+                // Get the selected file name without holding the borrow
+                let selected_file = state.get_current_file_list().get(clicked_index).cloned();
+                
+                if let Some(selected) = selected_file {
+                    let path = state.current_dir.join(&selected);
+                    
+                    if path.is_file() {
+                        // Files are always selected on single click
+                        state.input_path = Some(path);
+                        state.current_state = UIState::Main;
+                        
+                        // Auto-detect media type
+                        if let Ok(media_files) = detect_media_type(&state.input_path.as_ref().unwrap().to_string_lossy()) {
+                            if !media_files.is_empty() {
+                                state.add_log(format!("Detected {} media files", media_files.len()));
+                                if let Some(first) = media_files.first() {
+                                    state.add_log(format!("Primary type: {:?}", first.media_type));
+                                }
+                            }
+                        }
+                    } else if path.is_dir() {
+                        if selected == ".." {
+                            // Parent directory - always navigate on single click for convenience
+                            if let Some(parent) = state.current_dir.parent() {
+                                state.current_dir = parent.to_path_buf();
+                                state.update_file_list(&state.current_dir.clone());
+                                state.selected_file_index = 0;
+                                state.scroll_offset = 0;
+                            }
+                        } else if is_double_click {
+                            // Double-click on folder - navigate into it
+                            state.current_dir = path;
+                            state.update_file_list(&state.current_dir.clone());
+                            state.selected_file_index = 0;
+                            state.scroll_offset = 0;
+                        }
+                        // Single click on folder just highlights it (selection index already updated above)
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn handle_tracker_selection_mouse(mouse: MouseEvent, state: &mut AppState) -> io::Result<()> {
+    if let MouseEventKind::Down(crossterm::event::MouseButton::Left) = mouse.kind {
+        let trackers = vec!["seedpool", "torrentleech"];
+        
+        // Tracker selection area starts after header (3 lines) and has borders
+        if mouse.row >= 4 {
+            let clicked_index = (mouse.row - 4) as usize;
+            
+            if clicked_index == 0 {
+                // "Select All" clicked
+                if state.selected_trackers.len() == trackers.len() {
+                    state.selected_trackers.clear();
+                } else {
+                    state.selected_trackers = trackers.iter().map(|s| s.to_string()).collect();
+                }
+            } else if let Some(tracker_index) = clicked_index.checked_sub(1) {
+                if tracker_index < trackers.len() {
+                    let tracker = trackers[tracker_index].to_string();
+                    if let Some(pos) = state.selected_trackers.iter().position(|x| x == &tracker) {
+                        state.selected_trackers.remove(pos);
+                    } else {
+                        state.selected_trackers.push(tracker);
+                    }
+                }
+            }
+            
+            // Update selected index for visual feedback
+            state.selected_file_index = clicked_index;
+        }
+    }
+    Ok(())
+}
+
+fn handle_category_input_mouse(_mouse: MouseEvent, _state: &mut AppState) -> io::Result<()> {
+    // Category input is primarily text-based, no special mouse handling needed
+    Ok(())
+}
+
+fn handle_log_view_mouse(mouse: MouseEvent, state: &mut AppState) -> io::Result<()> {
+    if let MouseEventKind::ScrollUp = mouse.kind {
+        state.log_scroll_offset = state.log_scroll_offset.saturating_sub(3);
+    } else if let MouseEventKind::ScrollDown = mouse.kind {
+        let log_len = state.log_output.lock().unwrap().len();
+        state.log_scroll_offset = (state.log_scroll_offset + 3).min(log_len.saturating_sub(1));
+    }
+    Ok(())
+}
+
+// --- Rendering Functions ---
+fn render_ui(f: &mut ratatui::Frame, state: &AppState, _config: &Config) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5),  // Top section (Status + Buttons)
-            Constraint::Length(1),  // Section for "Files" and "Logs" buttons
-            Constraint::Min(1),     // Middle section (File List + Tracker or Log Output)
-            Constraint::Length(6),  // Pre-flight Check section
-            Constraint::Length(3),  // Bottom section (Quit message)
+            Constraint::Length(3),  // Header
+            Constraint::Min(10),    // Main content
+            Constraint::Length(3),  // Status bar
         ])
-        .split(size);
+        .split(f.area());
 
-    // Split the top section into Status and Buttons
-    let top_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(80), // Status section
-            Constraint::Percentage(20), // Button section
-        ])
-        .split(chunks[0]);
+    // Header
+    let header = Paragraph::new("🌱 Seedbrr - Media Upload Manager")
+        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::ALL));
+    f.render_widget(header, chunks[0]);
 
-    // Split the middle section into File List and Tracker List or Log Output
-    let middle_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(80), // File List or Log content
-            Constraint::Percentage(20), // Tracker List
-        ])
-        .split(chunks[2]);
-
-    // Render Status Section
-    let mut status_lines = Vec::new();
-
-    // Input Path
-    if let Some(path) = input_path {
-        if let Some(file_name) = path.file_name() {
-            status_lines.push(Line::from(vec![
-                Span::styled(
-                    "Input Path: ",
-                    Style::default().fg(Color::DarkGray), // DarkGray for the label
-                ),
-                Span::styled(
-                    file_name.to_string_lossy(),
-                    Style::default().fg(Color::Green), // Green for the value
-                ),
-            ]));
-        } else {
-            status_lines.push(Line::from(vec![
-                Span::styled(
-                    "Input Path: ",
-                    Style::default().fg(Color::DarkGray), // DarkGray for the label
-                ),
-                Span::styled(
-                    "Invalid path",
-                    Style::default().fg(Color::Red), // Red for invalid path
-                ),
-            ]));
-        }
-    } else {
-        status_lines.push(Line::from(vec![
-            Span::styled(
-                "Input Path: ",
-                Style::default().fg(Color::DarkGray), // DarkGray for the label
-            ),
-            Span::styled(
-                "❌ None selected",
-                Style::default().fg(Color::DarkGray), // DarkGray for no selection
-            ),
-        ]));
+    // Main content area
+    match state.current_state {
+        UIState::Main => render_main_view(f, chunks[1], state),
+        UIState::FileSelection => render_file_selection(f, chunks[1], state),
+        UIState::TrackerSelection => render_tracker_selection(f, chunks[1], state),
+        UIState::CategoryInput => render_category_input(f, chunks[1], state),
+        UIState::ViewingLog => render_log_view(f, chunks[1], state),
     }
-    
-    // Selected Trackers
-    if selected_trackers.is_empty() {
-        status_lines.push(Line::from(vec![
+
+    // Status bar
+    render_status_bar(f, chunks[2], state);
+}
+
+fn render_main_view(f: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &AppState) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(8),  // Info panel (clickable)
+            Constraint::Min(12),    // Preflight results area - increased from 8 to Min(12)
+            Constraint::Length(10), // Actions panel - decreased from Min(5) to Length(10)
+        ])
+        .split(area);
+
+    // Info panel
+    let mut info_lines = vec![
+        Line::from(vec![
+            Span::raw("📁 Input Path: "),
             Span::styled(
-                "Trackers: ",
-                Style::default().fg(Color::DarkGray), // DarkGray for the label
+                state.input_path.as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "Not selected".to_string()),
+                Style::default().fg(if state.input_path.is_some() { Color::Green } else { Color::Yellow })
             ),
+            Span::styled(" [Click to change]", Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
+        ]),
+        Line::from(vec![
+            Span::raw("🎯 Trackers: "),
             Span::styled(
-                "❌ None selected",
-                Style::default().fg(Color::DarkGray), // DarkGray for no selection
+                if state.selected_trackers.is_empty() {
+                    "None selected".to_string()
+                } else {
+                    state.selected_trackers.join(", ")
+                },
+                Style::default().fg(if state.selected_trackers.is_empty() { Color::Yellow } else { Color::Green })
             ),
-        ]));
-    } else {
-        status_lines.push(Line::from(vec![
+            Span::styled(" [Click to change]", Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
+        ]),
+        Line::from(vec![
+            Span::raw("🏷️  Category Code: "),
             Span::styled(
-                "Trackers: ",
-                Style::default().fg(Color::DarkGray), // DarkGray for the label
+                state.category_code.as_ref()
+                    .unwrap_or(&"Auto-detect".to_string())
+                    .clone(),
+                Style::default().fg(Color::Cyan)
             ),
+            Span::styled(" [Click to change]", Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
+        ]),
+        Line::from(vec![
+            Span::raw("🚫 Dry-Run Mode: "),
             Span::styled(
-                selected_trackers.join(", "),
-                Style::default().fg(Color::LightCyan), // LightCyan for the value
+                if state.dry_run { "ENABLED" } else { "DISABLED" },
+                Style::default().fg(if state.dry_run { Color::Yellow } else { Color::Gray })
             ),
-        ]));
-    }
-    
-    // Render the status section in `top_chunks[0]`
-    let status_paragraph = Paragraph::new(status_lines)
-        .block(Block::default().borders(Borders::ALL).title(" 🌀 Seed-Tools v0.42 "))
-        .style(Style::default().bg(Color::Rgb(8, 8, 32))); // Background color
-    f.render_widget(status_paragraph, top_chunks[0]);
-    
-    // Render Button Section
-    let button_lines = vec![
-        Line::from(vec![Span::styled(
-            "🔺  ＵＰＬＯＡＤ ", // Upload button text
-            Style::default()
-                .fg(Color::White) // Text color
-                .bg(Color::Red) // Background color
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from(vec![Span::styled(
-            "✅ ＰＲＥ-ＦＬＩＧＨＴ", // Pre-flight Check button text
-            Style::default()
-                .fg(Color::White) // Text color
-                .bg(Color::Green) // Background color
-                .add_modifier(Modifier::BOLD),
-        )]),
+            Span::styled(" [Click to toggle]", Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
+        ]),
     ];
 
-    let button_paragraph = Paragraph::new(button_lines)
-        .block(Block::default().borders(Borders::ALL).title(" 🕹️ Actions "))
-        .style(Style::default().bg(Color::Rgb(8, 8, 32))); // Background color
+    if let Some(ref _result) = state.preflight_result {
+        info_lines.push(Line::from(""));
+        info_lines.push(Line::from(vec![
+            Span::raw("✈️  Preflight: "),
+            Span::styled(
+                "Completed".to_string(),
+                Style::default().fg(Color::Blue)
+            ),
+        ]));
+    }
 
-    f.render_widget(button_paragraph, top_chunks[1]);
+    let info_panel = Paragraph::new(info_lines)
+        .block(Block::default()
+            .title("Upload Information (Click items to edit)")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan)));
+    f.render_widget(info_panel, chunks[0]);
 
-
-    // Render "Files" and "Logs" Buttons Section
-    let files_logs_spans = Line::from(vec![
-        Span::styled(
-            " 🖥️ Files",
-            Style::default()
-                .fg(if !showing_log { Color::Yellow } else { Color::White })
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("   "), // Add spacing between buttons
-        Span::styled(
-            " 📃 Logs",
-            Style::default()
-                .fg(if showing_log { Color::Yellow } else { Color::White })
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]);
-
-    let files_logs_paragraph = Paragraph::new(files_logs_spans)
-        .alignment(ratatui::layout::Alignment::Left) // Align to the left
-        .style(Style::default().bg(Color::Rgb(8, 8, 32))); // Background color
-
-    // Render the buttons section in chunks[1]
-    f.render_widget(files_logs_paragraph, chunks[1]);
-
-    // Render File List or Log Section
-    if showing_log {
-        // Render the terminal emulator
-        let terminal_scroll_offset = 0; 
-    let terminal_output = terminal_emulator.render();
-    let visible_lines = terminal_output
-        .iter()
-        .skip(terminal_scroll_offset) // Skip lines based on the scroll offset
-        .take(middle_chunks[0].height as usize) // Take only the visible lines
-        .map(|line| Line::from(Span::raw(line.clone())))
-        .collect::<Vec<_>>();
-
-    let terminal_widget = Paragraph::new(visible_lines)
-        .block(Block::default().borders(Borders::ALL)) // Remove the title
-        .style(Style::default().bg(Color::Black).fg(Color::White));
-    f.render_widget(terminal_widget, middle_chunks[0]);
-    } else {
-        // Render the file list
-        let mut visible_files = vec!["🗂️ ..".to_string()];
-        visible_files.extend(
-            file_list[1..]
-                .iter()
-                .skip(scroll_offset)
-                .take((middle_chunks[0].height as usize).saturating_sub(1)) // Subtract 1 for the ".." entry
-                .cloned(),
-        );
-
-        let file_list_widget = List::new(
-            visible_files
-                .iter()
-                .enumerate()
-                .map(|(i, file)| {
-                    let style = if i == selected_file_index {
-                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    // Preflight results area
+    let mut preflight_lines = vec![];
+    if let Some(ref result) = state.preflight_result {
+        preflight_lines.push(Line::from(vec![
+            Span::raw("📝 Title: "),
+            Span::styled(&result.release_name, Style::default().fg(Color::White)),
+        ]));
+        
+        preflight_lines.push(Line::from(vec![
+            Span::raw("🏷️  Generated: "),
+            Span::styled(&result.generated_release_name, Style::default().fg(Color::Cyan)),
+        ]));
+        
+        preflight_lines.push(Line::from(vec![
+            Span::raw("🎯 Type: "),
+            Span::styled(&result.release_type, Style::default().fg(Color::Blue)),
+        ]));
+        
+        if result.is_boxset {
+            preflight_lines.push(Line::from(vec![
+                Span::raw("📦 Format: "),
+                Span::styled("Season Pack/Boxset", Style::default().fg(Color::Magenta)),
+            ]));
+        } else if result.episode_number.is_some() && result.episode_number != Some(0) {
+            preflight_lines.push(Line::from(vec![
+                Span::raw("📺 Format: "),
+                Span::styled("Single Episode", Style::default().fg(Color::Green)),
+            ]));
+        }
+        
+        // Show season/episode info
+        if let Some(season) = result.season_number {
+            if let Some(episode) = result.episode_number {
+                if episode > 0 {
+                    preflight_lines.push(Line::from(vec![
+                        Span::raw("📺 Season/Episode: "),
+                        Span::styled(format!("S{:02}E{:02}", season, episode), Style::default().fg(Color::Yellow)),
+                    ]));
+                } else {
+                    preflight_lines.push(Line::from(vec![
+                        Span::raw("📺 Season: "),
+                        Span::styled(format!("{}", season), Style::default().fg(Color::Yellow)),
+                    ]));
+                }
+            }
+        }
+        
+        preflight_lines.push(Line::from(vec![
+            Span::raw("🔍 Dupe Check: "),
+            Span::styled(&result.dupe_check, Style::default().fg(
+                if result.dupe_check.contains("PASS") { Color::Green } else { Color::Red }
+            )),
+        ]));
+        
+        // Show external IDs
+        if result.tmdb_id > 0 || result.imdb_id.is_some() || result.tvdb_id.is_some() {
+            preflight_lines.push(Line::from(vec![
+                Span::raw("🆔 External IDs: "),
+            ]));
+            if result.tmdb_id > 0 {
+                preflight_lines.push(Line::from(vec![
+                    Span::raw("   TMDB: "),
+                    Span::styled(format!("{}", result.tmdb_id), Style::default().fg(Color::Cyan)),
+                ]));
+            }
+            if let Some(ref imdb_id) = result.imdb_id {
+                preflight_lines.push(Line::from(vec![
+                    Span::raw("   IMDB: "),
+                    Span::styled(imdb_id, Style::default().fg(Color::Cyan)),
+                ]));
+            }
+            if let Some(tvdb_id) = result.tvdb_id {
+                preflight_lines.push(Line::from(vec![
+                    Span::raw("   TVDB: "),
+                    Span::styled(format!("{}", tvdb_id), Style::default().fg(Color::Cyan)),
+                ]));
+            }
+        }
+        
+        // Show IGDB data for games
+        if result.release_type.contains("Game") && result.igdb_id.is_some() {
+            preflight_lines.push(Line::from(vec![
+                Span::raw("🎮 IGDB Info: "),
+            ]));
+            
+            if let Some(igdb_id) = result.igdb_id {
+                preflight_lines.push(Line::from(vec![
+                    Span::raw("   ID: "),
+                    Span::styled(format!("{}", igdb_id), Style::default().fg(Color::Cyan)),
+                ]));
+            }
+            
+            if let Some(ref developer) = result.igdb_developer {
+                preflight_lines.push(Line::from(vec![
+                    Span::raw("   Developer: "),
+                    Span::styled(developer, Style::default().fg(Color::Yellow)),
+                ]));
+            }
+            
+            if let Some(ref publisher) = result.igdb_publisher {
+                preflight_lines.push(Line::from(vec![
+                    Span::raw("   Publisher: "),
+                    Span::styled(publisher, Style::default().fg(Color::Yellow)),
+                ]));
+            }
+            
+            if let Some(ref genres) = result.igdb_genres {
+                preflight_lines.push(Line::from(vec![
+                    Span::raw("   Genres: "),
+                    Span::styled(genres, Style::default().fg(Color::Magenta)),
+                ]));
+            }
+            
+            if let Some(rating) = result.igdb_rating {
+                preflight_lines.push(Line::from(vec![
+                    Span::raw("   Rating: "),
+                    Span::styled(format!("{:.1}/100", rating), Style::default().fg(
+                        if rating >= 70.0 { Color::Green } 
+                        else if rating >= 50.0 { Color::Yellow } 
+                        else { Color::Red }
+                    )),
+                ]));
+            }
+            
+            if let Some(ref platforms) = result.igdb_platforms {
+                if !platforms.is_empty() {
+                    let platform_str = if platforms.len() > 3 {
+                        format!("{} and {} more", platforms[..3].join(", "), platforms.len() - 3)
                     } else {
-                        Style::default()
+                        platforms.join(", ")
                     };
-                    ListItem::new(Span::styled(file, style))
-                })
-                .collect::<Vec<_>>(),
-        )
-        .block(Block::default().borders(Borders::ALL))
-        .style(Style::default().bg(Color::Rgb(8, 8, 32))); // Background color
-        f.render_widget(file_list_widget, middle_chunks[0]);
-    }
-
-    // Render Tracker List Section
-    let visible_trackers = &tracker_options[tracker_scroll_offset
-        ..(tracker_scroll_offset + middle_chunks[1].height as usize).min(tracker_options.len())];
-    let tracker_list_widget = List::new(
-        visible_trackers.iter().enumerate().map(|(_i, tracker)| {
-            let is_selected = selected_trackers.contains(&tracker.to_string());
-            let tracker_name = if is_selected {
-                format!("{} ✔️", tracker) // Append ✔️ to selected trackers
-            } else {
-                tracker.to_string()
-            };
-
-            // Split the tracker name into styled parts
-            let styled_tracker_name = if tracker.contains("🆂") {
-                Line::from(vec![
-                    Span::styled("🆂", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)), // Blue for 🆂🅿
-                    Span::raw(tracker_name[4..].to_string()), // Clone the rest of the line
-                ])
-            } else if tracker.contains("🆃") {
-                Line::from(vec![
-                    Span::styled("🆃", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)), // Green for 🆃🅻
-                    Span::raw(tracker_name[4..].to_string()), // Clone the rest of the line
-                ])
-            } else {
-                Line::from(vec![Span::raw(tracker_name)]) // Default style for other trackers
-            };
-
-            ListItem::new(styled_tracker_name)
-        }).collect::<Vec<_>>(),
-    )
-    .block(Block::default().borders(Borders::ALL).title("🌐 Trackers "))
-    .style(Style::default().bg(Color::Rgb(8, 8, 32))); // Background color
-    f.render_widget(tracker_list_widget, middle_chunks[1]);
-
-    // Render Pre-flight Check Section
-    let mut preflight_lines = Vec::new();
-    if let Some(preflight_log_path) = Some(PathBuf::from("pre-flight.log")) {
-        if preflight_log_path.exists() {
-            let (log_data, is_pending) = parse_preflight_log(&preflight_log_path);
-    
-            if is_pending {
-                // Display hourglass emoji for all fields
-                preflight_lines.push(Line::from(vec![Span::styled(
-                    "⏳ Running Pre-flight Check ...",
-                    Style::default().fg(Color::Yellow),
-                )]));
-            } else {
-                // Line 1: Title, Release Type, Audio Languages
+                    preflight_lines.push(Line::from(vec![
+                        Span::raw("   Platforms: "),
+                        Span::styled(platform_str, Style::default().fg(Color::Blue)),
+                    ]));
+                }
+            }
+        }
+        
+        // Show audio languages (or platforms for games without IGDB data)
+        if !result.audio_languages.is_empty() && !result.release_type.contains("Game") {
+            preflight_lines.push(Line::from(vec![
+                Span::raw("🔊 Audio: "),
+                Span::styled(result.audio_languages.join(", "), Style::default().fg(Color::Green)),
+            ]));
+        }
+        
+        // Show album cover info for ebooks/music
+        if result.album_cover != "N/A" {
+            preflight_lines.push(Line::from(vec![
+                Span::raw("🖼️  Cover: "),
+                Span::styled(&result.album_cover, Style::default().fg(
+                    if result.album_cover.contains("Available") { Color::Green } else { Color::Red }
+                )),
+            ]));
+        }
+        
+        if !result.tracker_categories.is_empty() {
+            preflight_lines.push(Line::from(vec![
+                Span::raw("📋 Tracker Mappings: "),
+            ]));
+            for (tracker, category) in &result.tracker_categories {
                 preflight_lines.push(Line::from(vec![
-                    // Title
-                    Span::styled(
-                        "Title: ",
-                        Style::default().fg(Color::DarkGray), // DarkGray for the label
-                    ),
-                    Span::styled(
-                        log_data[0].replace("Title: ", ""),
-                        Style::default().fg(Color::Yellow), // Yellow for the value
-                    ),
-                    Span::raw(" | "),
-                    // Release Type
-                    Span::styled(
-                        "Type: ",
-                        Style::default().fg(Color::DarkGray), // DarkGray for the label
-                    ),
-                    {
-                        let release_type = log_data[3].replace("Release Type: ", ""); // Store the result of `replace`
-                        if release_type.contains("★") {
-                            let (before_star, after_star) = release_type.split_once("★").unwrap_or(("", ""));
-                            Span::styled(
-                                format!(
-                                    "{}★{}",
-                                    before_star.trim(),
-                                    after_star.trim()
-                                ),
-                                Style::default().fg(Color::Cyan), // Cyan for the text
-                            )
-                        } else {
-                            Span::styled(
-                                release_type,
-                                Style::default().fg(Color::Cyan), // Cyan for the value
-                            )
-                        }
-                    },
-                    Span::raw(" | "),
-                    // Audio Languages
-                    Span::styled(
-                        "Audio: ",
-                        Style::default().fg(Color::DarkGray), // DarkGray for the label
-                    ),
-                    Span::styled(
-                        log_data[11].replace("Audio Languages: ", ""),
-                        Style::default().fg(Color::LightMagenta), // Magenta for the value
-                    ),
-                ]));
-    
-                // Line 2: TMDB, IMDb, TVDB IDs, Season/Episode Numbers
-                preflight_lines.push(Line::from(vec![
-                    // TMDB ID
-                    Span::styled(
-                        "TMDB: ",
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::styled(
-                        log_data[6].replace("TMDB ID: ", ""),
-                        Style::default().fg(Color::Cyan), // Turquoise for the value
-                    ),
-                    Span::raw(" | "),
-                    // IMDb ID
-                    Span::styled(
-                        "IMDb: ",
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::styled(
-                        log_data[7].replace("IMDb ID: ", ""),
-                        Style::default().fg(Color::Cyan), // Turquoise for the value
-                    ),
-                    Span::raw(" | "),
-                    // TVDB ID
-                    Span::styled(
-                        "TVDB: ",
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::styled(
-                        log_data[8].replace("TVDB ID: ", ""),
-                        Style::default().fg(Color::Cyan), // Turquoise for the value
-                    ),
-                    Span::raw(" | "),
-                    // Season and Episode Numbers
-                    Span::styled(
-                        "Season: ",
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::styled(
-                        log_data[4].replace("Season Number: ", ""),
-                        Style::default().fg(Color::Cyan), // Turquoise for the value
-                    ),
-                    Span::raw(" "),
-                    Span::styled(
-                        "Episode: ",
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::styled(
-                        log_data[5].replace("Episode Number: ", ""),
-                        Style::default().fg(Color::Cyan), // Turquoise for the value
-                    ),
-                ]));
-    
-                // Line 3: Release Name
-                preflight_lines.push(Line::from(vec![
-                    // Label: "Release Name:"
-                    Span::styled(
-                        "Release Name: ",
-                        Style::default().fg(Color::DarkGray), // DarkGray for the label
-                    ),
-                    // Value: The actual release name
-                    Span::styled(
-                        log_data[1].replace("Release Name: ", ""),
-                        Style::default().fg(Color::Rgb(255, 153, 51)), // Vibrant orange for the value
-                    ),
-                ]));
-    
-                // Line 4: Dupe Check, Strip From Videos, Album Cover
-                preflight_lines.push(Line::from(vec![
-                    // Dupe Check
-                    Span::styled(
-                        "Dupe Check: ",
-                        Style::default().fg(Color::DarkGray), // DarkGray for the label
-                    ),
-                    Span::styled(
-                        if log_data[2].contains("N/A") {
-                            "N/A" // Display N/A for music preflight checks
-                        } else if log_data[2].contains("PASS") {
-                            "✔️ PASS"
-                        } else {
-                            "❌ FAIL"
-                        },
-                        Style::default().fg(if log_data[2].contains("N/A") {
-                            Color::DarkGray // DarkGray for N/A
-                        } else if log_data[2].contains("PASS") {
-                            Color::Green // Green for PASS
-                        } else {
-                            Color::Red // Red for FAIL
-                        }),
-                    ),
-                    Span::raw(" | "),
-                    // Strip From Videos (Excluded Files)
-                    Span::styled(
-                        "Stripshit From Videos: ",
-                        Style::default().fg(Color::DarkGray), // DarkGray for the label
-                    ),
-                    Span::styled(
-                        if log_data[10].contains("N/A") {
-                            "N/A" // Display N/A for music preflight checks
-                        } else if log_data[10].contains("Enabled") {
-                            "✔️ Enabled"
-                        } else if log_data[10].contains("Disabled") {
-                            "❌ Disabled"
-                        } else {
-                            "N/A"
-                        },
-                        Style::default().fg(if log_data[10].contains("N/A") {
-                            Color::DarkGray // DarkGray for N/A
-                        } else if log_data[10].contains("Enabled") {
-                            Color::Green // Green for Enabled
-                        } else if log_data[10].contains("Disabled") {
-                            Color::Red // Red for Disabled
-                        } else {
-                            Color::DarkGray // DarkGray for N/A
-                        }),
-                    ),
-                    Span::raw(" | "),
-                    // Album Cover
-                    Span::styled(
-                        "Album Cover: ",
-                        Style::default().fg(Color::DarkGray), // DarkGray for the label
-                    ),
-                    Span::styled(
-                        if log_data[9].contains("Available") {
-                            "✔️ Available"
-                        } else if log_data[9].contains("Not Found") {
-                            "❌ Not Found"
-                        } else {
-                            "N/A"
-                        },
-                        Style::default().fg(if log_data[9].contains("Available") {
-                            Color::Green // Green for Available
-                        } else if log_data[9].contains("Not Found") {
-                            Color::Red // Red for Not Found
-                        } else {
-                            Color::DarkGray // DarkGray for N/A
-                        }),
-                    ),
+                    Span::raw("   "),
+                    Span::styled(tracker, Style::default().fg(Color::Yellow)),
+                    Span::raw(" → "),
+                    Span::styled(category, Style::default().fg(Color::Cyan)),
                 ]));
             }
-        } else {
-            preflight_lines.push(Line::from(Span::styled(
-                "Pre-flight Check: No results available",
-                Style::default().fg(Color::DarkGray),
+        }
+    } else {
+        preflight_lines.push(Line::from(vec![
+            Span::styled("No preflight check run yet. Press ", Style::default().fg(Color::Gray)),
+            Span::styled("P", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(" to run preflight check.", Style::default().fg(Color::Gray)),
+        ]));
+    }
+    
+    let preflight_panel = Paragraph::new(preflight_lines)
+        .block(Block::default()
+            .title("Preflight Results")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(
+                if state.preflight_result.is_some() { Color::Green } else { Color::Gray }
             )));
+    f.render_widget(preflight_panel, chunks[1]);
+
+    // Actions panel with availability indicators
+    let actions = vec![
+        Line::from(vec![
+            Span::styled("F", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(" - Select input file/folder"),
+        ]),
+        Line::from(vec![
+            Span::styled("T", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(" - Select trackers"),
+        ]),
+        Line::from(vec![
+            Span::styled("C", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(" - Set category code (4 digits)"),
+        ]),
+        Line::from(vec![
+            Span::styled("D", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(" - Toggle dry-run mode"),
+        ]),
+        Line::from({
+            let availability = state.get_action_availability("preflight");
+            match availability {
+                ActionAvailability::Available => vec![
+                    Span::styled("P", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    Span::raw(" - Run preflight check"),
+                ],
+                ActionAvailability::InProgress => vec![
+                    Span::styled("P", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
+                    Span::styled(" - Preflight check running...", Style::default().fg(Color::Blue)),
+                ],
+                ActionAvailability::RequiresInput => vec![
+                    Span::styled("P", Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)),
+                    Span::styled(" - Run preflight check", Style::default().fg(Color::DarkGray)),
+                    Span::styled(" (requires input path)", Style::default().fg(Color::Red).add_modifier(Modifier::ITALIC)),
+                ],
+                _ => vec![],
+            }
+        }),
+        Line::from({
+            let availability = state.get_action_availability("upload");
+            let upload_text = if state.dry_run { " - Start upload (DRY-RUN)" } else { " - Start upload" };
+            match availability {
+                ActionAvailability::Available => vec![
+                    Span::styled("U", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    Span::raw(upload_text),
+                ],
+                ActionAvailability::InProgress => vec![
+                    Span::styled("U", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
+                    Span::styled(" - Upload in progress...", Style::default().fg(Color::Blue)),
+                ],
+                ActionAvailability::RequiresInput => vec![
+                    Span::styled("U", Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)),
+                    Span::styled(upload_text, Style::default().fg(Color::DarkGray)),
+                    Span::styled(" (requires input path)", Style::default().fg(Color::Red).add_modifier(Modifier::ITALIC)),
+                ],
+                ActionAvailability::RequiresTracker => vec![
+                    Span::styled("U", Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)),
+                    Span::styled(upload_text, Style::default().fg(Color::DarkGray)),
+                    Span::styled(" (requires tracker selection)", Style::default().fg(Color::Red).add_modifier(Modifier::ITALIC)),
+                ],
+                ActionAvailability::RequiresBoth => vec![
+                    Span::styled("U", Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)),
+                    Span::styled(upload_text, Style::default().fg(Color::DarkGray)),
+                    Span::styled(" (requires input path and tracker)", Style::default().fg(Color::Red).add_modifier(Modifier::ITALIC)),
+                ],
+            }
+        }),
+        Line::from(vec![
+            Span::styled("L", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(" - View logs"),
+        ]),
+    ];
+
+    let actions_panel = Paragraph::new(actions)
+        .block(Block::default()
+            .title("Available Actions")
+            .borders(Borders::ALL));
+    f.render_widget(actions_panel, chunks[2]);
+}
+
+// Placeholder implementations for other rendering functions
+fn render_file_selection(f: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &AppState) {
+    // Split area to show filter at the bottom if active
+    let chunks = if state.filter_active || !state.file_filter.is_empty() {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(3),      // File list
+                Constraint::Length(3),   // Filter display
+            ])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(100)])
+            .split(area)
+    };
+
+    let current_file_list = state.get_current_file_list();
+    let items: Vec<ListItem> = current_file_list
+        .iter()
+        .enumerate()
+        .skip(state.scroll_offset)
+        .take(chunks[0].height as usize - 2)
+        .map(|(idx, item)| {
+            let style = if idx == state.selected_file_index {
+                Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            
+            let prefix = if state.current_dir.join(item).is_dir() {
+                "📁 "
+            } else {
+                "📄 "
+            };
+            
+            ListItem::new(format!("{}{}", prefix, item)).style(style)
+        })
+        .collect();
+
+    let title = if state.filter_active {
+        format!("Select File - {} (Filtered: {} items) [Esc to clear filter]", 
+                state.current_dir.display(), current_file_list.len())
+    } else {
+        format!("Select File - {} [Double-click folders, type to filter, Esc to exit]", 
+                state.current_dir.display())
+    };
+
+    let file_list = List::new(items)
+        .block(Block::default()
+            .title(title)
+            .borders(Borders::ALL));
+    
+    f.render_widget(file_list, chunks[0]);
+
+    // Render filter area if active
+    if state.filter_active || !state.file_filter.is_empty() {
+        let filter_text = if state.file_filter.is_empty() {
+            "Filter: (empty) - Press Backspace to clear, type to filter".to_string()
+        } else {
+            format!("Filter: \"{}\" - {} matches", state.file_filter, current_file_list.len())
+        };
+        
+        let filter_paragraph = Paragraph::new(filter_text)
+            .block(Block::default()
+                .title("Filter")
+                .borders(Borders::ALL))
+            .style(Style::default().fg(Color::Yellow));
+        
+        f.render_widget(filter_paragraph, chunks[1]);
+    }
+}
+
+fn render_tracker_selection(f: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &AppState) {
+    let trackers = vec!["seedpool", "torrentleech"];
+    let mut items = vec![
+        ListItem::new("[ ] Select All").style(
+            if state.selected_file_index == 0 {
+                Style::default().bg(Color::DarkGray)
+            } else {
+                Style::default()
+            }
+        )
+    ];
+
+    for (idx, tracker) in trackers.iter().enumerate() {
+        let selected = state.selected_trackers.contains(&tracker.to_string());
+        let item = ListItem::new(format!(
+            "[{}] {}",
+            if selected { "✓" } else { " " },
+            tracker
+        )).style(
+            if state.selected_file_index == idx + 1 {
+                Style::default().bg(Color::DarkGray)
+            } else {
+                Style::default()
+            }
+        );
+        items.push(item);
+    }
+
+    let tracker_list = List::new(items)
+        .block(Block::default()
+            .title("Select Trackers (Click to toggle selections)")
+            .borders(Borders::ALL));
+    
+    f.render_widget(tracker_list, area);
+}
+
+fn render_category_input(f: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &AppState) {
+    let content = vec![
+        Line::from(vec![
+            Span::raw("Enter 4-digit category code (e.g., 0740): "),
+            Span::styled(&state.input_buffer, Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from(""),
+        Line::from("Examples:"),
+        Line::from("  0740 - Comic (E-Book)"),
+        Line::from("  0203 - TV Show Encode"),
+        Line::from("  0144 - Movie WEB-DL"),
+    ];
+
+    let paragraph = Paragraph::new(content)
+        .block(Block::default()
+            .title("Category Input")
+            .borders(Borders::ALL));
+    
+    f.render_widget(paragraph, area);
+}
+
+fn render_log_view(f: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &AppState) {
+    // Read all lines from seedbrr.log file
+    let mut all_logs = Vec::new();
+    
+    // First add UI logs
+    let ui_logs = state.log_output.lock().unwrap();
+    all_logs.extend(ui_logs.iter().cloned());
+    
+    // Then read from seedbrr.log file
+    if let Ok(log_content) = std::fs::read_to_string("seedbrr.log") {
+        for line in log_content.lines() {
+            if !line.trim().is_empty() {
+                all_logs.push(line.to_string());
+            }
         }
     }
     
-    let preflight_paragraph = Paragraph::new(preflight_lines)
-        .block(Block::default().borders(Borders::ALL).title(" ✅ Pre-flight Check "))
-        .style(Style::default().bg(Color::Rgb(8, 8, 32))); // Background color
-    f.render_widget(preflight_paragraph, chunks[3]);
+    let items: Vec<ListItem> = all_logs
+        .iter()
+        .skip(state.log_scroll_offset)
+        .take(area.height as usize - 2)
+        .map(|log| {
+            // Sanitize log lines for display
+            let sanitized = log
+                .replace('\n', " ")  // Replace newlines with spaces
+                .replace('\r', "")   // Remove carriage returns
+                .replace('\t', "  ") // Replace tabs with spaces
+                .chars()
+                .take(area.width as usize - 4) // Truncate to terminal width
+                .collect::<String>();
+            ListItem::new(sanitized)
+        })
+        .collect();
 
-    // Render Bottom Section
-    let bottom_lines = vec![Line::from(vec![Span::styled(
-        "Spam [ESC] to Quit ❌",
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-    )])];
-    let bottom_paragraph = Paragraph::new(bottom_lines)
-        .block(Block::default().borders(Borders::ALL).title(" ⌨  Keys "))
-        .alignment(ratatui::layout::Alignment::Center)
-        .style(Style::default().bg(Color::Rgb(8, 8, 32))); // Background color
-    f.render_widget(bottom_paragraph, chunks[4]);
+    let log_list = List::new(items)
+        .block(Block::default()
+            .title(format!("Logs ({} lines) - Scroll with mouse wheel", all_logs.len()))
+            .borders(Borders::ALL));
+    
+    f.render_widget(log_list, area);
 }
 
-fn activate_upload(
-    input_path: &Option<PathBuf>,
-    selected_trackers: &Vec<String>,
-    custom_category_type: &Option<String>,
-    log_output: Arc<Mutex<Vec<String>>>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if input_path.is_none() {
-        log_output.lock().unwrap().push("Error: No input path selected.".to_string());
-        return Err("Error: No input path selected.".into());
-    }
-
-    if selected_trackers.is_empty() {
-        log_output.lock().unwrap().push("Error: No trackers selected.".to_string());
-        return Err("Error: No trackers selected.".into());
-    }
-
-    let log_file_path = Path::new("seed-tools.log");
-    File::create(log_file_path)?; // Open in write mode to truncate the file
-    log_output.lock().unwrap().push("Cleared seed-tools.log for fresh logs.".to_string());
-
-    let input_path = input_path.as_ref().unwrap();
-    let mut args = vec![input_path.display().to_string()];
-
-    for tracker in selected_trackers {
-        match tracker.as_str() {
-            "🐳 seedpool [SP]" => args.push("--SP".to_string()),
-            "🐛 TorrentLeech [TL]" => args.push("--TL".to_string()),
-            _ => {}
-        }
-    }
-
-    if let Some(category) = custom_category_type {
-        args.push("--custom-cat-type".to_string());
-        args.push(category.clone());
-    }
-
-    // Specify the full path to seed-tools
-    let seed_tools_path = std::env::current_dir()?
-        .join("seed-tools"); // Adjust the relative path as needed
-    log_output.lock().unwrap().push(format!("Using seed-tools path: {:?}", seed_tools_path));
-
-    // Start the seed-tools process with piped stdout and stderr
-    let mut child = Command::new(seed_tools_path)
-        .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
-
-    // Spawn a thread to read stdout
-    let log_output_clone = Arc::clone(&log_output);
-    let stdout_thread = thread::spawn(move || {
-        let reader = BufReader::new(stdout);
-        for line in reader.lines() {
-            if let Ok(line) = line {
-                log_output_clone.lock().unwrap().push(line);
-            }
-        }
-    });
-
-    // Spawn a thread to read stderr
-    let log_output_clone = Arc::clone(&log_output);
-    let stderr_thread = thread::spawn(move || {
-        let reader = BufReader::new(stderr);
-        for line in reader.lines() {
-            if let Ok(line) = line {
-                log_output_clone.lock().unwrap().push(format!("ERROR: {}", line));
-            }
-        }
-    });
-
-    // Wait for the process to complete
-    let status = child.wait()?;
-    if status.success() {
-        log_output.lock().unwrap().push("Upload completed successfully.".to_string());
-    } else {
-        log_output.lock().unwrap().push(format!(
-            "Upload failed with exit code: {}",
-            status.code().unwrap_or(-1)
-        ));
-    }
-
-    // Ensure threads finish processing
-    let _ = stdout_thread.join();
-    let _ = stderr_thread.join();
-
-    Ok(())
+fn render_status_bar(f: &mut ratatui::Frame, area: ratatui::layout::Rect, _state: &AppState) {
+    let status = Paragraph::new("Press Ctrl+Q to quit, F1 for help")
+        .style(Style::default().fg(Color::Gray))
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::ALL));
+    
+    f.render_widget(status, area);
 }
 
-fn help_message(on_main_screen: bool, in_tracker_selection: bool) -> String {
-    if in_tracker_selection {
-        "Use UP/DOWN to navigate, F to toggle trackers, ENTER to confirm.".to_string()
-    } else if on_main_screen {
-        "Press F to select input path, C to set category, U to upload.".to_string()
-    } else {
-        "Use UP/DOWN to navigate, F to select, ENTER to confirm.".to_string()
-    }
-}
-
-fn get_files_in_dir(dir: &Path) -> Vec<String> {
-    let mut visible_entries: Vec<String> = Vec::new();
-    let mut hidden_entries: Vec<String> = Vec::new();
-
-    for entry in WalkDir::new(dir).max_depth(1).into_iter().filter_map(|e| e.ok()) {
-        let file_name = entry.file_name().to_string_lossy().to_string();
-
-        if entry.path() == dir {
-            continue; // Skip the current directory itself
-        }
-
-        if file_name.starts_with('.') {
-            // Add hidden files and folders to the hidden list
-            if entry.path().is_dir() {
-                hidden_entries.push(format!("{}/", file_name));
-            } else {
-                hidden_entries.push(file_name);
-            }
-        } else {
-            // Add visible files and folders to the visible list
-            if entry.path().is_dir() {
-                visible_entries.push(format!("{}/", file_name));
-            } else {
-                visible_entries.push(file_name);
-            }
+// --- Helper Functions ---
+fn get_files_in_dir(dir: &PathBuf) -> Vec<String> {
+    let mut entries = Vec::new();
+    
+    if let Ok(read_dir) = std::fs::read_dir(dir) {
+        for entry in read_dir.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            entries.push(name);
         }
     }
-
-    // Sort both lists alphabetically
-    visible_entries.sort();
-    hidden_entries.sort();
-
-    // Combine visible entries first, then hidden entries
-    let mut entries = visible_entries;
-    entries.extend(hidden_entries);
-
-    // Ensure ".." is always at the top
-    if dir.parent().is_some() {
-        entries.insert(0, "🗂️ ..".to_string());
-    }
-
+    
+    entries.sort();
+    entries.insert(0, "..".to_string());
     entries
 }
 
-fn tracker_select(
-    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
-    tracker_options: &[&str],
-    selected_tracker_index: &mut usize,
-    tracker_scroll_offset: &mut usize,
-    selected_trackers: &mut Vec<String>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    loop {
-        let size = terminal.size()?;
-        let area = Rect::new(0, 0, size.width, size.height);
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(3)].as_ref())
-            .split(area);
-
-        let content_area_height = chunks[0].height.saturating_sub(1) as usize;
-
-        // Ensure scrolling logic
-        if *tracker_scroll_offset > tracker_options.len().saturating_sub(content_area_height) {
-            *tracker_scroll_offset = tracker_options.len().saturating_sub(content_area_height);
-        }
-
-        let visible_trackers = &tracker_options[*tracker_scroll_offset
-            ..(*tracker_scroll_offset + content_area_height).min(tracker_options.len())];
-
-        // Draw the tracker selection UI
-        terminal.draw(|f| {
-            let tracker_list = List::new(
-                visible_trackers
-                    .iter()
-                    .enumerate()
-                    .map(|(i, tracker)| {
-                        let style = if i + *tracker_scroll_offset == *selected_tracker_index {
-                            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-                        } else if selected_trackers.contains(&tracker.to_string()) {
-                            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default()
-                        };
-                        ListItem::new(Span::styled(*tracker, style))
-                    })
-                    .collect::<Vec<_>>(),
-            )
-            .block(Block::default().borders(Borders::ALL).title("Select Tracker"));
-
-            f.render_widget(tracker_list, chunks[0]);
-
-            // Render help message
-            let help_message = "Use UP/DOWN to navigate, F to toggle trackers, ENTER to confirm.";
-            let help_paragraph = Paragraph::new(help_message)
-                .block(Block::default().borders(Borders::ALL).title("Help"));
-            f.render_widget(help_paragraph, chunks[1]);
-        })?;
-
-        // Handle keypress events
-        if let Event::Key(key) = event::read()? {
-            match key.code {
-                KeyCode::Up => {
-                    if *selected_tracker_index > 0 {
-                        *selected_tracker_index -= 1;
-                        if *selected_tracker_index < *tracker_scroll_offset {
-                            *tracker_scroll_offset -= 1;
-                        }
-                    }
-                }
-                KeyCode::Down => {
-                    if *selected_tracker_index < tracker_options.len() - 1 {
-                        *selected_tracker_index += 1;
-                        if *selected_tracker_index >= *tracker_scroll_offset + content_area_height {
-                            *tracker_scroll_offset += 1;
-                        }
-                    }
-                }
-                KeyCode::Char('f') | KeyCode::Char('F') => {
-                    let tracker = tracker_options[*selected_tracker_index].to_string();
-                    if tracker == "✔️ Select All" {
-                        if selected_trackers.len() == tracker_options.len() - 1 {
-                            selected_trackers.clear();
-                        } else {
-                            *selected_trackers = tracker_options[1..]
-                                .iter()
-                                .map(|&s| s.to_string())
-                                .collect();
-                        }
-                    } else if selected_trackers.contains(&tracker) {
-                        selected_trackers.retain(|t| t != &tracker);
-                    } else {
-                        selected_trackers.push(tracker);
-                    }
-                }
-                KeyCode::Enter => {
-                    // Confirm tracker selection and exit
-                    return Ok(()); // Exit the tracker selection loop
-                }
-                KeyCode::Esc => {
-                    // Exit tracker selection without changes
-                    return Ok(()); // Exit the tracker selection loop
-                }
-                _ => {}
-            }
-        }
-    }
+fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
+    let config_path = "config/config.yaml";
+    let content = std::fs::read_to_string(config_path)?;
+    let config: Config = serde_yaml::from_str(&content)?;
+    Ok(config)
 }
 
-fn read_log_file(log_file_path: &Path, log_output: Arc<Mutex<Vec<String>>>) {
-    if let Ok(file) = File::open(log_file_path) {
-        let reader = BufReader::new(file);
-        let lines: Vec<String> = reader.lines().filter_map(|line| line.ok()).collect();
-
-        let mut log_output_guard = log_output.lock().unwrap();
-        *log_output_guard = lines;
+fn start_preflight_check(state: &mut AppState) -> io::Result<()> {
+    // Check if input path is available
+    if state.input_path.is_none() {
+        state.add_log("❌ No input path selected!".to_string());
+        return Ok(());
     }
-}
-
-fn start_log_refresh(
-    log_file_path: PathBuf,
-    log_output: Arc<Mutex<Vec<String>>>,
-    tx: mpsc::Sender<()>, // Notify the main loop to redraw the UI
-    log_scroll_offset: Arc<Mutex<usize>>, // Shared scroll offset for logs
-) {
+    
+    state.preflight_running = true;
+    state.add_log("Starting preflight check...".to_string());
+    
+    let input_path = state.input_path.clone().unwrap();
+    let log_output = Arc::clone(&state.log_output);
+    let dry_run = state.dry_run;
+    
+    // Load config for preflight check
+    let config = match load_config() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            log_output.lock().unwrap().push(format!("❌ Failed to load config: {}", e));
+            state.preflight_running = false;
+            return Ok(());
+        }
+    };
+    
+    // Create a channel to communicate results
+    let (tx, rx) = std::sync::mpsc::channel::<PreflightCheckResult>();
+    state.preflight_receiver = Some(rx);
+    
     thread::spawn(move || {
-        let mut file = match File::open(&log_file_path) {
-            Ok(file) => file,
-            Err(_) => return, // Exit if the file cannot be opened
+        log_output.lock().unwrap().push(format!("🔍 Running preflight for: {}", input_path.display()));
+        
+        let path_str = match input_path.to_str() {
+            Some(s) => s,
+            None => {
+                log_output.lock().unwrap().push("❌ Invalid path encoding".to_string());
+                return;
+            }
         };
-
-        let _ = file.seek(SeekFrom::End(0)); // Start tailing from the end of the file
-        let mut reader = BufReader::new(file);
-
-        loop {
-            let mut buffer = String::new();
-            let mut new_lines = Vec::new();
-
-            // Read multiple lines in a batch
-            for _ in 0..10 {
-                match reader.read_line(&mut buffer) {
-                    Ok(0) => break, // No new data
-                    Ok(_) => {
-                        // Filter only `[INFO]` messages
-                        if buffer.contains("[INFO]") {
-                            new_lines.push(buffer.trim_end().to_string());
-                        }
-                        buffer.clear();
+        
+        match preflight_check(path_str, &config, dry_run) {
+            Ok(result) => {
+                let mut logs = log_output.lock().unwrap();
+                logs.push("\n===== PREFLIGHT CHECK RESULTS =====".to_string());
+                logs.push(format!("📁 Path: {}", input_path.display()));
+                logs.push(format!("📝 Release Name: {}", result.release_name));
+                logs.push(format!("🏷️  Generated Name: {}", result.generated_release_name));
+                logs.push(format!("🎯 Type: {}", result.release_type));
+                
+                if result.is_boxset {
+                    logs.push("📦 Format: Season Pack/Boxset".to_string());
+                } else if result.episode_number.is_some() && result.episode_number != Some(0) {
+                    logs.push("📺 Format: Single Episode".to_string());
+                }
+                
+                if let Some(season) = result.season_number {
+                    if let Some(episode) = result.episode_number {
+                        logs.push(format!("📺 Season: {} | Episode: {}", season, episode));
+                    } else {
+                        logs.push(format!("📺 Season: {}", season));
                     }
-                    Err(_) => break, // Exit on error
                 }
-            }
-
-            if !new_lines.is_empty() {
-                // Add the new lines to the log output
-                let mut log_output_guard = log_output.lock().unwrap();
-                log_output_guard.extend(new_lines);
-
-                // Automatically scroll to the bottom if the user hasn't manually scrolled
-                let mut log_scroll_offset_guard = log_scroll_offset.lock().unwrap();
-                let total_lines = log_output_guard.len();
-                let visible_lines = 15; // Adjust this to match the height of your log view
-                if *log_scroll_offset_guard >= total_lines.saturating_sub(visible_lines) {
-                    *log_scroll_offset_guard = total_lines.saturating_sub(visible_lines);
+                
+                logs.push(format!("\n🔍 Duplicate Check: {}", result.dupe_check));
+                
+                logs.push("\n🆔 External IDs:".to_string());
+                if result.tmdb_id > 0 {
+                    logs.push(format!("  TMDB: {}", result.tmdb_id));
                 }
-
-                // Notify the main loop to redraw the UI
-                let _ = tx.send(());
+                if let Some(ref imdb_id) = result.imdb_id {
+                    logs.push(format!("  IMDB: {}", imdb_id));
+                }
+                if let Some(ref tvdb_id) = result.tvdb_id {
+                    logs.push(format!("  TVDB: {}", tvdb_id));
+                }
+                
+                // Add IGDB data for games
+                if result.release_type.contains("Game") && result.igdb_id.is_some() {
+                    logs.push("\n🎮 IGDB Information:".to_string());
+                    if let Some(igdb_id) = result.igdb_id {
+                        logs.push(format!("  ID: {}", igdb_id));
+                    }
+                    if let Some(ref developer) = result.igdb_developer {
+                        logs.push(format!("  Developer: {}", developer));
+                    }
+                    if let Some(ref publisher) = result.igdb_publisher {
+                        logs.push(format!("  Publisher: {}", publisher));
+                    }
+                    if let Some(ref genres) = result.igdb_genres {
+                        logs.push(format!("  Genres: {}", genres));
+                    }
+                    if let Some(rating) = result.igdb_rating {
+                        logs.push(format!("  Rating: {:.1}/100", rating));
+                    }
+                    if let Some(ref platforms) = result.igdb_platforms {
+                        logs.push(format!("  Platforms: {}", platforms.join(", ")));
+                    }
+                }
+                
+                if !result.audio_languages.is_empty() {
+                    logs.push(format!("\n🔊 Audio Languages: {}", result.audio_languages.join(", ")));
+                } else if !result.release_type.contains("Game") {
+                    logs.push("\n🔊 Audio Languages: Unknown".to_string());
+                }
+                
+                if !result.tracker_categories.is_empty() {
+                    logs.push("\n📋 Tracker Category Mappings:".to_string());
+                    for (tracker, category) in &result.tracker_categories {
+                        logs.push(format!("  {} → {}", tracker, category));
+                    }
+                }
+                
+                logs.push("\n✅ Preflight check completed!".to_string());
+                
+                // Send the result through the channel
+                let _ = tx.send(result);
             }
-
-            // Sleep briefly to avoid excessive CPU usage
-            thread::sleep(Duration::from_millis(50));
+            Err(e) => {
+                log_output.lock().unwrap().push(format!("❌ Preflight check failed: {}", e));
+                // Still need to complete the operation
+                // Send a dummy result to unblock the UI
+                let _ = tx.send(PreflightCheckResult {
+                    release_name: "Error".to_string(),
+                    generated_release_name: "Error".to_string(),
+                    dupe_check: format!("Error: {}", e),
+                    tmdb_id: 0,
+                    imdb_id: None,
+                    tvdb_id: None,
+                    excluded_files: "N/A".to_string(),
+                    album_cover: "N/A".to_string(),
+                    audio_languages: Vec::new(),
+                    release_type: "Error".to_string(),
+                    season_number: None,
+                    episode_number: None,
+                    is_boxset: false,
+                    tracker_categories: Vec::new(),
+                    // IGDB fields
+                    igdb_id: None,
+                    igdb_genres: None,
+                    igdb_developer: None,
+                    igdb_publisher: None,
+                    igdb_rating: None,
+                    igdb_summary: None,
+                    igdb_platforms: None,
+                });
+            }
         }
+        
+        // Log thread completion
+        log_output.lock().unwrap().push("🏁 Preflight thread completed".to_string());
     });
+    
+    // Don't switch to log view, stay on main
+    Ok(())
 }
 
-fn parse_preflight_log(preflight_log_path: &Path) -> (Vec<String>, bool) {
-    let mut log_data = vec![
-        "Title: N/A".to_string(),
-        "Release Name: N/A".to_string(),
-        "Dupe Check: N/A".to_string(),
-        "Release Type: N/A".to_string(),
-        "Season Number: N/A".to_string(),
-        "Episode Number: N/A".to_string(),
-        "TMDB ID: N/A".to_string(),
-        "IMDb ID: N/A".to_string(),
-        "TVDB ID: N/A".to_string(),
-        "Album Cover: N/A".to_string(), // Default value for Album Cover
-        "Excluded Files: N/A".to_string(), // Default value for Excluded Files
-        "Audio Languages: N/A".to_string(),
-    ];
+fn start_upload(state: &mut AppState) -> io::Result<()> {
+    if state.input_path.is_none() || state.selected_trackers.is_empty() {
+        state.add_log("Error: Input path and trackers must be selected".to_string());
+        return Ok(());
+    }
 
-    let mut is_pending = true; // Assume pending until we find meaningful data
-    let mut is_music_log = false; // Flag to detect music preflight logs
-
-    if let Ok(file) = File::open(preflight_log_path) {
-        let reader = BufReader::new(file);
-        for line in reader.lines().filter_map(|line| line.ok()) {
-            is_pending = false; // Mark as not pending if we find any data
-
-            if line.starts_with("Log Type: Music") {
-                is_music_log = true; // Identify this as a music preflight log
-            } else if line.starts_with("Title:") && !line.contains("Pre-flight Check Results:") {
-                log_data[0] = line;
-            } else if line.starts_with("Release Name:") {
-                log_data[1] = line;
-            } else if line.starts_with("Dupe Check:") {
-                log_data[2] = line;
-            } else if line.starts_with("Release Type:") {
-                log_data[3] = line;
-            } else if line.starts_with("Season Number:") {
-                log_data[4] = line;
-            } else if line.starts_with("Episode Number:") {
-                log_data[5] = line;
-            } else if line.starts_with("TMDB ID:") {
-                log_data[6] = line;
-            } else if line.starts_with("IMDb ID:") {
-                log_data[7] = line;
-            } else if line.starts_with("TVDB ID:") {
-                log_data[8] = line;
-            } else if line.starts_with("Album Cover:") {
-                // Handle "Album Cover:" field for both music and non-music logs
-                let cleaned_line = line.replace("Album Cover: ", "").trim().to_string(); // Remove redundant prefix and trim whitespace
-                let value = if cleaned_line.eq_ignore_ascii_case("Available") {
-                    "Album Cover: ✔️ Available".to_string()
-                } else if cleaned_line.eq_ignore_ascii_case("Not Available")
-                    || cleaned_line.eq_ignore_ascii_case("Not Found")
-                {
-                    "Album Cover: ❌ Not Found".to_string() // Use "Not Found" for music logs
-                } else {
-                    "Album Cover: N/A".to_string() // Use "N/A" for non-music logs
-                };
-                log_data[9] = value; // Store Album Cover in index 9
-            } else if line.starts_with("Excluded Files:") {
-                // Handle "Excluded Files:" field for both music and non-music logs
-                let value = if is_music_log {
-                    "Strip From Videos: N/A".to_string() // Set to N/A for music logs
-                } else if line.contains("Yes") {
-                    "Strip From Videos: ✔️ Enabled".to_string()
-                } else {
-                    "Strip From Videos: ❌ Disabled".to_string()
-                };
-                log_data[10] = value; // Store Excluded Files in index 10
-            } else if line.starts_with("Audio Languages:") {
-                // Parse the audio languages field and remove brackets/quotes
-                let audio_line = line.replace("Audio Languages: ", "");
-                let audio_cleaned = audio_line
-                    .trim_start_matches('[')
-                    .trim_end_matches(']')
-                    .replace('"', "");
-                log_data[11] = format!("Audio Languages: {}", audio_cleaned);
-            }
+    state.upload_running = true;
+    state.clear_logs();
+    state.add_log("Starting upload process...".to_string());
+    
+    let input_path = state.input_path.clone().unwrap();
+    let selected_trackers = state.selected_trackers.clone();
+    let category_code = state.category_code.clone();
+    let log_output = Arc::clone(&state.log_output);
+    let dry_run = state.dry_run;
+    
+    // Load config for the upload
+    let config = match load_config() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            state.add_log(format!("❌ Failed to load config: {}", e));
+            return Ok(());
         }
-    }
-
-    // If it's a music log but no Album Cover field was found, set it to "Not Found"
-    if is_music_log && log_data[9] == "Album Cover: N/A" {
-        log_data[9] = "Album Cover: ❌ Not Found".to_string();
-    }
-
-    (log_data, is_pending)
-}
-
-fn start_log_tail(terminal_emulator: Arc<TerminalEmulator>, log_file_path: &str) {
-    let log_file_path = log_file_path.to_string(); // Clone the path into a String
+    };
+    
     thread::spawn(move || {
-        let mut child = Command::new("tail")
-            .arg("-f")
-            .arg(log_file_path) // Use the cloned String
-            .stdout(Stdio::piped())
-            .spawn()
-            .expect("Failed to start tail process");
-
-        if let Some(stdout) = child.stdout.take() {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines() {
-                if let Ok(line) = line {
-                    terminal_emulator.feed(&line);
+        let path_str = input_path.to_string_lossy().to_string();
+        
+        // Log what we're doing
+        log_output.lock().unwrap().push(format!("\n📁 Processing: {}", path_str));
+        log_output.lock().unwrap().push(format!("🎯 Trackers: {}", selected_trackers.join(", ")));
+        
+        if dry_run {
+            log_output.lock().unwrap().push("🚫 DRY-RUN MODE - No actual uploads will occur".to_string());
+        }
+        
+        if let Some(ref code) = category_code {
+            log_output.lock().unwrap().push(format!("🏷️  Category Code: {}", code));
+        } else {
+            log_output.lock().unwrap().push("🤖 Using auto-detection for media type".to_string());
+        }
+        
+        // Process the upload using ProcessBuilder
+        let result = if let Some(code) = category_code {
+            // Parse the 4-digit code
+            match parse_seedpool_category_type(&code) {
+                Ok(torrent_info) => {
+                    log_output.lock().unwrap().push(format!("📋 Classification: {}", torrent_info.description()));
+                    
+                    // Process with explicit category/type using ProcessBuilder
+                    match process_builder::upload_builder(&path_str, std::sync::Arc::new(config.clone()))
+                        .force_category(format!("{}Category::{}", 
+                            if torrent_info.is_video_category() { "Video" }
+                            else if torrent_info.is_audio_category() { "Audio" }
+                            else if torrent_info.is_ebook_category() { "Ebook" }
+                            else if torrent_info.is_game_category() { "Game" }
+                            else { "Hobby" },
+                            torrent_info.category_name()
+                        ))
+                        .dry_run(dry_run)
+                        .build() {
+                        Ok(_result) => Ok(()),
+                        Err(e) => Err(e),
+                    }
                 }
+                Err(e) => {
+                    Err(format!("Failed to parse category code: {}", e))
+                }
+            }
+        } else {
+            // Auto-detect and process using ProcessBuilder
+            match process_builder::upload_builder(&path_str, std::sync::Arc::new(config.clone()))
+                .dry_run(dry_run)
+                .build() {
+                Ok(_result) => Ok(()),
+                Err(e) => Err(e),
+            }
+        };
+        
+        // Handle result
+        match result {
+            Ok(_) => {
+                if dry_run {
+                    log_output.lock().unwrap().push("\n✅ Dry-run completed successfully!".to_string());
+                    log_output.lock().unwrap().push("ℹ️  No files were actually uploaded".to_string());
+                } else {
+                    log_output.lock().unwrap().push("\n✅ Upload completed successfully!".to_string());
+                }
+                
+                // Show success for each selected tracker
+                for tracker in &selected_trackers {
+                    if dry_run {
+                        log_output.lock().unwrap().push(format!("  ✓ {} upload would succeed", tracker));
+                    } else {
+                        log_output.lock().unwrap().push(format!("  ✓ {} upload complete", tracker));
+                    }
+                }
+            }
+            Err(e) => {
+                log_output.lock().unwrap().push(format!("\n❌ {} failed: {}", if dry_run { "Dry-run" } else { "Upload" }, e));
             }
         }
     });
+    
+    state.current_state = UIState::ViewingLog;
+    Ok(())
 }

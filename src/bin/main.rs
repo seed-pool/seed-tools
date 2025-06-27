@@ -5,14 +5,17 @@ use std::{
 use log::{info, error, debug, LevelFilter};
 use simplelog::{Config as SimpleLogConfig, CombinedLogger, WriteLogger};
 use std::error::Error;
-use seed_tools::utils::{generate_release_name, validate_file_path};
-use seed_tools::types::{Config, SeedpoolConfig, TorrentLeechConfig};
-use seed_tools::definitions::seedpool::{SeedpoolTorrentInfo, parse_seedpool_category_type, print_seedpool_categories_and_types};
-use seed_tools::sync;
-use seed_tools::irc::launch_irc_client;
-use seed_tools::ui;
-use seed_tools::media::process::{process_upload, process_upload_with_info};
-use seed_tools::preflight::{preflight_check, print_preflight_results};
+use seedbrr::utils::{generate_release_name, validate_file_path};
+use seedbrr::types::{Config, SeedpoolConfig, TorrentLeechConfig};
+use seedbrr::definitions::{
+    seedpool::{SeedpoolTorrentInfo, parse_seedpool_category_type, print_seedpool_categories_and_types},
+    TorrentInfo,
+};
+use seedbrr::sync;
+use seedbrr::irc::launch_irc_client;
+use seedbrr::ui;
+use seedbrr::process_builder;
+use seedbrr::preflight::{preflight_check, print_preflight_results};
 use std::fs::OpenOptions;
 use clap::{Parser, CommandFactory};
 
@@ -100,18 +103,18 @@ struct Cli {
 
 #[derive(Parser, Debug)]
 enum Commands {
-    /// Check for duplicates in Seedpool
+    /// Check for duplicates across trackers using input path
     Check {
-        /// The name of the release to check for duplicates
+        /// Path to the media file or directory to check for duplicates
         #[arg(index = 1)]
-        name: String,
+        input_path: PathBuf,
     },
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     // --- Initialize Logging ---
-    let log_path = Path::new("seed-tools.log");
+    let log_path = Path::new("seedbrr.log");
     CombinedLogger::init(vec![WriteLogger::new(
         LevelFilter::Debug,
         SimpleLogConfig::default(),
@@ -228,22 +231,37 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // --- Handle Commands ---
     if let Some(command) = cli.command {
         match command {
-            Commands::Check { name } => {
-                info!("Running check for duplicates with name: {}", name);
+            Commands::Check { input_path } => {
+                let input_path_str = input_path.to_str().ok_or("Invalid input path string")?;
+                info!("Running duplicate check for input path: {}", input_path_str);
 
-                // Call check_seedpool
-                match sync::check_seedpool(&name, &seedpool_config.general.api_key) {
-                    Ok(Some(download_link)) => {
-                        println!("Duplicate found for '{}'. Download link: {}", name, download_link);
-                        std::process::exit(1); // Exit with non-zero code if duplicate is found
-                    }
-                    Ok(None) => {
-                        println!("No duplicate found for '{}'.", name);
-                        std::process::exit(0); // Exit with zero code if no duplicate is found
+                // Validate input path
+                validate_file_path(input_path_str)
+                    .map_err(|e| format!("Input path validation failed: {}", e))?;
+
+                // Use the process builder for duplicate checking
+                match seedbrr::process_builder::duplicate_check_builder(input_path_str, std::sync::Arc::new(main_config.clone())).build() {
+                    Ok(result) => {
+                        // Check if we found duplicates
+                        if let Some(preflight_data) = result.preflight_data {
+                            if preflight_data.dupe_check.contains("FAIL") {
+                                println!("🚫 Duplicate found for '{}'", result.title);
+                                println!("Duplicate check result: {}", preflight_data.dupe_check);
+                                std::process::exit(1);
+                            } else {
+                                println!("✅ No duplicates found for '{}'", result.title);
+                                println!("Duplicate check result: {}", preflight_data.dupe_check);
+                                std::process::exit(0);
+                            }
+                        } else {
+                            println!("⚠️  Could not perform duplicate check for '{}'", result.title);
+                            std::process::exit(2);
+                        }
                     }
                     Err(e) => {
-                        error!("Error checking for duplicate: {}", e);
-                        std::process::exit(2); // Exit with a different non-zero code for errors
+                        error!("Error during duplicate check: {}", e);
+                        println!("Error during duplicate check: {}", e);
+                        std::process::exit(2);
                     }
                 }
             }
@@ -295,28 +313,40 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
             };
             
-            // Process with the explicit torrent info
-            if let Err(e) = process_upload_with_info(
-                input_path_str,
-                &torrent_info,
-                &main_config,
-                cli.dry_run,
-            ) {
-                error!("Error processing upload: {}", e);
-                return Err(e.into());
+            // Process with the explicit torrent info using process builder
+            match process_builder::upload_builder(input_path_str, std::sync::Arc::new(main_config.clone()))
+                .force_category(format!("{}Category::{}", 
+                    if torrent_info.is_video_category() { "Video" }
+                    else if torrent_info.is_audio_category() { "Audio" }
+                    else if torrent_info.is_ebook_category() { "Ebook" }
+                    else if torrent_info.is_game_category() { "Game" }
+                    else { "Hobby" },
+                    torrent_info.category_name()
+                ))
+                .dry_run(cli.dry_run)
+                .build() {
+                Ok(result) => {
+                    info!("Upload processing completed successfully for: {}", result.title);
+                }
+                Err(e) => {
+                    error!("Error processing upload: {}", e);
+                    return Err(e.into());
+                }
             }
         } else {
-            // No -c flag provided, use auto-detection
+            // No -c flag provided, use auto-detection with process builder
             info!("No category/type code provided, using auto-detection for: {}", input_path_str);
             
-            if let Err(e) = process_upload(
-                input_path_str,
-                None,
-                &main_config,
-                cli.dry_run,
-            ) {
-                error!("Error processing upload: {}", e);
-                return Err(e.into());
+            match process_builder::upload_builder(input_path_str, std::sync::Arc::new(main_config.clone()))
+                .dry_run(cli.dry_run)
+                .build() {
+                Ok(result) => {
+                    info!("Upload processing completed successfully for: {}", result.title);
+                }
+                Err(e) => {
+                    error!("Error processing upload: {}", e);
+                    return Err(e.into());
+                }
             }
         }
         
@@ -327,6 +357,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         return Ok(()); // Exit cleanly
     }
 
-    info!("Seed Tools finished.");
+    info!("seedbrr finished.");
     Ok(())
 }

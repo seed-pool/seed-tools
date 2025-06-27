@@ -1,0 +1,78 @@
+# TorrentLeech tracker configuration
+# Copy this file to torrentleech.yaml and update with your credentials
+
+general:
+  enabled: true
+  announce_url_1: "https://torrentleech.org/announce/your_passkey"
+  announce_url_2: "https://torrentleech.org/announce2/your_passkey"
+
+settings:
+  stripshit_from_videos: false
+  tl_key: "your_torrentleech_api_key"
+  upload_url: "https://torrentleech.org/api/upload"
+  custom_description: ""
+  
+  # Upload components
+  enable_mediainfo: true
+  enable_screenshots: false  # TL handles screenshots
+  enable_sample: false
+  enable_nfo: true
+  enable_tmdb: true
+  enable_torrent_creation: false
+  enable_duplicate_check: true
+  screenshot_count: 4
+
+# TorrentLeech category IDs
+categories:
+  # Movies
+  "Movies/Bluray": 8
+  "Movies/4K": 41
+  "Movies/HD": 11
+  "Movies/DVD": 12
+  "Movies/SD": 13
+  "Movies/Boxsets": 14
+  "Movies/Documentaries": 29
+  
+  # TV
+  "TV/Episodes": 26
+  "TV/HD": 32
+  "TV/SD": 27
+  "TV/Boxsets": 34
+  "TV/4K": 43
+  
+  # Games
+  "Games/PC": 17
+  "Games/PS4": 39
+  "Games/PS3": 18
+  "Games/Xbox360": 19
+  "Games/Xbox": 20
+  "Games/PSP": 21
+  "Games/Wii": 22
+  "Games/NDS": 23
+  "Games/Mac": 30
+  
+  # Music
+  "Music/Audio": 31
+  "Music/Videos": 16
+  "Music/Flac": 35
+  
+  # Apps
+  "Apps/PC": 15
+  "Apps/Mac": 36
+  "Apps/Mobile": 24
+  "Apps/0DAY": 25
+  
+  # Ebooks
+  "Ebooks": 45
+  "Education": 46
+  
+  # Animation
+  "Animation": 28
+  "Anime": 28
+  
+  # Other
+  "Foreign": 37
+  "XXX/HD": 38
+  "XXX/SD": 9
+  "XXX/IMGSET": 10
+  "Other": 40

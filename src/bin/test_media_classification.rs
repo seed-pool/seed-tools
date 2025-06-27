@@ -1,7 +1,7 @@
-use seed_tools::media::video::classify_video_content;
-use seed_tools::media::audio::classify_audio_content;
-use seed_tools::media::ebook::classify_ebook_content;
-use seed_tools::types::{AudioType, VideoCategory, AudioCategory};
+use seedbrr::media::video::classify_video_content;
+use seedbrr::media::audio::classify_audio_content;
+use seedbrr::media::ebook::classify_ebook_content;
+use seedbrr::types::{AudioType, VideoCategory, AudioCategory};
 use clap::{Parser, ValueEnum};
 use std::fs;
 use std::path::Path;
@@ -620,7 +620,7 @@ fn test_ebook_classification(filenames: &[String], logger: &mut Logger) {
         log_println!(logger, "");
         
         // Update stats
-        if metadata.category == seed_tools::types::EbookCategory::Unknown {
+        if metadata.category == seedbrr::types::EbookCategory::Unknown {
             stats.unknown += 1;
         } else {
             stats.classified += 1;

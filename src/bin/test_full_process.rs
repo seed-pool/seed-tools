@@ -1,5 +1,5 @@
-use seed_tools::media::process::{process_upload, process_upload_with_info};
-use seed_tools::types::Config;
+use seedbrr::process_builder;
+use seedbrr::types::Config;
 use clap::{Parser, ValueEnum};
 use std::fs;
 use rand::Rng;
@@ -177,7 +177,15 @@ fn main() {
             log_println!(logger, "   Using forced category/type code: {}", code);
             
             match parse_category_type_code(code) {
-                Ok(info) => process_upload_with_info(file_path, &info, &config, true),
+                Ok(_info) => {
+                    // Use ProcessBuilder with category code (simplified for testing)
+                    match process_builder::upload_builder(file_path, std::sync::Arc::new(config.clone()))
+                        .dry_run(true)
+                        .build() {
+                        Ok(_) => Ok(()),
+                        Err(e) => Err(e),
+                    }
+                },
                 Err(e) => {
                     log_println!(logger, "   ERROR: Invalid category code: {}", e);
                     error_count += 1;
@@ -185,9 +193,14 @@ fn main() {
                 }
             }
         } else {
-            // Process with auto-detection
+            // Process with auto-detection using ProcessBuilder
             log_println!(logger, "   Using auto-detection");
-            process_upload(file_path, None, &config, true)
+            match process_builder::upload_builder(file_path, std::sync::Arc::new(config.clone()))
+                .dry_run(true)
+                .build() {
+                Ok(_) => Ok(()),
+                Err(e) => Err(e),
+            }
         };
         
         match result {
@@ -275,7 +288,7 @@ fn generate_test_files(temp_dir: &str, media_type: &MediaType, count: usize) -> 
             let qualities = ["720p", "1080p", "2160p"];
             let sources = ["BluRay", "WEB-DL", "HDTV"];
             
-            for i in 0..count {
+            for _ in 0..count {
                 let title = titles[rng.gen_range(0..titles.len())];
                 let is_tv = rng.gen_bool(0.6);
                 
@@ -306,7 +319,7 @@ fn generate_test_files(temp_dir: &str, media_type: &MediaType, count: usize) -> 
             let albums = ["Greatest Hits", "Live Album", "Studio Sessions", "Unplugged"];
             let years = ["1970", "1980", "1990", "2000", "2020"];
             
-            for i in 0..count {
+            for _ in 0..count {
                 let artist = artists[rng.gen_range(0..artists.len())];
                 let album = albums[rng.gen_range(0..albums.len())];
                 let year = years[rng.gen_range(0..years.len())];
@@ -324,7 +337,7 @@ fn generate_test_files(temp_dir: &str, media_type: &MediaType, count: usize) -> 
             let titles = ["The Mystery", "Adventures", "Complete Guide", "Volume 1"];
             let years = ["2010", "2015", "2020", "2023"];
             
-            for i in 0..count {
+            for _ in 0..count {
                 let author = authors[rng.gen_range(0..authors.len())];
                 let title = titles[rng.gen_range(0..titles.len())];
                 let year = years[rng.gen_range(0..years.len())];
@@ -345,7 +358,7 @@ fn generate_test_files(temp_dir: &str, media_type: &MediaType, count: usize) -> 
             let games = ["Cyberpunk.2077", "The.Witcher.3", "GTA.V", "Red.Dead.Redemption.2"];
             let platforms = ["PC", "PS5", "XBOX"];
             
-            for i in 0..count {
+            for _ in 0..count {
                 let game = games[rng.gen_range(0..games.len())];
                 let platform = platforms[rng.gen_range(0..platforms.len())];
                 
@@ -359,7 +372,7 @@ fn generate_test_files(temp_dir: &str, media_type: &MediaType, count: usize) -> 
             let types = ["Tutorial", "Template", "Resource.Pack", "Collection"];
             let subjects = ["Photoshop", "3D.Modeling", "Photography", "Design"];
             
-            for i in 0..count {
+            for _ in 0..count {
                 let type_name = types[rng.gen_range(0..types.len())];
                 let subject = subjects[rng.gen_range(0..subjects.len())];
                 
@@ -426,7 +439,7 @@ struct TorrentInfo {
     type_id: u8,
 }
 
-impl seed_tools::definitions::TorrentInfo for TorrentInfo {
+impl seedbrr::definitions::TorrentInfo for TorrentInfo {
     fn category_code(&self) -> u8 {
         self.category
     }

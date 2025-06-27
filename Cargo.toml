@@ -1,6 +1,6 @@
 [package]
-name = "seed-tools"
-version = "0.3.5"
+name = "seedbrr"
+version = "0.54.0"
 edition = "2021"
 
 [dependencies]
@@ -45,7 +45,7 @@ resources = ["binaries/"]
 lto = true
 
 [[bin]]
-name = "seed-tools"
+name = "seedbrr"
 path = "src/bin/main.rs"
 
 [[bin]]
@@ -59,3 +59,7 @@ path = "src/bin/test_full_process.rs"
 [[bin]]
 name = "test-process-classification"
 path = "src/bin/test_process_classification.rs"
+
+[[bin]]
+name = "test-recursive"
+path = "src/bin/test_recursive.rs"

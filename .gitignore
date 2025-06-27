@@ -10,6 +10,5 @@ target
 # Contains mutation testing data
 **/mutants.out*/
 Cargo.lock
-seed-tools
+seedbrr
 bin
-seed-tools

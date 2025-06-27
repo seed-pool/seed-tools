@@ -75,6 +75,10 @@ pub enum VideoSourceType {
     Encode,
     Upscale,
     
+    // Collection types
+    BoxSet,
+    SeasonPack,
+    
     Unknown,
 }
 
@@ -510,8 +514,11 @@ pub struct GeneralConfig {
     pub youtube_api_key: Option<String>,
     pub igdb_client_id: String,
     pub igdb_bearer_token: String,
+    #[serde(default = "default_release_groups_string")]
+    pub release_groups: String,
 }
 
+#[derive(Debug)]
 pub struct PreflightCheckResult {
     pub release_name: String,
     pub generated_release_name: String,
@@ -525,6 +532,16 @@ pub struct PreflightCheckResult {
     pub release_type: String,
     pub season_number: Option<u32>,
     pub episode_number: Option<u32>,
+    pub is_boxset: bool,
+    pub tracker_categories: Vec<(String, String)>, // [(tracker_name, category)]
+    // IGDB fields for games
+    pub igdb_id: Option<u64>,
+    pub igdb_genres: Option<String>,
+    pub igdb_developer: Option<String>,
+    pub igdb_publisher: Option<String>,
+    pub igdb_rating: Option<f64>,
+    pub igdb_summary: Option<String>,
+    pub igdb_platforms: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -566,6 +583,9 @@ pub struct SeedpoolSettings {
     pub custom_description: String,
     #[serde(default = "default_true")]
     pub dupe_checks: bool,
+    // Optional domain override for testing (e.g., "seedpool.tv")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub domain_override: Option<String>,
     // Upload component settings
     #[serde(default = "default_true")]
     pub enable_mediainfo: bool,
@@ -603,6 +623,11 @@ fn default_duplicate_check_setting() -> bool {
 /// Helper function for default screenshot count
 fn default_screenshot_count() -> usize {
     4
+}
+
+/// Helper function for default release groups string
+fn default_release_groups_string() -> String {
+    "CODEX,PLAZA,RELOADED,SKIDROW,CPY,REPACK,KaOs,FitGirl,DODI,ElAmigos,GOG,RIP,P2P,PROPHET,HOODLUM,DARKSiDERS,TiNYiSO,TENOKE,RUNE,JAGUAR,POSTMORTEM,RAZOR1911,FAIRLIGHT,DEVIANCE,VENGEANCE,iNLAWS,VACE,ZEKE,BAT,ALI213,3DM,STEAMPUNKS,PULS3".to_string()
 }
 
 #[derive(Deserialize, Clone)]
@@ -696,6 +721,7 @@ impl Default for Config {
                 youtube_api_key: None,
                 igdb_client_id: String::new(),
                 igdb_bearer_token: String::new(),
+                release_groups: default_release_groups_string(),
             },
             paths: PathsConfig {
                 torrent_dir: String::new(),

@@ -259,41 +259,34 @@ pub fn process_audio(
 /// Detect audio files in a path (without classification)
 pub fn detect_audio_files(path: &str) -> Result<Vec<AudioFile>, String> {
     let mut audio_files = Vec::new();
-    let search_path = Path::new(path);
-    
-    if search_path.is_file() {
-        let extension = search_path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .ok_or_else(|| "Could not determine file extension".to_string())?;
+    detect_audio_files_recursive(Path::new(path), &mut audio_files)?;
+    Ok(audio_files)
+}
 
-        if let Some(audio_type) = AudioType::from_extension(extension) {
-            audio_files.push(AudioFile {
-                path: search_path.to_path_buf(),
-                audio_type,
-            });
+/// Recursively search for audio files in a directory tree
+fn detect_audio_files_recursive(path: &Path, audio_files: &mut Vec<AudioFile>) -> Result<(), String> {
+    if path.is_file() {
+        if let Some(extension) = path.extension().and_then(|ext| ext.to_str()) {
+            if let Some(audio_type) = AudioType::from_extension(extension) {
+                audio_files.push(AudioFile {
+                    path: path.to_path_buf(),
+                    audio_type,
+                });
+            }
         }
-    } else if search_path.is_dir() {
-        for entry in std::fs::read_dir(search_path)
-            .map_err(|e| format!("Failed to read directory: {}", e))? 
+    } else if path.is_dir() {
+        for entry in std::fs::read_dir(path)
+            .map_err(|e| format!("Failed to read directory {:?}: {}", path, e))? 
         {
             let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
-            let file_path = entry.path();
+            let entry_path = entry.path();
             
-            if file_path.is_file() {
-                if let Some(extension) = file_path.extension().and_then(|ext| ext.to_str()) {
-                    if let Some(audio_type) = AudioType::from_extension(extension) {
-                        audio_files.push(AudioFile {
-                            path: file_path,
-                            audio_type,
-                        });
-                    }
-                }
-            }
+            // Recursively process subdirectories and files
+            detect_audio_files_recursive(&entry_path, audio_files)?;
         }
     }
     
-    Ok(audio_files)
+    Ok(())
 }
 
 
@@ -477,4 +470,55 @@ pub fn classify_audio_content(path: &Path, audio_type: &AudioType) -> AudioMetad
     
     debug!("Audio classification result: {:?}", metadata);
     metadata
+}
+
+/// Classify audio content for upload pipeline
+pub fn classify_for_upload(input_path: &str, metadata: &serde_json::Value) -> Result<(Option<String>, Option<String>, serde_json::Value), String> {
+    // Check if we already have classification in metadata
+    if let Some(category_str) = metadata.get("category").and_then(|c| c.as_str()) {
+        let category = match category_str {
+            "Audiobook" => Some("AudioCategory::Audiobook".to_string()),
+            "Podcast" => Some("AudioCategory::Podcast".to_string()),
+            _ => Some("AudioCategory::Music".to_string()),
+        };
+        
+        return Ok((category, None, metadata.clone()));
+    }
+    
+    // Otherwise, detect and classify
+    if let Ok(audio_files) = detect_audio_files(input_path) {
+        if let Some(audio_file) = audio_files.first() {
+            let audio_metadata = classify_audio_content(&audio_file.path, &audio_file.audio_type);
+            
+            let category = match audio_metadata.category {
+                AudioCategory::Audiobook => Some("AudioCategory::Audiobook".to_string()),
+                AudioCategory::Podcast => Some("AudioCategory::Podcast".to_string()),
+                _ => Some("AudioCategory::Music".to_string()),
+            };
+            
+            // Manually create JSON metadata
+            let json_metadata = serde_json::json!({
+                "artist": audio_metadata.artist,
+                "album": audio_metadata.album,
+                "title": audio_metadata.title,
+                "year": audio_metadata.year,
+                "track_number": audio_metadata.track_number,
+                "disc_number": audio_metadata.disc_number,
+                "category": format!("{:?}", audio_metadata.category),
+                "source_type": format!("{:?}", audio_metadata.source_type),
+                "format": format!("{:?}", audio_metadata.format),
+                "is_lossless": audio_metadata.is_lossless,
+                "is_24bit": audio_metadata.is_24bit,
+                "sample_rate": audio_metadata.sample_rate,
+                "is_various_artists": audio_metadata.is_various_artists,
+                "label": audio_metadata.label,
+                "catalog_number": audio_metadata.catalog_number,
+            });
+            
+            return Ok((category, None, json_metadata));
+        }
+    }
+    
+    // Default to music
+    Ok((Some("AudioCategory::Music".to_string()), None, metadata.clone()))
 }

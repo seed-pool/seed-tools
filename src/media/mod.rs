@@ -8,4 +8,4 @@ pub mod process;
 pub mod video;
 
 // Re-export commonly used types from process module
-pub use process::{auto_detect_content_type, DetectionResult};
+// process module functions are now replaced by ProcessBuilder pattern

@@ -174,6 +174,10 @@ pub async fn launch_irc_client() -> Result<(), Box<dyn std::error::Error>> {
                 if crossterm::event::poll(std::time::Duration::from_millis(10))? {
                     if let Event::Key(key) = crossterm::event::read()? {
                         match key.code {
+                            KeyCode::Char('c') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                                // Exit on Ctrl+C
+                                return Ok(());
+                            }
                             KeyCode::Char(c) => {
                                 input.push(c);
                                 history_position = None; // Reset history navigation when typing
@@ -220,8 +224,8 @@ pub async fn launch_irc_client() -> Result<(), Box<dyn std::error::Error>> {
                                     input = command_history[pos].clone();
                                 }
                             }
-                            KeyCode::Esc | KeyCode::Char('c') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
-                                // Exit on Esc or Ctrl+C
+                            KeyCode::Esc => {
+                                // Exit on Esc
                                 return Ok(());
                             }
                             _ => {}

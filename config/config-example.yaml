@@ -1,0 +1,62 @@
+# Main configuration file for seedbrr
+# Copy this file to config.yaml and update with your values
+general:
+  # The Movie Database API key for fetching movie/TV metadata
+  # Get your API key from: https://www.themoviedb.org/settings/api
+  tmdb_api_key: "your_tmdb_api_key_here"
+  # IGDB (Internet Game Database) credentials for game metadata
+  # Register at: https://api-docs.igdb.com/#getting-started
+  igdb_client_id: "your_igdb_client_id_here"
+  igdb_bearer_token: "your_igdb_bearer_token_here"
+  # Release groups to remove from titles when searching metadata for games, given their ...unorganized naming structures some times.
+  # Add any additional groups you want filtered out if something isn't classifying or retrieving metadata correctly
+  release_groups: "CODEX,PLAZA,RELOADED,SKIDROW,CPY,REPACK,KaOs,FitGirl,DODI,ElAmigos,GOG,RIP,P2P,PROPHET,HOODLUM,DARKSiDERS,TiNYiSO,TENOKE,RUNE,JAGUAR,POSTMORTEM,RAZOR1911,FAIRLIGHT,DEVIANCE,VENGEANCE,iNLAWS,VACE,ZEKE,BAT,ALI213,3DM,STEAMPUNKS,PULS3"
+
+# Paths to required external binaries
+paths:
+  # Directory where .torrent files will be saved
+  torrent_dir: "/path/to/your/torrents"
+  # Directory where screenshots will be saved
+  screenshots_dir: "/path/to/your/screenshots"
+  # Path to ffmpeg binary (for video processing)
+  ffmpeg: "/path/to/bin/ffmpeg"
+  # Path to ffprobe binary (for media analysis)
+  ffprobe: "/path/to/bin/ffprobe"
+  # Path to mkbrr binary (for torrent creation)
+  mkbrr: "/path/to/bin/mkbrr"
+  # Path to mediainfo binary (for detailed media information)
+  mediainfo: "/path/to/bin/mediainfo"
+
+# qBittorrent configuration (supports multiple instances)
+qbittorrent:
+  # First qBittorrent instance
+  - webui_url: "http://localhost:8080"
+    username: "admin"
+    password: "adminpass"
+    category: "TV"  # Default category for this instance
+    default_save_path: "/downloads"
+    executable: ""  # Optional: path to qbittorrent executable
+    fastresumes: "/home/user/.local/share/qBittorrent/BT_backup"  # Path to fastresume files
+  
+  # Second qBittorrent instance (optional)
+  - webui_url: "http://192.168.1.100:8081"
+    username: "user2"
+    password: "pass2"
+    category: "Movies"
+    default_save_path: "/media/downloads"
+    executable: ""
+    fastresumes: ""
+
+# Deluge configuration
+deluge:
+  webui_url: "http://localhost:8112"
+  daemon_port: 58846
+  username: "admin"
+  password: "deluge"
+  label: "seedbrr"  # Default label for torrents
+  default_save_path: "/downloads/deluge"
+
+# ImgBB configuration (optional image hosting for screenshots)
+# Get API key from: https://api.imgbb.com/
+imgbb:
+  imgbb_api_key: "your_imgbb_api_key_here"  # Leave empty to disable ImgBB uploads

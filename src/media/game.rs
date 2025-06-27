@@ -3,6 +3,7 @@ use std::path::Path;
 use log::{info, warn};
 use regex::Regex;
 use crate::extraction::process_and_extract_archives;
+use chrono;
 
 /// Game metadata extracted from filename and structure
 #[derive(Debug, Clone)]
@@ -201,6 +202,91 @@ pub fn process_game(
             game_metadata.insert("repack".to_string(), "true".to_string());
         }
         
+        // Fetch IGDB data if credentials are available
+        if !_config.general.igdb_client_id.is_empty() && !_config.general.igdb_bearer_token.is_empty() {
+            info!("Looking up game on IGDB: {}", metadata.title);
+            match crate::utils::search_igdb_game(
+                &metadata.title,
+                &_config.general.igdb_client_id,
+                &_config.general.igdb_bearer_token,
+                _config
+            ) {
+                Ok(games) if !games.is_empty() => {
+                    // Take the first result
+                    if let Some(game) = games.first() {
+                        if let Some(igdb_id) = game["id"].as_u64() {
+                            info!("Found IGDB ID: {} for game: {}", igdb_id, metadata.title);
+                            game_metadata.insert("igdb_id".to_string(), igdb_id.to_string());
+                            
+                            // Get detailed game information
+                            match crate::utils::get_igdb_game_details(
+                                igdb_id,
+                                &_config.general.igdb_client_id,
+                                &_config.general.igdb_bearer_token
+                            ) {
+                                Ok(details) => {
+                                    // Extract and store additional metadata from IGDB
+                                    
+                                    // Genres
+                                    if let Some(genres) = details["genres"].as_array() {
+                                        let genre_names: Vec<String> = genres.iter()
+                                            .filter_map(|g| g["name"].as_str())
+                                            .map(|s| s.to_string())
+                                            .collect();
+                                        if !genre_names.is_empty() {
+                                            game_metadata.insert("igdb_genres".to_string(), genre_names.join(", "));
+                                        }
+                                    }
+                                    
+                                    // Developer/Publisher from involved_companies
+                                    if let Some(companies) = details.get("involved_companies") {
+                                        let (developers, publishers) = crate::utils::extract_igdb_companies(companies);
+                                        if !developers.is_empty() && metadata.developer.is_none() {
+                                            game_metadata.insert("igdb_developer".to_string(), developers.join(", "));
+                                        }
+                                        if !publishers.is_empty() && metadata.publisher.is_none() {
+                                            game_metadata.insert("igdb_publisher".to_string(), publishers.join(", "));
+                                        }
+                                    }
+                                    
+                                    // Summary
+                                    if let Some(summary) = details["summary"].as_str() {
+                                        game_metadata.insert("igdb_summary".to_string(), summary.to_string());
+                                    }
+                                    
+                                    // Rating
+                                    if let Some(rating) = details["total_rating"].as_f64() {
+                                        game_metadata.insert("igdb_rating".to_string(), format!("{:.1}", rating));
+                                    }
+                                    
+                                    // Release date
+                                    if let Some(release_date) = details["first_release_date"].as_i64() {
+                                        // Convert Unix timestamp to year
+                                        let year = chrono::DateTime::from_timestamp(release_date, 0)
+                                            .map(|dt| dt.format("%Y").to_string());
+                                        if let Some(year_str) = year {
+                                            game_metadata.insert("igdb_release_year".to_string(), year_str);
+                                        }
+                                    }
+                                    
+                                    info!("Successfully fetched IGDB game details");
+                                }
+                                Err(e) => {
+                                    warn!("Failed to fetch IGDB game details: {}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(_) => {
+                    info!("No games found on IGDB for: {}", metadata.title);
+                }
+                Err(e) => {
+                    warn!("Failed to search IGDB: {}", e);
+                }
+            }
+        }
+        
         builder = builder
             .with_nfo()
             .with_duplicate_check()
@@ -221,7 +307,19 @@ pub fn process_game(
         // Get media classification for mapping
         if !results.is_empty() {
             let (_, metadata) = &results[0];
-            let category_str = format!("GameCategory::{:?}", metadata.platform);
+            
+            // Check if it's software based on platform
+            let category_str = if let Some(platform) = &metadata.platform {
+                if platform.ends_with("_SOFTWARE") {
+                    // It's software, keep it under GameCategory with platform info
+                    format!("GameCategory::Software_{}", platform)
+                } else {
+                    // It's a game
+                    format!("GameCategory::{}", platform)
+                }
+            } else {
+                "GameCategory::PC".to_string()
+            };
             
             processor = processor.with_media_classification(
                 Some(category_str),
@@ -246,7 +344,7 @@ pub fn process_game(
 }
 
 /// Classify game content based on filename patterns
-fn classify_game_content(filename: &str) -> GameMetadata {
+pub fn classify_game_content(filename: &str) -> GameMetadata {
     let mut metadata = GameMetadata::default();
     
     // Initialize regex patterns
@@ -283,9 +381,41 @@ fn classify_game_content(filename: &str) -> GameMetadata {
         }
     }
     
-    // Extract platform
+    // Extract platform - but check if it's actually a game or software
     if let Some(platform_match) = platform_regex.find(clean_name) {
-        metadata.platform = Some(platform_match.as_str().to_uppercase());
+        let detected_platform = platform_match.as_str().to_uppercase();
+        
+        // Check if this is software vs game based on content
+        let filename_lower = filename.to_lowercase();
+        
+        // Software patterns
+        let software_keywords = [
+            "office", "photoshop", "adobe", "microsoft", "autodesk", "vmware",
+            "antivirus", "norton", "kaspersky", "avast", "malwarebytes",
+            "driver", "utility", "tool", "converter", "editor", "manager",
+            "professional", "enterprise", "business", "suite", "studio",
+            "windows", "macos", "linux", "ubuntu", "debian", "fedora"
+        ];
+        
+        // Game patterns
+        let game_keywords = [
+            "game", "games", "steam", "gog", "epic", "origin", "uplay", "battle.net",
+            "repack", "rip", "crack", "codex", "plaza", "skidrow", "reloaded",
+            "fps", "rpg", "mmo", "rts", "moba", "dlc", "expansion",
+            "edition", "goty", "deluxe", "ultimate", "gold"
+        ];
+        
+        let has_software_keyword = software_keywords.iter().any(|&kw| filename_lower.contains(kw));
+        let has_game_keyword = game_keywords.iter().any(|&kw| filename_lower.contains(kw));
+        
+        // Set platform differently for software vs games
+        if has_software_keyword && !has_game_keyword {
+            // It's software - use a special platform indicator
+            metadata.platform = Some(format!("{}_SOFTWARE", detected_platform));
+        } else {
+            // It's a game or uncertain - use normal platform
+            metadata.platform = Some(detected_platform);
+        }
     }
     
     // Check for store/distribution
@@ -320,50 +450,45 @@ fn classify_game_content(filename: &str) -> GameMetadata {
 /// Detect game files in a path
 pub fn detect_game_files(path: &str) -> Result<Vec<GameFile>, String> {
     let mut game_files = Vec::new();
-    let search_path = Path::new(path);
-    
-    if search_path.is_file() {
-        let extension = search_path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .ok_or_else(|| "Could not determine file extension".to_string())?;
+    detect_game_files_recursive(Path::new(path), &mut game_files)?;
+    Ok(game_files)
+}
 
-        if let Some(game_type) = GameType::from_extension(extension) {
-            game_files.push(GameFile {
-                path: search_path.to_path_buf(),
-                game_type,
-            });
+/// Recursively search for game files in a directory tree
+fn detect_game_files_recursive(path: &Path, game_files: &mut Vec<GameFile>) -> Result<(), String> {
+    if path.is_file() {
+        if let Some(extension) = path.extension().and_then(|ext| ext.to_str()) {
+            if let Some(game_type) = GameType::from_extension(extension) {
+                game_files.push(GameFile {
+                    path: path.to_path_buf(),
+                    game_type,
+                });
+            }
         }
-    } else if search_path.is_dir() {
+    } else if path.is_dir() {
         // Check if directory itself is a game (like extracted game folders)
-        if looks_like_game_directory(search_path) {
+        if looks_like_game_directory(path) {
             game_files.push(GameFile {
-                path: search_path.to_path_buf(),
+                path: path.to_path_buf(),
                 game_type: GameType::Directory,
             });
-        } else {
-            // Search for game files in directory
-            for entry in std::fs::read_dir(search_path)
-                .map_err(|e| format!("Failed to read directory: {}", e))? 
-            {
-                let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
-                let file_path = entry.path();
-                
-                if file_path.is_file() {
-                    if let Some(extension) = file_path.extension().and_then(|ext| ext.to_str()) {
-                        if let Some(game_type) = GameType::from_extension(extension) {
-                            game_files.push(GameFile {
-                                path: file_path,
-                                game_type,
-                            });
-                        }
-                    }
-                }
-            }
+            // Don't recurse into game directories
+            return Ok(());
+        }
+        
+        // Recursively search subdirectories
+        for entry in std::fs::read_dir(path)
+            .map_err(|e| format!("Failed to read directory {:?}: {}", path, e))? 
+        {
+            let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+            let entry_path = entry.path();
+            
+            // Recursively process subdirectories and files
+            detect_game_files_recursive(&entry_path, game_files)?;
         }
     }
     
-    Ok(game_files)
+    Ok(())
 }
 
 /// Check if directory looks like a game installation
@@ -396,4 +521,73 @@ pub fn to_media_file(game_file: &GameFile) -> MediaFile {
         path: game_file.path.clone(),
         media_type: MediaType::Game(game_file.game_type.clone()),
     }
+}
+
+/// Classify game content for upload pipeline
+pub fn classify_for_upload(input_path: &str, metadata: &serde_json::Value) -> Result<(Option<String>, Option<String>, serde_json::Value), String> {
+    // Check if we have platform info in metadata
+    if let Some(platform) = metadata.get("platform").and_then(|p| p.as_str()) {
+        let category = if platform.ends_with("_SOFTWARE") {
+            Some(format!("GameCategory::Software_{}", platform))
+        } else {
+            // Map platform to game category
+            match platform.to_uppercase().as_str() {
+                "NSW" | "NINTENDO SWITCH" | "XCI" | "NSP" => Some("GameCategory::Console".to_string()),
+                "3DS" | "CIA" => Some("GameCategory::Console".to_string()),
+                "PS4" | "PS5" | "XBOX" => Some("GameCategory::Console".to_string()),
+                "WII" | "NES" | "SNES" => Some("GameCategory::Retro".to_string()),
+                _ => Some("GameCategory::PC".to_string())
+            }
+        };
+        
+        return Ok((category, None, metadata.clone()));
+    }
+    
+    // Otherwise, detect and classify
+    if let Ok(game_files) = detect_game_files(input_path) {
+        if let Some(game_file) = game_files.first() {
+            let filename = game_file.path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            
+            let game_metadata = classify_game_content(filename);
+            
+            let category = if let Some(platform) = &game_metadata.platform {
+                if platform.ends_with("_SOFTWARE") {
+                    Some(format!("GameCategory::Software_{}", platform))
+                } else {
+                    match platform.to_uppercase().as_str() {
+                        "NSW" | "NINTENDO SWITCH" | "XCI" | "NSP" => Some("GameCategory::Console".to_string()),
+                        "3DS" | "CIA" => Some("GameCategory::Console".to_string()),
+                        "PS4" | "PS5" | "XBOX" => Some("GameCategory::Console".to_string()),
+                        "WII" | "NES" | "SNES" => Some("GameCategory::Retro".to_string()),
+                        _ => Some("GameCategory::PC".to_string())
+                    }
+                }
+            } else {
+                Some("GameCategory::PC".to_string())
+            };
+            
+            // Manually create JSON metadata
+            let json_metadata = serde_json::json!({
+                "title": game_metadata.title,
+                "platform": game_metadata.platform,
+                "year": game_metadata.year,
+                "version": game_metadata.version,
+                "developer": game_metadata.developer,
+                "publisher": game_metadata.publisher,
+                "genre": game_metadata.genre,
+                "language": game_metadata.language,
+                "release_group": game_metadata.release_group,
+                "is_gog": game_metadata.is_gog,
+                "is_steam": game_metadata.is_steam,
+                "is_repack": game_metadata.is_repack,
+            });
+            
+            return Ok((category, None, json_metadata));
+        }
+    }
+    
+    // Default to PC game
+    Ok((Some("GameCategory::PC".to_string()), None, metadata.clone()))
 }

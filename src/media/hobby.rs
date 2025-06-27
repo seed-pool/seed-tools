@@ -377,50 +377,45 @@ fn extract_year_from_name(name: &str) -> Option<u32> {
 /// Detect hobby files in a path
 pub fn detect_hobby_files(path: &str) -> Result<Vec<HobbyFile>, String> {
     let mut hobby_files = Vec::new();
-    let search_path = Path::new(path);
-    
-    if search_path.is_file() {
-        let extension = search_path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .ok_or_else(|| "Could not determine file extension".to_string())?;
+    detect_hobby_files_recursive(Path::new(path), &mut hobby_files)?;
+    Ok(hobby_files)
+}
 
-        if let Some(hobby_type) = HobbyType::from_extension(extension) {
-            hobby_files.push(HobbyFile {
-                path: search_path.to_path_buf(),
-                hobby_type,
-            });
+/// Recursively search for hobby files in a directory tree
+fn detect_hobby_files_recursive(path: &Path, hobby_files: &mut Vec<HobbyFile>) -> Result<(), String> {
+    if path.is_file() {
+        if let Some(extension) = path.extension().and_then(|ext| ext.to_str()) {
+            if let Some(hobby_type) = HobbyType::from_extension(extension) {
+                hobby_files.push(HobbyFile {
+                    path: path.to_path_buf(),
+                    hobby_type,
+                });
+            }
         }
-    } else if search_path.is_dir() {
+    } else if path.is_dir() {
         // Check if directory itself should be treated as a hobby collection
-        if looks_like_hobby_collection(search_path) {
+        if looks_like_hobby_collection(path) {
             hobby_files.push(HobbyFile {
-                path: search_path.to_path_buf(),
+                path: path.to_path_buf(),
                 hobby_type: HobbyType::Directory,
             });
-        } else {
-            // Search for hobby files in directory
-            for entry in std::fs::read_dir(search_path)
-                .map_err(|e| format!("Failed to read directory: {}", e))? 
-            {
-                let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
-                let file_path = entry.path();
-                
-                if file_path.is_file() {
-                    if let Some(extension) = file_path.extension().and_then(|ext| ext.to_str()) {
-                        if let Some(hobby_type) = HobbyType::from_extension(extension) {
-                            hobby_files.push(HobbyFile {
-                                path: file_path,
-                                hobby_type,
-                            });
-                        }
-                    }
-                }
-            }
+            // Don't recurse into hobby collection directories
+            return Ok(());
+        }
+        
+        // Recursively search subdirectories
+        for entry in std::fs::read_dir(path)
+            .map_err(|e| format!("Failed to read directory {:?}: {}", path, e))? 
+        {
+            let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+            let entry_path = entry.path();
+            
+            // Recursively process subdirectories and files
+            detect_hobby_files_recursive(&entry_path, hobby_files)?;
         }
     }
     
-    Ok(hobby_files)
+    Ok(())
 }
 
 /// Check if directory looks like a hobby collection
@@ -459,4 +454,18 @@ pub fn to_media_file(hobby_file: &HobbyFile) -> MediaFile {
         path: hobby_file.path.clone(),
         media_type: MediaType::Hobby(hobby_file.hobby_type.clone()),
     }
+}
+
+/// Classify hobby content for upload pipeline
+pub fn classify_for_upload(_input_path: &str, metadata: &serde_json::Value) -> Result<(Option<String>, Option<String>, serde_json::Value), String> {
+    // Hobby files are general by default, but could be software, tutorials, etc.
+    // For now, just return general hobby category
+    
+    // Check if we have any specific category hints in metadata
+    if let Some(category) = metadata.get("category").and_then(|c| c.as_str()) {
+        return Ok((Some(format!("HobbyCategory::{}", category)), None, metadata.clone()));
+    }
+    
+    // Default to general hobby
+    Ok((Some("HobbyCategory::General".to_string()), None, metadata.clone()))
 }

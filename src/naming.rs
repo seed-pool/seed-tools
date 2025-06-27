@@ -10,6 +10,11 @@ pub fn generate_release_name(base_name: &str) -> String {
         release_name = re.replace(&release_name, "").to_string();
     }
 
+    // First, remove spaces after dashes to preserve release group format (- PULS3 becomes -PULS3)
+    if let Ok(re) = Regex::new(r"-\s+") {
+        release_name = re.replace_all(&release_name, "-").to_string();
+    }
+    
     // Replace non-alphanumeric characters with dots
     if let Ok(re) = Regex::new(r"[^A-Za-z0-9+\-]") {
         release_name = re.replace_all(&release_name, ".").to_string();

@@ -1,95 +1,16 @@
 use std::fs;
 use std::{path::Path, thread, time::Duration};
 use log::{info, error};
-use regex::Regex;
+// use regex::Regex; // No longer needed after removing check_seedpool
 use serde_bencode::de;
 use reqwest::blocking::Client;
 use serde_json;
-use crate::utils::generate_release_name;
+// use crate::utils::generate_release_name; // No longer needed after removing check_seedpool
 use crate::types::{QbittorrentConfig, FastResumeData}; 
 
 
-pub fn check_seedpool(
-    name: &str,
-    seedpool_api_key: &str,
-) -> Result<Option<String>, String> {
-    let client = Client::new();
-
-    info!("Checking Seedpool for existing torrent with name: '{}'", name);
-
-    let normalized_name = generate_release_name(name);
-    info!("Normalized Name for Seedpool Query: '{}'", normalized_name);
-
-    let season_episode_regex = Regex::new(r"S(\d{2})E(\d{2})").unwrap();
-    let season_episode = season_episode_regex.captures(name).map(|caps| {
-        (
-            caps.get(1).unwrap().as_str().parse::<u32>().unwrap_or(0),
-            caps.get(2).unwrap().as_str().parse::<u32>().unwrap_or(0),
-        )
-    });
-    if let Some((season, episode)) = &season_episode {
-        info!("Detected Season/Episode: S{}E{}", season, episode);
-    }
-
-    let mut query_url = format!(
-        "https://seedpool.org/api/torrents/filter?name={}&perPage=10&sortField=name&sortDirection=asc&api_token={}",
-        urlencoding::encode(&normalized_name),
-        seedpool_api_key
-    );
-
-    if let Some((season, episode)) = &season_episode {
-        query_url = format!(
-            "{}&seasonNumber={}&episodeNumber={}",
-            query_url, season, episode
-        );
-    }
-
-    info!("Seedpool API Query URL: {}", query_url);
-
-    let search_response = client
-        .get(&query_url)
-        .send()
-        .map_err(|e| format!("Failed to query Seedpool for '{}': {}", name, e))?;
-
-    if !search_response.status().is_success() {
-        return Err(format!(
-            "Failed to query Seedpool for '{}': HTTP {}",
-            name,
-            search_response.status()
-        ));
-    }
-
-    let raw_response = search_response.text().unwrap_or_else(|_| "Failed to read response body".to_string());
-
-    let search_results: serde_json::Value = serde_json::from_str(&raw_response)
-        .map_err(|e| format!("Failed to parse Seedpool response for '{}': {}", name, e))?;
-
-    let empty_vec = vec![];
-    let data = search_results["data"].as_array().unwrap_or(&empty_vec);
-
-    for result in data {
-        if let Some(attributes) = result["attributes"].as_object() {
-            if let Some(title) = attributes.get("name").and_then(|t| t.as_str()) {
-                info!("Checking result title: {}", title);
-
-                if let Some((season, episode)) = &season_episode {
-                    if !title.contains(&format!("S{:02}E{:02}", season, episode)) {
-                        info!("Skipping result due to mismatched season/episode: {}", title);
-                        continue;
-                    }
-                }
-
-                if let Some(download_link) = attributes.get("download_link").and_then(|d| d.as_str()) {
-                    info!("Duplicate found for '{}'. Download link: {}", name, download_link);
-                    return Ok(Some(download_link.to_string()));
-                }
-            }
-        }
-    }
-
-    info!("No duplicate found for '{}'.", name);
-    Ok(None)
-}
+// check_seedpool function has been replaced by ProcessBuilder duplicate checking
+// Original function archived in old_functions.txt
 
 pub fn sync_qbittorrent(configs: &[QbittorrentConfig], seedpool_api_key: &str) -> Result<(), String> {
     for config in configs {
@@ -166,7 +87,8 @@ pub fn sync_qbittorrent(configs: &[QbittorrentConfig], seedpool_api_key: &str) -
             info!("Using save path for '{}': {}", name, save_path);
 
             info!("Checking for duplicate on Seedpool for '{}'", name);
-            match check_seedpool(name, seedpool_api_key) {
+            // TODO: Replace with ProcessBuilder duplicate checking
+            match crate::definitions::seedpool::check_seedpool_dupes(name, seedpool_api_key) {
                 Ok(Some(download_link)) => {
                     info!("Found duplicate for '{}'. Adding to qBittorrent.", name);
 

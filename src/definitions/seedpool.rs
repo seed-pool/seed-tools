@@ -529,12 +529,20 @@ pub fn check_seedpool_dupes(
 
     info!("Checking Seedpool for existing torrent with name: '{}'", name);
 
+    // Load the seedpool config to check for domain override
+    let domain = if let Ok(config) = crate::utils::load_tracker_config::<crate::types::SeedpoolConfig>("seedpool") {
+        config.settings.domain_override.unwrap_or_else(|| "seedpool.org".to_string())
+    } else {
+        "seedpool.org".to_string()
+    };
+
     // Use the full input name as the search term
     let search_term = generate_release_name(name);
     info!("Search Term for Seedpool Query: '{}'", search_term);
 
     let query_url = format!(
-        "https://seedpool.org/api/torrents/filter?name={}&perPage=10&sortField=name&sortDirection=asc&api_token={}",
+        "https://{}/api/torrents/filter?name={}&perPage=10&sortField=name&sortDirection=asc&api_token={}",
+        domain,
         urlencoding::encode(&search_term),
         seedpool_api_key
     );
@@ -607,6 +615,8 @@ pub fn create_torrent_info_from_media_strings(
             let seedpool_type = if let Some(type_str) = media_source_type {
                 if let Some(type_name) = type_str.strip_prefix("VideoSourceType::") {
                     match (cat_name, type_name) {
+                        (_, "SeasonPack") => SeedpoolType::BoxSet,
+                        (_, "BoxSet") => SeedpoolType::BoxSet,
                         ("Movie", "UHDBluRay") => SeedpoolType::UHDBluRay,
                         (_, "BluRay") => SeedpoolType::BluRay,
                         (_, "Remux") => SeedpoolType::Remux,
@@ -654,7 +664,22 @@ pub fn create_torrent_info_from_media_strings(
             let cat_name = cat_str.strip_prefix("GameCategory::").unwrap();
             match cat_name {
                 "Retro" => (SeedpoolCategory::Retro, SeedpoolType::Other),
-                _ => (SeedpoolCategory::Games, SeedpoolType::PCGame), // Default to PC
+                name if name.starts_with("Software_") => {
+                    // Software with platform info like Software_WINDOWS_SOFTWARE
+                    let platform_part = name.strip_prefix("Software_").unwrap_or("");
+                    if platform_part.contains("WINDOWS") || platform_part.contains("PC") {
+                        (SeedpoolCategory::WindowsApps, SeedpoolType::Windows)
+                    } else if platform_part.contains("LINUX") {
+                        (SeedpoolCategory::LinuxApps, SeedpoolType::Linux)
+                    } else if platform_part.contains("MAC") || platform_part.contains("MACOS") {
+                        (SeedpoolCategory::MacApps, SeedpoolType::MacOS)
+                    } else {
+                        (SeedpoolCategory::WindowsApps, SeedpoolType::Windows) // Default to Windows
+                    }
+                }
+                "Console" => (SeedpoolCategory::Games, SeedpoolType::Other),
+                "PC" => (SeedpoolCategory::Games, SeedpoolType::PCGame),
+                _ => (SeedpoolCategory::Games, SeedpoolType::PCGame), // Default to PC game
             }
         }
         Some(cat_str) if cat_str.starts_with("HobbyCategory::") => {

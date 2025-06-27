@@ -947,8 +947,6 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
     // --- SKIP OPEN LIBRARY FOR COMICS & MAGAZINES ---
     if !main_ebook_file.ebook_type.is_comic() && !(matches!(main_ebook_file.ebook_type, EbookType::Pdf) && (type_id == "40" || type_id == "41")) {
         // --- ORIGINAL OPEN LIBRARY LOOKUP AND DESCRIPTION LOGIC ---
-        let mut open_library_work_key = String::new();
-        let mut open_library_author_key = String::new();
         let mut subjects = Vec::new();
         let mut desc = format!(
             "[center][b][size=32][color=#2E86C1]{}[/color][/size][/b]\n\
@@ -1002,12 +1000,12 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
                     author = ol_author;
 
                     // Extract Open Library work and author keys
-                    open_library_work_key = first_result["key"]
+                    let open_library_work_key = first_result["key"]
                         .as_str()
                         .unwrap_or("")
                         .trim_start_matches("/works/")
                         .to_string();
-                    open_library_author_key = first_result["author_key"]
+                    let open_library_author_key = first_result["author_key"]
                         .as_array()
                         .and_then(|keys| keys.get(0))
                         .and_then(|key| key.as_str())
@@ -1503,38 +1501,34 @@ pub fn process_ebook(
 /// Detect ebook files in a path (without metadata classification)
 pub fn detect_ebook_files(path: &str) -> Result<Vec<EbookFile>, String> {
     let mut ebook_files = Vec::new();
-    let search_path = Path::new(path);
-    
-    if search_path.is_file() {
-        if let Some(extension) = search_path.extension().and_then(|ext| ext.to_str()) {
+    detect_ebook_files_recursive(Path::new(path), &mut ebook_files)?;
+    Ok(ebook_files)
+}
+
+/// Recursively search for ebook files in a directory tree
+fn detect_ebook_files_recursive(path: &Path, ebook_files: &mut Vec<EbookFile>) -> Result<(), String> {
+    if path.is_file() {
+        if let Some(extension) = path.extension().and_then(|ext| ext.to_str()) {
             if let Some(ebook_type) = EbookType::from_extension(extension) {
                 ebook_files.push(EbookFile {
-                    path: search_path.to_path_buf(),
+                    path: path.to_path_buf(),
                     ebook_type,
                 });
             }
         }
-    } else if search_path.is_dir() {
-        for entry in fs::read_dir(search_path)
-            .map_err(|e| format!("Failed to read directory: {}", e))? 
+    } else if path.is_dir() {
+        for entry in fs::read_dir(path)
+            .map_err(|e| format!("Failed to read directory {:?}: {}", path, e))? 
         {
             let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
-            let file_path = entry.path();
+            let entry_path = entry.path();
             
-            if file_path.is_file() {
-                if let Some(extension) = file_path.extension().and_then(|ext| ext.to_str()) {
-                    if let Some(ebook_type) = EbookType::from_extension(extension) {
-                        ebook_files.push(EbookFile {
-                            path: file_path.to_path_buf(),
-                            ebook_type,
-                        });
-                    }
-                }
-            }
+            // Recursively process subdirectories and files
+            detect_ebook_files_recursive(&entry_path, ebook_files)?;
         }
     }
     
-    Ok(ebook_files)
+    Ok(())
 }
 
 /// Convert EbookFile to MediaFile
@@ -1679,5 +1673,65 @@ pub fn classify_ebook_content(filename: &str, extension: &str) -> EbookMetadata 
     
     debug!("Ebook classification result: {:?}", metadata);
     metadata
+}
+
+/// Classify ebook content for upload pipeline
+pub fn classify_for_upload(input_path: &str, metadata: &serde_json::Value) -> Result<(Option<String>, Option<String>, serde_json::Value), String> {
+    // Check if we already have classification in metadata
+    if let Some(format_str) = metadata.get("format").and_then(|f| f.as_str()) {
+        let category = if format_str.contains("Comic") || format_str.contains("Cbr") || format_str.contains("Cbz") {
+            Some("EbookCategory::Comic".to_string())
+        } else {
+            Some("EbookCategory::General".to_string())
+        };
+        
+        return Ok((category, None, metadata.clone()));
+    }
+    
+    // Otherwise, detect and classify
+    if let Ok(ebook_files) = detect_ebook_files(input_path) {
+        if let Some(ebook_file) = ebook_files.first() {
+            let filename = ebook_file.path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            
+            let extension = ebook_file.path.extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
+            
+            let ebook_metadata = classify_ebook_content(filename, extension);
+            
+            let category = match ebook_metadata.category {
+                EbookCategory::Comic => Some("EbookCategory::Comic".to_string()),
+                EbookCategory::Magazine => Some("EbookCategory::Magazine".to_string()),
+                EbookCategory::Educational | EbookCategory::Technical | EbookCategory::Science => {
+                    Some("EbookCategory::Educational".to_string())
+                }
+                _ => Some("EbookCategory::General".to_string()),
+            };
+            
+            // Manually create JSON metadata
+            let json_metadata = serde_json::json!({
+                "title": ebook_metadata.title,
+                "author": ebook_metadata.author,
+                "publisher": ebook_metadata.publisher,
+                "year": ebook_metadata.year,
+                "isbn": ebook_metadata.isbn,
+                "series": ebook_metadata.series,
+                "edition": ebook_metadata.edition,
+                "volume": ebook_metadata.volume,
+                "issue": ebook_metadata.issue,
+                "language": ebook_metadata.language,
+                "category": format!("{:?}", ebook_metadata.category),
+                "format_type": ebook_metadata.format_type.as_ref().map(|t| format!("{:?}", t)),
+                "format": extension,
+            });
+            
+            return Ok((category, None, json_metadata));
+        }
+    }
+    
+    // Default to general ebook
+    Ok((Some("EbookCategory::General".to_string()), None, metadata.clone()))
 }
 

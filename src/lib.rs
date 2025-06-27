@@ -15,3 +15,5 @@ pub mod definitions;
 pub mod description;
 pub mod upload;
 pub mod preflight;
+pub mod process_builder;
+pub mod classification;

@@ -1,7 +1,7 @@
 use reqwest::blocking::{multipart::Form, Client};
 use std::path::Path;
 use regex::Regex;
-use log::info;
+use log::{info, error, debug};
 use serde_json::Value;
 use std::fs;
 use walkdir::WalkDir;
@@ -418,6 +418,8 @@ fn generate_thumbnail(ffmpeg_path: &str, input_file: &str, output_file: &str) ->
 }
 
 pub fn fetch_tmdb_id(title: &str, year: Option<String>, tmdb_api_key: &str, release_type: &str) -> Result<u32, String> {
+    info!("🎬 Starting TMDB lookup for '{}' (type: {}, year: {:?})", title, release_type, year);
+    
     let sanitized_title = if release_type == "TvShow" {
         // Extract everything before the SXX* pattern
         let season_regex = Regex::new(r"(?i)(S\d{2}.*)").unwrap();
@@ -432,6 +434,7 @@ pub fn fetch_tmdb_id(title: &str, year: Option<String>, tmdb_api_key: &str, rele
         year_regex.replace(title, "").trim().to_string()
     };
 
+    info!("🧹 Cleaned TMDB title: '{}' -> '{}'", title, sanitized_title);
     let encoded_title = urlencoding::encode(&sanitized_title);
 
     let url = if release_type == "tv" {
@@ -469,17 +472,62 @@ pub fn fetch_tmdb_id(title: &str, year: Option<String>, tmdb_api_key: &str, rele
         .json()
         .map_err(|e| format!("Failed to parse TMDB response for '{}': {}", title, e))?;
 
-    let tmdb_id = json["results"]
-        .as_array()
-        .and_then(|results| results.get(0))
-        .and_then(|result| result["id"].as_u64())
+    // Log response status instead of full JSON to avoid breaking UI
+    if let Some(total_results) = json["total_results"].as_u64() {
+        info!("📊 TMDB API returned {} total results", total_results);
+    }
+
+    let empty_vec = vec![];
+    let results = json["results"].as_array().unwrap_or(&empty_vec);
+    info!("🔍 Found {} TMDB results", results.len());
+
+    let tmdb_id = results
+        .get(0)
+        .and_then(|result| {
+            if let Some(title) = result["title"].as_str().or_else(|| result["name"].as_str()) {
+                info!("📽️  First result: '{}'", title);
+            }
+            result["id"].as_u64()
+        })
         .unwrap_or(0) as u32;
 
     if tmdb_id == 0 {
-        info!("No TMDB ID found for '{}'.", title);
+        info!("❌ No TMDB ID found for '{}'.", title);
+    } else {
+        info!("✅ Found TMDB ID: {} for '{}'", tmdb_id, title);
     }
 
     Ok(tmdb_id)
+}
+
+pub fn fetch_external_ids(tmdb_id: u32, release_type: &str, tmdb_api_key: &str) -> Result<(Option<String>, Option<u32>), String> {
+    if tmdb_id == 0 {
+        return Ok((None, None));
+    }
+
+    let tmdb_type = if release_type == "boxset" { "tv" } else { release_type };
+    let url = format!(
+        "https://api.themoviedb.org/3/{}/{}/external_ids?api_key={}",
+        tmdb_type, tmdb_id, tmdb_api_key
+    );
+
+    info!("TMDB External IDs API URL: {}", url);
+
+    let client = reqwest::blocking::Client::new();
+    let response = client.get(&url).send().map_err(|e| format!("Failed to fetch external IDs: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("Failed to fetch external IDs: HTTP {}", response.status()));
+    }
+
+    let json: serde_json::Value = response.json().map_err(|e| format!("Failed to parse external IDs response: {}", e))?;
+    let imdb_id = json["imdb_id"].as_str().map(|s| s.to_string());
+    let tvdb_id = json["tvdb_id"].as_u64().map(|id| id as u32);
+
+    info!("Fetched IMDb ID: {:?}", imdb_id);
+    info!("Fetched TVDB ID: {:?}", tvdb_id);
+
+    Ok((imdb_id, tvdb_id))
 }
 
 pub fn fetch_youtube_trailer(title: &str, year: Option<&str>, youtube_api_key: &str) -> Result<String, String> {
@@ -742,4 +790,261 @@ pub fn load_tracker_config<T: serde::de::DeserializeOwned>(tracker_name: &str) -
     
     serde_yaml::from_str(&config_contents)
         .map_err(|e| format!("Failed to parse {} config: {}", tracker_name, e))
+}
+
+/// Clean up a game title for IGDB search by removing version numbers, release groups, etc.
+fn clean_game_title_for_search(title: &str, config: &crate::types::Config) -> String {
+    let title = title.trim();
+    
+    // First normalize periods to spaces (common in release names)
+    let mut cleaned = title.replace('.', " ");
+    
+    // Build release group patterns from config
+    let release_groups = config.general.release_groups
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<&str>>()
+        .join("|");
+    
+    // First, remove common patterns that won't be in IGDB
+    let mut patterns_to_remove = vec![
+        // Version patterns
+        r"(?i)\s+v?\d+[\.\s]\d+[\.\s]\d+[\.\s]\d+\w*".to_string(), // v1.0.2.31110s
+        r"(?i)\s+v?\d+[\.\s]\d+[\.\s]\d+\w*".to_string(),          // v1.0.2
+        r"(?i)\s+v?\d+[\.\s]\d+\w*".to_string(),                   // v1.0
+        r"(?i)\s+v\d+\w*".to_string(),                             // v1
+        
+        // Build/Update patterns
+        r"(?i)\s+build\s*\d+".to_string(),
+        r"(?i)\s+build\d+".to_string(),     // Build911 (no space)
+        r"(?i)\s+update\s*\d+".to_string(),
+        r"(?i)\s+patch\s*\d+".to_string(),
+        r"(?i)\s+hotfix\s*\d+".to_string(),
+        
+        // Platform/Store patterns
+        r"(?i)\s*[\(\[]?(steam|epic|origin|uplay|battle\.net|gog)[\s\-]?(rip|version)?[\)\]]?".to_string(),
+        
+        // Edition patterns (but keep some like "Game of the Year")
+        r"(?i)\s+digital\s+deluxe(\s+edition)?".to_string(),
+        r"(?i)\s+collectors?(\s+edition)?".to_string(),
+        r"(?i)\s+premium(\s+edition)?".to_string(),
+        r"(?i)\s+ultimate(\s+edition)?".to_string(),
+        r"(?i)\s+complete(\s+edition)?".to_string(),
+        r"(?i)\s+definitive(\s+edition)?".to_string(),
+        r"(?i)\s+enhanced(\s+edition)?".to_string(),
+        
+        // DLC patterns
+        r"(?i)\s*[\+\-]\s*DLC\s*.*$".to_string(),
+        r"(?i)\s+DLC\s+Pack.*$".to_string(),
+        r"(?i)\s+Season\s+Pass.*$".to_string(),
+        
+        // Language patterns
+        r"(?i)\s*[\(\[]?(multi\d*|english|spanish|french|german|italian|russian|japanese|chinese)[\)\]]?".to_string(),
+        
+        // Other common suffixes
+        r"(?i)\s+shipping".to_string(),
+        r"(?i)\s+incl[\.\s]".to_string(),
+        r"(?i)\s+including".to_string(),
+        r"(?i)\s+proper".to_string(),
+        r"(?i)\s+internal".to_string(),
+        r"(?i)\s+cracked".to_string(),
+    ];
+    
+    // Add release group patterns from config
+    if !release_groups.is_empty() {
+        // Match release groups with dash (keep the dash format: -GROUP)
+        patterns_to_remove.push(format!(r"(?i)\s*-({}).*$", release_groups));
+        // Match release groups with just space
+        patterns_to_remove.push(format!(r"(?i)\s+({}).*$", release_groups));
+    }
+    
+    // Apply all removal patterns
+    for pattern in &patterns_to_remove {
+        if let Ok(re) = Regex::new(pattern) {
+            cleaned = re.replace_all(&cleaned, "").to_string();
+        }
+    }
+    
+    // Clean up any remaining artifacts
+    cleaned = cleaned
+        .trim_matches(|c: char| !c.is_alphanumeric()) // Remove trailing punctuation
+        .replace("  ", " ") // Remove double spaces
+        .trim()
+        .to_string();
+    
+    // If we've removed too much, fall back to a simpler approach
+    if cleaned.is_empty() || cleaned.len() < 3 {
+        // Just take the first few words before any version/group markers
+        let simple_markers = [" v", " V", " -", " REPACK", " Update", " Build"];
+        let mut simple_title = title.to_string();
+        for marker in &simple_markers {
+            if let Some(pos) = simple_title.find(marker) {
+                simple_title = simple_title[..pos].to_string();
+                break;
+            }
+        }
+        cleaned = simple_title.trim().to_string();
+    }
+    
+    info!("Cleaned game title for IGDB search: '{}' -> '{}'", title, cleaned);
+    cleaned
+}
+
+/// Search for a game on IGDB by name
+pub fn search_igdb_game(
+    game_name: &str,
+    client_id: &str,
+    bearer_token: &str,
+    config: &crate::types::Config,
+) -> Result<Vec<serde_json::Value>, String> {
+    let client = Client::new();
+    
+    // Clean the game name before searching
+    let cleaned_name = clean_game_title_for_search(game_name, config);
+    
+    info!("Searching IGDB for game: {} (cleaned: {})", game_name, cleaned_name);
+    
+    // IGDB uses a special query language for searching
+    let query = format!(
+        r#"search "{}"; fields id,name,first_release_date,summary,genres.name,platforms.name,involved_companies.company.name,involved_companies.developer,involved_companies.publisher,cover.url,screenshots.url; limit 5;"#,
+        cleaned_name.replace('"', r#"\""#)
+    );
+    
+    info!("IGDB query: {}", query);
+    
+    let response = client
+        .post("https://api.igdb.com/v4/games")
+        .header("Client-ID", client_id)
+        .header("Authorization", format!("Bearer {}", bearer_token))
+        .header("Content-Type", "text/plain")
+        .body(query.clone())
+        .send()
+        .map_err(|e| format!("Failed to search IGDB: {}", e))?;
+    
+    info!("IGDB API Response status: {}", response.status());
+    
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().unwrap_or_else(|_| "Unable to read response".to_string());
+        error!("IGDB API error {}: {}", status, error_text);
+        return Err(format!("IGDB API error: {} - {}", status, error_text));
+    }
+    
+    let response_text = response.text()
+        .map_err(|e| format!("Failed to read IGDB response: {}", e))?;
+    
+    let games: Vec<serde_json::Value> = serde_json::from_str(&response_text)
+        .map_err(|e| format!("Failed to parse IGDB response: {} - Response was: {}", e, response_text))?;
+    
+    info!("Found {} games on IGDB", games.len());
+    
+    // Log game results in a more readable format
+    if !games.is_empty() {
+        for (i, game) in games.iter().take(3).enumerate() {
+            if let Some(name) = game["name"].as_str() {
+                let id = game["id"].as_u64().unwrap_or(0);
+                let release_date = game["first_release_date"].as_u64()
+                    .map(|ts| format!("{}", chrono::DateTime::<chrono::Utc>::from_timestamp(ts as i64, 0)
+                        .map(|dt| dt.format("%Y-%m-%d").to_string())
+                        .unwrap_or_else(|| "Unknown".to_string())))
+                    .unwrap_or_else(|| "Unknown".to_string());
+                info!("  {}. {} (ID: {}, Released: {})", i + 1, name, id, release_date);
+            }
+        }
+        if games.len() > 3 {
+            info!("  ... and {} more results", games.len() - 3);
+        }
+    } else {
+        debug!("IGDB raw response: {}", response_text);
+    }
+    Ok(games)
+}
+
+/// Get detailed game information from IGDB by ID
+pub fn get_igdb_game_details(
+    game_id: u64,
+    client_id: &str,
+    bearer_token: &str,
+) -> Result<serde_json::Value, String> {
+    let client = Client::new();
+    
+    info!("Fetching IGDB game details for ID: {}", game_id);
+    
+    // Request comprehensive game details
+    let query = format!(
+        r#"fields id,name,summary,storyline,first_release_date,
+        genres.name,platforms.name,game_modes.name,themes.name,
+        player_perspectives.name,franchises.name,
+        involved_companies.company.name,involved_companies.developer,involved_companies.publisher,
+        cover.url,screenshots.url,artworks.url,
+        websites.url,websites.category,
+        total_rating,total_rating_count,
+        version_title,version_parent;
+        where id = {};"#,
+        game_id
+    );
+    
+    let response = client
+        .post("https://api.igdb.com/v4/games")
+        .header("Client-ID", client_id)
+        .header("Authorization", format!("Bearer {}", bearer_token))
+        .header("Content-Type", "text/plain")
+        .body(query)
+        .send()
+        .map_err(|e| format!("Failed to fetch IGDB game details: {}", e))?;
+    
+    if !response.status().is_success() {
+        return Err(format!("IGDB API error: {}", response.status()));
+    }
+    
+    let mut games: Vec<serde_json::Value> = response.json()
+        .map_err(|e| format!("Failed to parse IGDB response: {}", e))?;
+    
+    games.pop()
+        .ok_or_else(|| "Game not found on IGDB".to_string())
+}
+
+/// Extract cover URL from IGDB cover object
+pub fn extract_igdb_cover_url(cover: &serde_json::Value) -> Option<String> {
+    cover.get("url")
+        .and_then(|url| url.as_str())
+        .map(|url| {
+            // IGDB returns URLs like "//images.igdb.com/...", we need to add https:
+            if url.starts_with("//") {
+                format!("https:{}", url)
+            } else {
+                url.to_string()
+            }
+        })
+}
+
+/// Extract developer and publisher names from IGDB involved_companies
+pub fn extract_igdb_companies(involved_companies: &serde_json::Value) -> (Vec<String>, Vec<String>) {
+    let mut developers = Vec::new();
+    let mut publishers = Vec::new();
+    
+    if let Some(companies) = involved_companies.as_array() {
+        for company in companies {
+            let is_developer = company.get("developer")
+                .and_then(|d| d.as_bool())
+                .unwrap_or(false);
+            let is_publisher = company.get("publisher")
+                .and_then(|p| p.as_bool())
+                .unwrap_or(false);
+            
+            if let Some(name) = company.get("company")
+                .and_then(|c| c.get("name"))
+                .and_then(|n| n.as_str()) {
+                if is_developer {
+                    developers.push(name.to_string());
+                }
+                if is_publisher {
+                    publishers.push(name.to_string());
+                }
+            }
+        }
+    }
+    
+    (developers, publishers)
 }

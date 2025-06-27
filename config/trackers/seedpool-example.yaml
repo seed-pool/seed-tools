@@ -1,0 +1,21 @@
+# Seedpool tracker configuration
+# Copy this file to seedpool.yaml and update with your credentials
+general:
+  enabled: true
+  username: "your_seedpool_username"
+  passkey: "your_seedpool_passkey"
+  api_key: "your_seedpool_api_key"
+
+settings:
+  upload_url: "https://seedpool.com/api/upload"
+  custom_description: ""  # Leave empty for default formatting
+  dupe_checks: true
+  # Upload components
+  enable_mediainfo: true
+  enable_screenshots: true
+  enable_sample: true
+  enable_nfo: true
+  enable_tmdb: true
+  enable_torrent_creation: false
+  enable_duplicate_check: true
+  screenshot_count: 4

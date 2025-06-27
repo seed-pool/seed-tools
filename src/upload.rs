@@ -109,6 +109,8 @@ pub struct UploadBuilder {
     
     // Description configuration
     description_config: Option<crate::description::DescriptionConfig>,
+    
+    // Media classification handled by ProcessBuilder
 }
 
 impl UploadBuilder {
@@ -209,6 +211,12 @@ impl UploadBuilder {
     pub fn with_torrent_creation(mut self, announce_url: impl Into<String>) -> Self {
         self.upload_config.skip_torrent_creation = false;
         self.upload_config.announce_url = Some(announce_url.into());
+        self
+    }
+    
+    /// Enable cover art extraction (future improvement)
+    pub fn with_cover_art(self) -> Self {
+        // TODO: Implement cover art extraction for audio/ebook files
         self
     }
     
@@ -907,6 +915,7 @@ impl TrackerUploadExt for UploadBuilder {
 /// ```
 
 /// Result of an upload operation
+#[derive(Debug)]
 pub struct UploadResult {
     pub success: bool,
     pub tracker: String,
@@ -919,6 +928,7 @@ pub struct UploadProcessor {
     /// The upload data to process
     upload_data: crate::media::video::UploadData,
     /// Full configuration
+    #[allow(dead_code)] // Used in some upload scenarios, keep for now
     config: Arc<Config>,
     /// Dry run mode
     dry_run: bool,

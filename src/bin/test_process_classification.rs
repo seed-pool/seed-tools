@@ -1,5 +1,5 @@
-use seed_tools::media::{auto_detect_content_type, DetectionResult};
-use seed_tools::types::{Config, ContentCategory, ContentType};
+use seedbrr::media::detector::detect_media_type;
+use seedbrr::types::Config;
 use clap::{Parser, ValueEnum};
 use std::fs;
 use std::path::Path;
@@ -99,7 +99,7 @@ fn main() {
         }
     };
     
-    let config: Config = match serde_yaml::from_str(&config_str) {
+    let _config: Config = match serde_yaml::from_str(&config_str) {
         Ok(cfg) => cfg,
         Err(e) => {
             eprintln!("Failed to parse config: {}", e);
@@ -121,9 +121,9 @@ fn main() {
     }
     
     // Load tracker configurations to determine active tracker
-    let seedpool_config = seed_tools::utils::load_tracker_config::<seed_tools::types::SeedpoolConfig>("seedpool")
+    let seedpool_config = seedbrr::utils::load_tracker_config::<seedbrr::types::SeedpoolConfig>("seedpool")
         .ok();
-    let torrentleech_config = seed_tools::utils::load_tracker_config::<seed_tools::types::TorrentLeechConfig>("torrentleech")
+    let torrentleech_config = seedbrr::utils::load_tracker_config::<seedbrr::types::TorrentLeechConfig>("torrentleech")
         .ok();
     
     // Determine active tracker
@@ -188,20 +188,18 @@ fn main() {
     for (i, test_path) in test_paths.iter().enumerate() {
         log_println!(logger, "{}. Path: {}", i + 1, test_path);
         
-        // Use auto_detect_content_type to get the detection result
-        match auto_detect_content_type(test_path) {
-            Ok(detection) => {
+        // Use new media detection to get media files
+        match detect_media_type(test_path) {
+            Ok(media_files) => {
                 success_count += 1;
                 log_println!(logger, "   Detection: SUCCESS");
-                log_println!(logger, "   Description: {}", detection.description);
-                log_println!(logger, "   Category: {:?}", detection.category_type);
-                log_println!(logger, "   Media Type: {:?}", detection.media_type);
-                log_println!(logger, "   Confidence: {:.1}%", detection.confidence * 100.0);
-                
-                // Map to internal classification strings
-                let (category_str, source_str) = map_detection_to_classification(&detection);
-                log_println!(logger, "   Internal Classification: {} / {:?}", category_str, source_str);
-                
+                if let Some(first_file) = media_files.first() {
+                    log_println!(logger, "   Media Type: {:?}", first_file.media_type);
+                    log_println!(logger, "   Path: {:?}", first_file.path);
+                    log_println!(logger, "   Files detected: {}", media_files.len());
+                } else {
+                    log_println!(logger, "   No media files detected");
+                }
             }
             Err(e) => {
                 error_count += 1;
@@ -231,6 +229,8 @@ fn main() {
     log_println!(logger, "\n=== Test completed ===");
 }
 
+// Old function commented out - no longer needed with ProcessBuilder pattern
+/*
 fn map_detection_to_classification(detection: &DetectionResult) -> (String, Option<String>) {
     match detection.category_type {
         ContentCategory::Video => {
@@ -300,6 +300,7 @@ fn map_detection_to_classification(detection: &DetectionResult) -> (String, Opti
         }
     }
 }
+*/
 
 
 fn scan_directory(dir_path: &str, media_type: &MediaType) -> Result<Vec<String>, String> {
@@ -358,7 +359,7 @@ fn generate_test_paths(temp_dir: &str, media_type: &MediaType, count: usize) -> 
             let qualities = ["720p", "1080p", "2160p", "4K"];
             let sources = ["BluRay", "WEB-DL", "HDTV", "WEBRip", "Remux"];
             
-            for i in 0..count {
+            for _ in 0..count {
                 let title = titles[rng.gen_range(0..titles.len())];
                 let is_tv = rng.gen_bool(0.6);
                 
@@ -399,7 +400,7 @@ fn generate_test_paths(temp_dir: &str, media_type: &MediaType, count: usize) -> 
             let albums = ["Greatest Hits", "Live Album", "Studio Sessions", "Unplugged", "Discography"];
             let years = ["1970", "1980", "1990", "2000", "2020", "2023", "2024"];
             
-            for i in 0..count {
+            for _ in 0..count {
                 let artist = artists[rng.gen_range(0..artists.len())];
                 let album = albums[rng.gen_range(0..albums.len())];
                 let year = years[rng.gen_range(0..years.len())];
@@ -421,7 +422,7 @@ fn generate_test_paths(temp_dir: &str, media_type: &MediaType, count: usize) -> 
             let titles = ["The Mystery", "Complete Guide", "Volume 1", "Issue 001", "Collection"];
             let years = ["2010", "2015", "2020", "2023", "2024"];
             
-            for i in 0..count {
+            for _ in 0..count {
                 let author = authors[rng.gen_range(0..authors.len())];
                 let title = titles[rng.gen_range(0..titles.len())];
                 let year = years[rng.gen_range(0..years.len())];
@@ -444,7 +445,7 @@ fn generate_test_paths(temp_dir: &str, media_type: &MediaType, count: usize) -> 
             let platforms = ["PC", "PS5", "PS4", "XBOX", "NSW"];
             let groups = ["CODEX", "PLAZA", "CPY", "RELOADED", "GOG", "ElAmigos"];
             
-            for i in 0..count {
+            for _ in 0..count {
                 let game = games[rng.gen_range(0..games.len())];
                 let platform = platforms[rng.gen_range(0..platforms.len())];
                 let group = groups[rng.gen_range(0..groups.len())];
@@ -479,7 +480,7 @@ fn generate_test_paths(temp_dir: &str, media_type: &MediaType, count: usize) -> 
             let subjects = ["Photoshop", "3D.Modeling", "Photography", "Design", "Crafts", "Premium"];
             let years = ["2020", "2021", "2022", "2023", "2024"];
             
-            for i in 0..count {
+            for _ in 0..count {
                 let type_name = types[rng.gen_range(0..types.len())];
                 let subject = subjects[rng.gen_range(0..subjects.len())];
                 let year = years[rng.gen_range(0..years.len())];
