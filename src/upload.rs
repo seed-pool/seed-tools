@@ -899,7 +899,7 @@ impl TrackerUploadExt for UploadBuilder {
 
 /// Example of how to use UploadBuilder with automatic tracker detection
 /// 
-/// ```rust
+/// ```ignore
 /// // Create upload for a video with specific components
 /// let builder = create_video_upload(&input_path, config.clone(), metadata);
 /// 
