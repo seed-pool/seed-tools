@@ -6,6 +6,3 @@ include:
 
 nix-ci:build:
   tags: [nix]
-  only:
-    - master
-    - development
