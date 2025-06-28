@@ -740,7 +740,7 @@ pub fn check_all_duplicates(title: &str) -> Result<Vec<(String, String)>, String
 /// * `Err(String)` - If an error occurs
 /// 
 /// # Example
-/// ```rust
+/// ```ignore
 /// let tracker = if cli_args.sp { "seedpool" } else if cli_args.tl { "torrentleech" } else { "unknown" };
 /// match check_duplicates("Movie.Title.2023.1080p", tracker, Some(&seedpool_config), None)? {
 ///     Some(download_link) => println!("Duplicate found: {}", download_link),
