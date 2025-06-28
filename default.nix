@@ -10,8 +10,8 @@
 		pkg-config
 	];
 in {
-	seed-tools = pkgsStatic.rustPlatform.buildRustPackage {
-		name = "seed-tools";
+	seedbrr = pkgsStatic.rustPlatform.buildRustPackage {
+		name = "seedbrr";
 
 		cargoLock.lockFile = ./Cargo.lock;
 		src = lib.fileset.toSource {
