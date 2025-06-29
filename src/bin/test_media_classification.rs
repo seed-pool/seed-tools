@@ -1,7 +1,5 @@
-use seedbrr::media::video::classify_video_content;
-use seedbrr::media::audio::classify_audio_content;
-use seedbrr::media::ebook::classify_ebook_content;
-use seedbrr::types::{AudioType, VideoCategory, AudioCategory};
+use seedbrr::classification::rules::*;
+use serde_json::json;
 use clap::{Parser, ValueEnum};
 use std::fs;
 use std::path::Path;
@@ -11,9 +9,9 @@ use std::io::Write;
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Test media classification", long_about = None)]
 struct Args {
-    /// Media type to test (video, audio, ebook)
+    /// Media type to test (video, audio, ebook, game, hobby)
     #[arg(short, long, value_enum)]
-    media_type: MediaType,
+    media_type: TestMediaType,
     
     /// Input file containing filenames (one per line)
     #[arg(short = 'f', long)]
@@ -33,10 +31,12 @@ struct Args {
 }
 
 #[derive(Debug, Clone, ValueEnum)]
-enum MediaType {
+enum TestMediaType {
     Video,
     Audio,
     Ebook,
+    Game,
+    Hobby,
 }
 
 // Logger struct to handle dual output
@@ -132,21 +132,25 @@ fn main() {
     
     // Run classification tests
     match args.media_type {
-        MediaType::Video => test_video_classification(&filenames, &mut logger),
-        MediaType::Audio => test_audio_classification(&filenames, &mut logger),
-        MediaType::Ebook => test_ebook_classification(&filenames, &mut logger),
+        TestMediaType::Video => test_video_classification(&filenames, &mut logger),
+        TestMediaType::Audio => test_audio_classification(&filenames, &mut logger),
+        TestMediaType::Ebook => test_ebook_classification(&filenames, &mut logger),
+        TestMediaType::Game => test_game_classification(&filenames, &mut logger),
+        TestMediaType::Hobby => test_hobby_classification(&filenames, &mut logger),
     }
     
     // Close log file
     log_println!(logger, "\n=== Test completed ===");
 }
 
-fn scan_directory(dir_path: &str, media_type: &MediaType) -> Result<Vec<String>, String> {
+fn scan_directory(dir_path: &str, media_type: &TestMediaType) -> Result<Vec<String>, String> {
     let mut files = Vec::new();
     let extensions = match media_type {
-        MediaType::Video => vec!["mkv", "mp4", "avi", "mov", "wmv", "flv", "webm", "m4v", "ts", "mpg", "mpeg", "iso"],
-        MediaType::Audio => vec!["mp3", "flac", "wav", "aac", "ogg", "m4a", "wma", "aiff", "ape", "opus"],
-        MediaType::Ebook => vec!["epub", "pdf", "mobi", "azw", "azw3", "cbr", "cbz", "lit", "pdb"],
+        TestMediaType::Video => vec!["mkv", "mp4", "avi", "mov", "wmv", "flv", "webm", "m4v", "ts", "mpg", "mpeg", "iso"],
+        TestMediaType::Audio => vec!["mp3", "flac", "wav", "aac", "ogg", "m4a", "wma", "aiff", "ape", "opus"],
+        TestMediaType::Ebook => vec!["epub", "pdf", "mobi", "azw", "azw3", "cbr", "cbz", "lit", "pdb"],
+        TestMediaType::Game => vec!["zip", "rar", "7z", "exe", "msi", "iso", "nsp", "xci", "cia"],
+        TestMediaType::Hobby => vec!["doc", "docx", "txt", "rtf", "jpg", "png", "gif", "zip", "rar", "csv", "json", "xml"],
     };
     
     for entry in fs::read_dir(dir_path).map_err(|e| e.to_string())? {
@@ -167,12 +171,12 @@ fn scan_directory(dir_path: &str, media_type: &MediaType) -> Result<Vec<String>,
     Ok(files)
 }
 
-fn generate_random_filenames(media_type: &MediaType, count: usize) -> Vec<String> {
+fn generate_random_filenames(media_type: &TestMediaType, count: usize) -> Vec<String> {
     let mut rng = rand::thread_rng();
     let mut filenames = Vec::new();
     
     match media_type {
-        MediaType::Video => {
+        TestMediaType::Video => {
             let titles = [
                 // TV Shows - Drama
                 "Breaking.Bad", "The.Wire", "Game.of.Thrones", "Stranger.Things", "The.Crown",
@@ -276,7 +280,7 @@ fn generate_random_filenames(media_type: &MediaType, count: usize) -> Vec<String
             filenames.push("The.Office.US.S09E23-E24.Finale.1080p.WEB-DL.DD5.1.H.264-BS.mkv".to_string());
         }
         
-        MediaType::Audio => {
+        TestMediaType::Audio => {
             let artists = [
                 // Rock/Classic Rock
                 "Pink Floyd", "Led Zeppelin", "The Beatles", "Queen", "Nirvana",
@@ -342,7 +346,7 @@ fn generate_random_filenames(media_type: &MediaType, count: usize) -> Vec<String
             filenames.push("Various Artists - Grammy Nominees 2024 [MP3 V0]/CD1/01 - Artist Name - Song Title.mp3".to_string());
         }
         
-        MediaType::Ebook => {
+        TestMediaType::Ebook => {
             let authors = [
                 // Fiction Authors
                 "Stephen King", "J.K. Rowling", "George R.R. Martin", "Agatha Christie",
@@ -477,6 +481,56 @@ fn generate_random_filenames(media_type: &MediaType, count: usize) -> Vec<String
             filenames.push("Fantasy/Brandon Sanderson/Mistborn 01 - The Final Empire (2006).epub".to_string());
             filenames.push("George R.R. Martin - A Song of Ice and Fire/Book 1 - A Game of Thrones.mobi".to_string());
         }
+        
+        TestMediaType::Game => {
+            let games = [
+                "Cyberpunk 2077", "The Witcher 3", "Red Dead Redemption 2", "Grand Theft Auto V",
+                "Call of Duty", "Battlefield", "FIFA", "Assassins Creed", "Far Cry",
+                "Microsoft Office", "Adobe Photoshop", "AutoCAD", "VMware Workstation"
+            ];
+            let platforms = ["PC", "PS4", "PS5", "Xbox", "Switch", "Windows", "MacOS", "Linux"];
+            let years = ["2020", "2021", "2022", "2023", "2024"];
+            let groups = ["CODEX", "PLAZA", "FitGirl", "DODI", "GOG", "Steam", "Repack"];
+            
+            for _ in 0..count {
+                let game = games[rng.gen_range(0..games.len())];
+                let platform = platforms[rng.gen_range(0..platforms.len())];
+                let year = years[rng.gen_range(0..years.len())];
+                let group = groups[rng.gen_range(0..groups.len())];
+                
+                let filename = format!("{} {} {} {}", game, platform, year, group);
+                let ext = ["zip", "rar", "iso", "exe"][rng.gen_range(0..4)];
+                
+                filenames.push(format!("{}.{}", filename, ext));
+            }
+            
+            // Add special cases
+            filenames.push("Microsoft.Office.2021.Professional.Plus.x64-OFFICE.zip".to_string());
+            filenames.push("Adobe.Photoshop.2024.v25.0.Windows-ADOBE.rar".to_string());
+            filenames.push("Games/PC/Cyberpunk.2077.Ultimate.Edition-GOG/setup.exe".to_string());
+            filenames.push("Nintendo.Switch.Games/Mario.Kart.8.Deluxe.NSW-SUXXORS.nsp".to_string());
+        }
+        
+        TestMediaType::Hobby => {
+            let types = ["Tutorial", "Template", "Resource Pack", "Documentation", "Collection"];
+            let topics = ["Programming", "Design", "Photography", "CAD", "Data Analysis"];
+            
+            for _ in 0..count {
+                let type_name = types[rng.gen_range(0..types.len())];
+                let topic = topics[rng.gen_range(0..topics.len())];
+                
+                let filename = format!("{} {} 2024", topic, type_name);
+                let ext = ["zip", "pdf", "doc", "jpg", "dwg", "csv"][rng.gen_range(0..6)];
+                
+                filenames.push(format!("{}.{}", filename, ext));
+            }
+            
+            // Add special cases
+            filenames.push("Web Design Templates Collection 2024.zip".to_string());
+            filenames.push("AutoCAD Blocks Library.dwg".to_string());
+            filenames.push("Photography Tutorial - Advanced Techniques.pdf".to_string());
+            filenames.push("Financial Data Analysis 2024.csv".to_string());
+        }
     }
     
     filenames
@@ -488,37 +542,27 @@ fn test_video_classification(filenames: &[String], logger: &mut Logger) {
     let mut stats = ClassificationStats::new();
     
     for (i, filename) in filenames.iter().enumerate() {
-        let metadata = classify_video_content(filename);
+        // Create metadata for classification
+        let mut metadata = json!({
+            "filename": filename,
+            "extension": Path::new(filename).extension().and_then(|e| e.to_str()).unwrap_or(""),
+        });
+        
+        // Test centralized classification
+        let category = classify_video_rules(&metadata);
+        let source_type = classify_video_source_type(&metadata);
         
         log_println!(logger, "{}. File: {}", i + 1, filename);
-        log_println!(logger, "   Title: '{}'", metadata.title);
-        log_println!(logger, "   Category: {:?}", metadata.category);
-        log_println!(logger, "   Source: {:?}", metadata.source_type);
+        log_println!(logger, "   Category: {:?}", category.as_deref().unwrap_or("Unknown"));
+        log_println!(logger, "   Source Type: {:?}", source_type.as_deref().unwrap_or("Unknown"));
         
-        if metadata.season.is_some() || metadata.episode.is_some() {
-            log_println!(logger, "   Season: {:?}, Episode: {:?}", metadata.season, metadata.episode);
-        }
-        
-        if let Some(year) = metadata.year {
-            log_println!(logger, "   Year: {}", year);
-        }
-        
-        if let Some(resolution) = metadata.resolution {
-            log_println!(logger, "   Resolution: {}", resolution);
-        }
-        
-        if let Some(codec) = metadata.codec {
-            log_println!(logger, "   Codec: {}", codec);
-        }
-        
-        if metadata.is_boxset || metadata.is_dated_tv {
-            log_println!(logger, "   Special: Boxset={}, Dated TV={}", metadata.is_boxset, metadata.is_dated_tv);
-        }
+        // Also test full engine if needed (commented out for now)
+        // TODO: Test with full MediaClassification engine once MediaFile detection is integrated
         
         log_println!(logger, "");
         
         // Update stats
-        if metadata.category == VideoCategory::Unknown {
+        if category.is_none() || category.as_ref().map(|c| c.contains("Unknown")).unwrap_or(false) {
             stats.unknown += 1;
         } else {
             stats.classified += 1;
@@ -536,46 +580,39 @@ fn test_audio_classification(filenames: &[String], logger: &mut Logger) {
     
     for (i, filename) in filenames.iter().enumerate() {
         let path = Path::new(filename);
-        let extension = path.extension()
-            .and_then(|ext| ext.to_str())
+        
+        // Extract directory info for classification
+        let parent_dir = path.parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+            
+        let grandparent_dir = path.parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
             .unwrap_or("");
         
-        let audio_type = AudioType::from_extension(extension)
-            .unwrap_or(AudioType::Mp3);
+        // Create metadata for classification
+        let metadata = json!({
+            "filename": path.file_name().and_then(|n| n.to_str()).unwrap_or(""),
+            "extension": path.extension().and_then(|e| e.to_str()).unwrap_or(""),
+            "parent_dir": parent_dir,
+            "grandparent_dir": grandparent_dir,
+        });
         
-        let metadata = classify_audio_content(&path, &audio_type);
+        // Test centralized classification
+        let category = classify_audio_rules(&metadata);
+        let source_type = classify_audio_source_type(&metadata);
         
         log_println!(logger, "{}. File: {}", i + 1, filename);
-        if let Some(artist) = &metadata.artist {
-            log_println!(logger, "   Artist: {}", artist);
-        }
-        if let Some(album) = &metadata.album {
-            log_println!(logger, "   Album: {}", album);
-        }
-        log_println!(logger, "   Category: {:?}", metadata.category);
-        log_println!(logger, "   Source: {:?}", metadata.source_type);
-        log_println!(logger, "   Format: {:?} (Lossless: {})", metadata.format, metadata.is_lossless);
-        
-        if let Some(year) = metadata.year {
-            log_println!(logger, "   Year: {}", year);
-        }
-        
-        if metadata.is_various_artists {
-            log_println!(logger, "   Various Artists: true");
-        }
-        
-        if metadata.is_24bit {
-            log_println!(logger, "   24-bit: true");
-        }
-        
-        if let Some(sample_rate) = &metadata.sample_rate {
-            log_println!(logger, "   Sample Rate: {}", sample_rate);
-        }
+        log_println!(logger, "   Category: {:?}", category.as_deref().unwrap_or("Unknown"));
+        log_println!(logger, "   Source Type: {:?}", source_type.as_deref().unwrap_or("Unknown"));
         
         log_println!(logger, "");
         
         // Update stats
-        if metadata.category == AudioCategory::Unknown {
+        if category.is_none() || category.as_ref().map(|c| c.contains("Unknown")).unwrap_or(false) {
             stats.unknown += 1;
         } else {
             stats.classified += 1;
@@ -592,35 +629,88 @@ fn test_ebook_classification(filenames: &[String], logger: &mut Logger) {
     let mut stats = ClassificationStats::new();
     
     for (i, filename) in filenames.iter().enumerate() {
-        let extension = filename.split('.').last().unwrap_or("");
-        let metadata = classify_ebook_content(filename, extension);
+        let extension = Path::new(filename)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+            
+        // Create metadata for classification
+        let metadata = json!({
+            "filename": filename,
+            "extension": extension,
+        });
+        
+        // Test centralized classification
+        let category = classify_ebook_rules(&metadata);
         
         log_println!(logger, "{}. File: {}", i + 1, filename);
-        log_println!(logger, "   Title: '{}'", metadata.title);
-        if let Some(author) = &metadata.author {
-            log_println!(logger, "   Author: {}", author);
-        }
-        log_println!(logger, "   Category: {:?}", metadata.category);
-        if let Some(format_type) = &metadata.format_type {
-            log_println!(logger, "   Format: {:?}", format_type);
-        }
-        
-        if let Some(year) = metadata.year {
-            log_println!(logger, "   Year: {}", year);
-        }
-        
-        if let Some(edition) = &metadata.edition {
-            log_println!(logger, "   Edition: {}", edition);
-        }
-        
-        if let Some(isbn) = &metadata.isbn {
-            log_println!(logger, "   ISBN: {}", isbn);
-        }
-        
+        log_println!(logger, "   Category: {:?}", category.as_deref().unwrap_or("Unknown"));
         log_println!(logger, "");
         
         // Update stats
-        if metadata.category == seedbrr::types::EbookCategory::Unknown {
+        if category.is_none() || category.as_ref().map(|c| c.contains("Unknown")).unwrap_or(false) {
+            stats.unknown += 1;
+        } else {
+            stats.classified += 1;
+        }
+        stats.total += 1;
+    }
+    
+    print_stats(&stats, logger);
+}
+
+fn test_game_classification(filenames: &[String], logger: &mut Logger) {
+    log_println!(logger, "=== Game Classification Test Results ===\n");
+    
+    let mut stats = ClassificationStats::new();
+    
+    for (i, filename) in filenames.iter().enumerate() {
+        // Create metadata for classification
+        let metadata = json!({
+            "filename": filename,
+            "extension": Path::new(filename).extension().and_then(|e| e.to_str()).unwrap_or(""),
+        });
+        
+        // Test centralized classification
+        let category = classify_game_rules(&metadata);
+        
+        log_println!(logger, "{}. File: {}", i + 1, filename);
+        log_println!(logger, "   Category: {:?}", category.as_deref().unwrap_or("Unknown"));
+        log_println!(logger, "");
+        
+        // Update stats
+        if category.is_none() {
+            stats.unknown += 1;
+        } else {
+            stats.classified += 1;
+        }
+        stats.total += 1;
+    }
+    
+    print_stats(&stats, logger);
+}
+
+fn test_hobby_classification(filenames: &[String], logger: &mut Logger) {
+    log_println!(logger, "=== Hobby Classification Test Results ===\n");
+    
+    let mut stats = ClassificationStats::new();
+    
+    for (i, filename) in filenames.iter().enumerate() {
+        // Create metadata for classification
+        let metadata = json!({
+            "filename": filename,
+            "extension": Path::new(filename).extension().and_then(|e| e.to_str()).unwrap_or(""),
+        });
+        
+        // Test centralized classification
+        let category = classify_hobby_rules(&metadata);
+        
+        log_println!(logger, "{}. File: {}", i + 1, filename);
+        log_println!(logger, "   Category: {:?}", category.as_deref().unwrap_or("Unknown"));
+        log_println!(logger, "");
+        
+        // Update stats
+        if category.is_none() || category.as_ref().map(|c| c.contains("Unknown")).unwrap_or(false) {
             stats.unknown += 1;
         } else {
             stats.classified += 1;

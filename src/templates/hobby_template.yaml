@@ -1,0 +1,77 @@
+name: "default"
+media_type: "hobby"
+version: "1.0"
+description: "Default hobby template for general files"
+
+layout:
+  title_color: "#2E86C1"
+  author_color: "#117A65"
+  section_colors:
+    description: "#6C3483"
+    details: "#117A65"
+    default: "#2E86C1"
+  image_layout: "two_column"
+  image_width: 720
+  max_images: 4
+  include_footer: true
+
+sections:
+  - name: "title"
+    section_type: "title"
+    content: "{{title}}"
+    order: 1
+    required_fields: ["title"]
+
+  - name: "creator"
+    section_type: "author"
+    content: "{{creator}}"
+    order: 2
+    required_fields: ["creator"]
+
+  - name: "description"
+    section_type: "synopsis"
+    content: "{{description}}"
+    order: 3
+    required_fields: ["description"]
+
+  - name: "images"
+    section_type: "images"
+    order: 4
+
+  - name: "details"
+    section_type: "table"
+    order: 5
+    table_fields:
+      - label: "Category"
+        field: "category"
+      - label: "Type"
+        field: "hobby_type"
+      - label: "Format"
+        field: "format"
+      - label: "Size"
+        field: "total_size"
+      - label: "File Count"
+        field: "file_count"
+      - label: "Created"
+        field: "created_date"
+      - label: "Language"
+        field: "language"
+      - label: "Tags"
+        field: "tags"
+
+conditionals:
+  - name: "software_version"
+    condition: "field_exists:software_version"
+    section:
+      name: "software_info"
+      section_type: "custom"
+      content: "Software Version: {{software_version}}"
+      format: "plain"
+
+  - name: "tutorial_steps"
+    condition: "field_exists:tutorial_steps"
+    section:
+      name: "tutorial"
+      section_type: "custom"
+      content: "{{tutorial_steps}}"
+      format: "quoted"

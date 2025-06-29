@@ -1,0 +1,78 @@
+name: "default"
+media_type: "ebook"
+version: "1.0"
+description: "Default ebook template with OpenLibrary integration"
+
+layout:
+  title_color: "#2E86C1"
+  author_color: "#117A65"
+  section_colors:
+    synopsis: "#6C3483"
+    author_bio: "#F39C12"
+    details: "#117A65"
+    default: "#2E86C1"
+  image_layout: "single_column"
+  image_width: 400
+  max_images: 4
+  include_footer: true
+
+sections:
+  - name: "title"
+    section_type: "title"
+    content: "{{title}}"
+    order: 1
+    required_fields: ["title"]
+
+  - name: "author"
+    section_type: "author"
+    content: "{{author}}"
+    order: 2
+    required_fields: ["author"]
+
+  - name: "synopsis"
+    section_type: "synopsis"
+    content: "{{synopsis}}"
+    order: 3
+    required_fields: ["synopsis"]
+
+  - name: "images"
+    section_type: "images"
+    order: 4
+
+  - name: "details"
+    section_type: "table"
+    order: 5
+    table_fields:
+      - label: "Category"
+        field: "category"
+      - label: "Format"
+        field: "format"
+      - label: "Language"
+        field: "language"
+      - label: "Pages"
+        field: "pages"
+      - label: "Publisher"
+        field: "publisher"
+      - label: "Publication Date"
+        field: "publish_date"
+      - label: "ISBN"
+        field: "isbn"
+      - label: "Series"
+        field: "series"
+
+conditionals:
+  - name: "author_bio"
+    condition: "field_exists:author_bio"
+    section:
+      name: "author_bio"
+      section_type: "custom"
+      content: "{{author_bio}}"
+      format: "quoted"
+
+  - name: "subjects"
+    condition: "field_exists:subjects"
+    section:
+      name: "subjects"
+      section_type: "custom"
+      content: "{{subjects}}"
+      format: "plain"

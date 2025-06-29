@@ -1,5 +1,5 @@
 use seedbrr::media::detector::detect_media_type;
-use seedbrr::types::Config;
+use seedbrr::core::Config;
 use clap::{Parser, ValueEnum};
 use std::fs;
 use std::path::Path;
@@ -121,9 +121,9 @@ fn main() {
     }
     
     // Load tracker configurations to determine active tracker
-    let seedpool_config = seedbrr::utils::load_tracker_config::<seedbrr::types::SeedpoolConfig>("seedpool")
+    let seedpool_config = seedbrr::utils::load_tracker_config::<seedbrr::core::types::SeedpoolConfig>("seedpool")
         .ok();
-    let torrentleech_config = seedbrr::utils::load_tracker_config::<seedbrr::types::TorrentLeechConfig>("torrentleech")
+    let torrentleech_config = seedbrr::utils::load_tracker_config::<seedbrr::core::types::TorrentLeechConfig>("torrentleech")
         .ok();
     
     // Determine active tracker

@@ -1,8 +1,8 @@
-use crate::types::{GameFile, GameType, MediaFile, MediaType};
+use crate::core::types::{GameFile, GameType, MediaFile, MediaType};
 use std::path::Path;
 use log::{info, warn};
 use regex::Regex;
-use crate::extraction::process_and_extract_archives;
+use crate::processing::extraction::process_and_extract_archives;
 use chrono;
 
 /// Game metadata extracted from filename and structure
@@ -41,10 +41,31 @@ impl Default for GameMetadata {
     }
 }
 
+/// Generate game description with template support
+pub fn generate_description_with_template(
+    metadata: &serde_json::Value,
+    enriched_metadata: Option<&std::collections::HashMap<String, String>>,
+    template_name: Option<&str>,
+) -> Result<String, String> {
+    use crate::templates::TemplateProcessor;
+    
+    let template_processor = TemplateProcessor::with_defaults()
+        .map_err(|e| format!("Failed to initialize template processor: {}", e))?;
+    
+    let template_to_use = template_name.unwrap_or("default");
+    
+    if let Some(template) = template_processor.get_template("game", template_to_use) {
+        template_processor.apply_template(template, metadata, enriched_metadata)
+    } else {
+        // Fallback to traditional description generation
+        Ok(generate_description_with_enriched_metadata(metadata, enriched_metadata))
+    }
+}
+
 /// Process game file(s) from a path (file or directory) and classify content
 pub fn process_game(
     input_path: &str,
-    _config: &crate::types::Config,
+    _config: &crate::core::Config,
     _dry_run: bool,
 ) -> Result<Vec<(GameFile, GameMetadata)>, String> {
     let path = Path::new(input_path);
@@ -54,7 +75,7 @@ pub fn process_game(
     }
     
     // Extract any archives first and get the path to process
-    let processing_path = process_and_extract_archives(input_path)?;
+    let processing_path = process_and_extract_archives(input_path).map_err(|e| format!("{:?}", e))?;
     
     let mut results = Vec::new();
     
@@ -138,20 +159,19 @@ pub fn process_game(
     
     // After we have the results, build the upload data if we have game files
     if !results.is_empty() {
-        use crate::upload::UploadBuilder;
+        use crate::processing::upload::UploadBuilder;
         use std::sync::Arc;
         
         let (_game_file, metadata) = &results[0];
         
         // Build upload data directly using UploadBuilder
-        use crate::description::DescriptionConfig;
-        use crate::types::ImageLayout;
+        // use crate::description::DescriptionConfig;
         
         // Configure description for games
-        let mut desc_config = DescriptionConfig::default();
-        desc_config.image_layout = ImageLayout::Gallery; // Games use gallery layout for screenshots
-        desc_config.max_images = 8; // Show game screenshots
-        desc_config.image_width = 600;
+        // let mut desc_config = DescriptionConfig::default();
+        // desc_config.image_layout = ImageLayout::Gallery; // Games use gallery layout for screenshots
+        // desc_config.max_images = 8; // Show game screenshots
+        // desc_config.image_width = 600;
         
         // Create the upload builder with game-specific components
         let mut builder = UploadBuilder::new(
@@ -160,7 +180,7 @@ pub fn process_game(
             Arc::new((*_config).clone())
         )
         .with_extensions(GameType::all_extensions())
-        .with_description_config(desc_config)
+        // .with_description_config(desc_config)
         .dry_run(_dry_run);
         
         // Add title info
@@ -205,7 +225,7 @@ pub fn process_game(
         // Fetch IGDB data if credentials are available
         if !_config.general.igdb_client_id.is_empty() && !_config.general.igdb_bearer_token.is_empty() {
             info!("Looking up game on IGDB: {}", metadata.title);
-            match crate::utils::search_igdb_game(
+            match crate::metadata::igdb::search_igdb_game(
                 &metadata.title,
                 &_config.general.igdb_client_id,
                 &_config.general.igdb_bearer_token,
@@ -219,7 +239,7 @@ pub fn process_game(
                             game_metadata.insert("igdb_id".to_string(), igdb_id.to_string());
                             
                             // Get detailed game information
-                            match crate::utils::get_igdb_game_details(
+                            match crate::metadata::igdb::get_igdb_game_details(
                                 igdb_id,
                                 &_config.general.igdb_client_id,
                                 &_config.general.igdb_bearer_token
@@ -240,7 +260,7 @@ pub fn process_game(
                                     
                                     // Developer/Publisher from involved_companies
                                     if let Some(companies) = details.get("involved_companies") {
-                                        let (developers, publishers) = crate::utils::extract_igdb_companies(companies);
+                                        let (developers, publishers) = crate::metadata::igdb::extract_igdb_companies(companies);
                                         if !developers.is_empty() && metadata.developer.is_none() {
                                             game_metadata.insert("igdb_developer".to_string(), developers.join(", "));
                                         }
@@ -291,14 +311,14 @@ pub fn process_game(
             .with_nfo()
             .with_duplicate_check()
             .with_screenshots(4) // Game screenshots
-            .with_custom_component("game_metadata", crate::types::UploadComponent::Metadata(game_metadata));
+            .with_custom_component("game_metadata", crate::core::UploadComponent::Metadata(game_metadata));
         
         let _upload_data = builder.build()?;
         
         info!("Built upload data for game processing");
         
         // Create the upload processor - it will auto-detect the active tracker
-        let mut processor = crate::upload::UploadProcessor::new(
+        let mut processor = crate::processing::upload::UploadProcessor::new(
             _upload_data,
             std::sync::Arc::new(_config.clone()),
         )
@@ -523,7 +543,7 @@ pub fn to_media_file(game_file: &GameFile) -> MediaFile {
     }
 }
 
-/// Classify game content for upload pipeline
+/// Classify game content for upload pipeline with enriched metadata support
 pub fn classify_for_upload(input_path: &str, metadata: &serde_json::Value) -> Result<(Option<String>, Option<String>, serde_json::Value), String> {
     // Check if we have platform info in metadata
     if let Some(platform) = metadata.get("platform").and_then(|p| p.as_str()) {
@@ -568,8 +588,8 @@ pub fn classify_for_upload(input_path: &str, metadata: &serde_json::Value) -> Re
                 Some("GameCategory::PC".to_string())
             };
             
-            // Manually create JSON metadata
-            let json_metadata = serde_json::json!({
+            // Create comprehensive JSON metadata including all possible IGDB fields
+            let mut json_metadata = serde_json::json!({
                 "title": game_metadata.title,
                 "platform": game_metadata.platform,
                 "year": game_metadata.year,
@@ -584,10 +604,150 @@ pub fn classify_for_upload(input_path: &str, metadata: &serde_json::Value) -> Re
                 "is_repack": game_metadata.is_repack,
             });
             
+            // Add store information
+            if game_metadata.is_gog {
+                json_metadata["store"] = serde_json::Value::String("GOG".to_string());
+            } else if game_metadata.is_steam {
+                json_metadata["store"] = serde_json::Value::String("Steam".to_string());
+            }
+            
+            // Note: IGDB enrichment happens during process_game() and gets stored in UploadComponent::Metadata
+            // The description system should be updated to merge this enriched data when generating descriptions
+            
             return Ok((category, None, json_metadata));
         }
     }
     
     // Default to PC game
     Ok((Some("GameCategory::PC".to_string()), None, metadata.clone()))
+}
+
+/// Generate a description for a game upload with optional enriched metadata
+pub fn generate_description(metadata: &serde_json::Value) -> String {
+    generate_description_with_enriched_metadata(metadata, None)
+}
+
+/// Generate a description for a game upload with enriched metadata support
+pub fn generate_description_with_enriched_metadata(
+    base_metadata: &serde_json::Value, 
+    enriched_metadata: Option<&std::collections::HashMap<String, String>>
+) -> String {
+    use crate::processing::description::{DescriptionBuilder, DescriptionConfig};
+    use crate::core::{MediaType, GameType, ImageLayout, SectionFormat, DescriptionComponent};
+    
+    // Helper function to get value from either enriched metadata or base metadata
+    let get_value = |key: &str| -> Option<&str> {
+        enriched_metadata
+            .and_then(|enriched| enriched.get(key))
+            .map(|s| s.as_str())
+            .or_else(|| base_metadata.get(key).and_then(|v| v.as_str()))
+    };
+    
+    // Configure description builder for games
+    let mut config = DescriptionConfig::default();
+    config.image_layout = ImageLayout::Gallery;
+    config.max_images = 8;
+    
+    let mut builder = DescriptionBuilder::with_config(
+        MediaType::Game(GameType::Directory),
+        config
+    );
+    
+    // Add title
+    if let Some(title) = get_value("title") {
+        builder = builder.title(title);
+    }
+    
+    // Add IGDB summary/description if available (prefer IGDB)
+    if let Some(igdb_summary) = get_value("igdb_summary") {
+        builder = builder.synopsis(igdb_summary);
+    } else if let Some(description) = get_value("description") {
+        builder = builder.synopsis(description);
+    }
+    
+    // Add game screenshots if available
+    let screenshots: Vec<String> = base_metadata.get("screenshots")
+        .and_then(|s| s.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(String::from).collect())
+        .unwrap_or_default();
+    
+    if !screenshots.is_empty() {
+        builder = builder.images(screenshots);
+    }
+    
+    // Create game information table
+    let mut info_rows = Vec::new();
+    
+    // Platform
+    if let Some(platform) = get_value("platform") {
+        info_rows.push(vec!["Platform".to_string(), platform.to_string()]);
+    }
+    
+    // Year (could be igdb_release_year or year)
+    if let Some(year) = get_value("igdb_release_year")
+        .or_else(|| get_value("year")) {
+        info_rows.push(vec!["Year".to_string(), year.to_string()]);
+    } else if let Some(year) = base_metadata.get("year").and_then(|y| y.as_u64()) {
+        info_rows.push(vec!["Year".to_string(), year.to_string()]);
+    }
+    
+    // Developer (prefer IGDB data)
+    if let Some(developer) = get_value("igdb_developer")
+        .or_else(|| get_value("developer")) {
+        info_rows.push(vec!["Developer".to_string(), developer.to_string()]);
+    }
+    
+    // Publisher (prefer IGDB data)
+    if let Some(publisher) = get_value("igdb_publisher")
+        .or_else(|| get_value("publisher")) {
+        info_rows.push(vec!["Publisher".to_string(), publisher.to_string()]);
+    }
+    
+    // Genres (prefer IGDB data)
+    if let Some(genres) = get_value("igdb_genres")
+        .or_else(|| get_value("genre")) {
+        info_rows.push(vec!["Genres".to_string(), genres.to_string()]);
+    }
+    
+    // Version
+    if let Some(version) = get_value("version") {
+        info_rows.push(vec!["Version".to_string(), version.to_string()]);
+    }
+    
+    // Language
+    if let Some(language) = get_value("language") {
+        info_rows.push(vec!["Language".to_string(), language.to_string()]);
+    }
+    
+    // Store
+    if let Some(store) = get_value("store") {
+        info_rows.push(vec!["Store".to_string(), store.to_string()]);
+    }
+    
+    // IGDB Rating
+    if let Some(rating) = get_value("igdb_rating") {
+        info_rows.push(vec!["IGDB Rating".to_string(), format!("{}/100", rating)]);
+    }
+    
+    // Add game information table
+    if !info_rows.is_empty() {
+        builder = builder.add_component(DescriptionComponent::Table { rows: info_rows });
+    }
+    
+    // Add system requirements if available
+    if let Some(requirements) = get_value("system_requirements") {
+        builder = builder.custom_section("System Requirements", requirements, SectionFormat::Quoted);
+    }
+    
+    // Add release notes if available
+    if let Some(release_notes) = get_value("release_notes") {
+        builder = builder.custom_section("Release Notes", release_notes, SectionFormat::Spoiler);
+    }
+    
+    // Add repack info if available
+    if let Some(repack_info) = get_value("repack_info") {
+        builder = builder.custom_section("Repack Information", repack_info, SectionFormat::Plain);
+    }
+    
+    builder.build()
 }

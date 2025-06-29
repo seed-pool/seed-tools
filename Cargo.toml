@@ -46,7 +46,7 @@ lto = true
 
 [[bin]]
 name = "seedbrr"
-path = "src/bin/main.rs"
+path = "src/main.rs"
 
 [[bin]]
 name = "test-media-classification"

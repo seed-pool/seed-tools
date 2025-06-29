@@ -1,0 +1,81 @@
+name: "default"
+media_type: "audio"
+version: "1.0"
+description: "Default audio template with MusicBrainz integration"
+
+layout:
+  title_color: "#2E86C1"
+  author_color: "#117A65"
+  section_colors:
+    tracklist: "#6C3483"
+    details: "#117A65"
+    default: "#2E86C1"
+  image_layout: "single_column"
+  image_width: 600
+  max_images: 2
+  include_footer: true
+
+sections:
+  - name: "title"
+    section_type: "title"
+    content: "{{musicbrainz_artist}} - {{album}}"
+    order: 1
+    required_fields: ["album"]
+
+  - name: "artist"
+    section_type: "author"
+    content: "{{musicbrainz_artist}}"
+    order: 2
+    required_fields: ["musicbrainz_artist"]
+
+  - name: "images"
+    section_type: "images"
+    order: 3
+
+  - name: "details"
+    section_type: "table"
+    order: 4
+    table_fields:
+      - label: "Format"
+        field: "format"
+      - label: "Category"
+        field: "category"
+      - label: "Quality"
+        field: "lossless"
+        format: "{{value}} Quality"
+      - label: "Year"
+        field: "musicbrainz_year"
+        fallback: "year"
+      - label: "Label"
+        field: "musicbrainz_labels"
+        fallback: "label"
+      - label: "Catalog"
+        field: "musicbrainz_catalog_numbers"
+        fallback: "catalog_number"
+      - label: "Tracks"
+        field: "musicbrainz_track_count"
+      - label: "Length"
+        field: "musicbrainz_total_length"
+      - label: "Country"
+        field: "musicbrainz_country"
+      - label: "Type"
+        field: "musicbrainz_primary_type"
+      - label: "Source"
+        field: "source_type"
+
+  - name: "tracklist"
+    section_type: "custom"
+    content: "{{musicbrainz_tracklist}}"
+    format: "quoted"
+    order: 5
+    required_fields: ["musicbrainz_tracklist"]
+
+conditionals:
+  - name: "24bit"
+    condition: "field_equals:is_24bit:true"
+    section:
+      name: "quality_note"
+      section_type: "custom"
+      content: "High Definition 24-bit Audio"
+      format: "colored"
+      color: "#E74C3C"

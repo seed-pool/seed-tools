@@ -1,0 +1,76 @@
+name: "default"
+media_type: "video"
+version: "1.0"
+description: "Default video template with TMDB integration"
+
+layout:
+  title_color: "#2E86C1"
+  author_color: "#117A65"
+  section_colors:
+    synopsis: "#6C3483"
+    cast: "#2E86C1"
+    details: "#117A65"
+    default: "#2E86C1"
+  image_layout: "grid2x2"
+  image_width: 720
+  max_images: 8
+  include_footer: true
+
+sections:
+  - name: "title"
+    section_type: "title"
+    content: "{{tmdb_title}} ({{tmdb_year}})"
+    order: 1
+    required_fields: ["title"]
+
+  - name: "director"
+    section_type: "author"
+    content: "{{tmdb_director}}"
+    order: 2
+    required_fields: ["tmdb_director"]
+
+  - name: "synopsis"
+    section_type: "synopsis"
+    content: "{{tmdb_overview}}"
+    order: 3
+    required_fields: ["tmdb_overview"]
+
+  - name: "images"
+    section_type: "images"
+    order: 4
+
+  - name: "details"
+    section_type: "table"
+    order: 5
+    table_fields:
+      - label: "Genre"
+        field: "tmdb_genres"
+      - label: "Runtime"
+        field: "tmdb_runtime"
+        format: "{{value}} minutes"
+      - label: "Rating"
+        field: "tmdb_vote_average"
+        format: "{{value}}/10"
+      - label: "Release Date"
+        field: "tmdb_release_date"
+      - label: "Language"
+        field: "tmdb_original_language"
+      - label: "Budget"
+        field: "tmdb_budget"
+      - label: "Revenue"
+        field: "tmdb_revenue"
+
+  - name: "cast"
+    section_type: "custom"
+    content: "{{tmdb_cast}}"
+    format: "quoted"
+    order: 6
+    required_fields: ["tmdb_cast"]
+
+conditionals:
+  - name: "trailer"
+    condition: "field_exists:tmdb_trailer_url"
+    section:
+      name: "trailer"
+      section_type: "raw"
+      content: "[center][b][url={{tmdb_trailer_url}}][Trailer on YouTube][/url][/b][/center]"

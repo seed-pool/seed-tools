@@ -1,5 +1,5 @@
-use seedbrr::process_builder;
-use seedbrr::types::Config;
+use seedbrr::processing::process_builder;
+use seedbrr::core::Config;
 use clap::{Parser, ValueEnum};
 use std::fs;
 use rand::Rng;
@@ -439,7 +439,7 @@ struct TorrentInfo {
     type_id: u8,
 }
 
-impl seedbrr::definitions::TorrentInfo for TorrentInfo {
+impl seedbrr::trackers::TorrentInfo for TorrentInfo {
     fn category_code(&self) -> u8 {
         self.category
     }

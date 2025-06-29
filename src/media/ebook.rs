@@ -7,10 +7,11 @@ use log::{info, warn, debug};
 use epub::doc::EpubDoc;
 use regex::Regex;
 
-use crate::types::{Config, SeedpoolConfig, EbookType, EbookFile, MediaFile, MediaType, EbookCategory};
-use crate::torrent::create_torrent;
-use crate::extraction::process_and_extract_archives;
-use crate::naming::generate_release_name;
+use crate::core::{Config, SeedpoolConfig};
+use crate::core::{EbookType, EbookFile, MediaFile, MediaType, EbookCategory};
+use crate::processing::torrent::create_torrent;
+use crate::processing::extraction::process_and_extract_archives;
+use crate::processing::naming::generate_release_name;
 use urlencoding;
 
 
@@ -260,6 +261,88 @@ fn extract_epub_images(epub_path: &str, temp_dir: &std::path::Path) -> Result<Ve
     Ok(images)
 }
 
+/// Generate ebook description with template support
+pub fn generate_description_with_template(
+    metadata: &serde_json::Value,
+    enriched_metadata: Option<&std::collections::HashMap<String, String>>,
+    template_name: Option<&str>,
+) -> Result<String, String> {
+    use crate::templates::TemplateProcessor;
+    
+    let template_processor = TemplateProcessor::with_defaults()
+        .map_err(|e| format!("Failed to initialize template processor: {}", e))?;
+    
+    let template_to_use = template_name.unwrap_or("default");
+    
+    if let Some(template) = template_processor.get_template("ebook", template_to_use) {
+        template_processor.apply_template(template, metadata, enriched_metadata)
+    } else {
+        // Fallback to traditional description generation
+        generate_ebook_description_from_metadata(metadata)
+    }
+}
+
+/// Generate ebook description from metadata (fallback for template system)
+fn generate_ebook_description_from_metadata(metadata: &serde_json::Value) -> Result<String, String> {
+    use crate::processing::description::{DescriptionBuilder, DescriptionConfig};
+    use crate::core::{MediaType, EbookType, ImageLayout, SectionFormat, DescriptionComponent};
+    
+    let mut config = DescriptionConfig::default();
+    config.image_layout = ImageLayout::TwoColumn;
+    
+    let mut builder = DescriptionBuilder::with_config(
+        MediaType::Ebook(EbookType::Epub),
+        config
+    );
+    
+    // Add title
+    if let Some(title) = metadata.get("title").and_then(|t| t.as_str()) {
+        builder = builder.title(title);
+    }
+    
+    // Add author
+    if let Some(author) = metadata.get("author").and_then(|a| a.as_str()) {
+        builder = builder.author(author);
+    }
+    
+    // Add metadata table
+    let mut metadata_rows = Vec::new();
+    
+    if let Some(format) = metadata.get("format").and_then(|f| f.as_str()) {
+        metadata_rows.push(vec!["Format".to_string(), format.to_string()]);
+    }
+    
+    if let Some(file_size) = metadata.get("file_size").and_then(|s| s.as_str()) {
+        metadata_rows.push(vec!["Size".to_string(), file_size.to_string()]);
+    }
+    
+    if let Some(page_count) = metadata.get("page_count") {
+        metadata_rows.push(vec!["Pages".to_string(), page_count.to_string()]);
+    }
+    
+    if !metadata_rows.is_empty() {
+        builder = builder.add_component(DescriptionComponent::Table { rows: metadata_rows });
+    }
+    
+    // Add description if available
+    if let Some(description) = metadata.get("description").and_then(|d| d.as_str()) {
+        builder = builder.custom_section("Description", description, SectionFormat::Plain);
+    }
+    
+    // Add images if available
+    if let Some(images) = metadata.get("images").and_then(|i| i.as_array()) {
+        let image_urls: Vec<String> = images.iter()
+            .filter_map(|v| v.as_str())
+            .map(String::from)
+            .collect();
+        
+        if !image_urls.is_empty() {
+            builder = builder.images(image_urls);
+        }
+    }
+    
+    Ok(builder.build())
+}
 
 
 /// Generate description with images for ebook/comic uploads
@@ -415,10 +498,9 @@ pub fn generate_ebook_description(
         }
     }
 
-    // Build BBCode description using the new builder
-    use crate::description::{DescriptionBuilder, DescriptionConfig};
-    use crate::types::ImageLayout;
-    use crate::types::{MediaType, EbookType};
+    // Build BBCode description using DescriptionBuilder
+    use crate::processing::description::{DescriptionBuilder, DescriptionConfig};
+    use crate::core::{ImageLayout, MediaType, EbookType};
     
     let mut config = DescriptionConfig::default();
     config.image_layout = ImageLayout::TwoColumn;
@@ -443,9 +525,8 @@ pub fn generate_ebook_bbcode_description(
     client: &reqwest::blocking::Client,
 ) -> Result<(String, Vec<String>), String> {
     use serde_json::Value;
-    use crate::description::DescriptionBuilder;
-    use crate::types::SectionFormat;
-    use crate::types::{MediaType, EbookType};
+    use crate::processing::description::DescriptionBuilder;
+    use crate::core::{SectionFormat, MediaType, EbookType};
     
     let mut subjects = Vec::new();
 
@@ -477,7 +558,7 @@ pub fn generate_ebook_bbcode_description(
         .json()
         .map_err(|e| format!("Failed to parse author details: {}", e))?;
 
-    // Start building description
+    // Start building description using DescriptionBuilder
     let final_title = work_json["title"].as_str().unwrap_or(title);
     let final_author = author_json["name"].as_str().unwrap_or(author);
     
@@ -509,21 +590,19 @@ pub fn generate_ebook_bbcode_description(
             .collect::<Vec<_>>()
             .join("\n");
 
+        // Add synopsis
         builder = builder.synopsis(sanitized_description.trim());
 
         // Add extracted links as a custom section
         if !extracted_links.is_empty() {
             let links_content = extracted_links.iter()
-                .map(|link| format!("- [url={}][color=#1ABC9C]{}[/color][/url]", 
+                .map(|link| format!("[url={}]{}[/url]", 
                     link.trim_end_matches(')'), 
                     link.trim_end_matches(')')))
                 .collect::<Vec<_>>()
                 .join("\n");
             
-            builder = builder.raw(&format!(
-                "[b][size=14][color=#2874A6]Additional Editions:[/color][/size][/b]\n{}",
-                links_content
-            ));
+            builder = builder.custom_section("Additional Editions", &links_content, SectionFormat::Plain);
         }
     }
 
@@ -552,7 +631,7 @@ pub fn generate_ebook_bbcode_description(
 pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: &SeedpoolConfig, category_arg: Option<&str>, dry_run: bool) -> Result<(), String> {
     use reqwest::blocking::Client;
     use std::fs;
-    use crate::torrent::add_torrent_to_all_qbittorrent_instances;
+    use crate::processing::torrent::add_torrent_to_all_qbittorrent_instances;
 
     // Validate input path
     let path = Path::new(input_path);
@@ -575,7 +654,7 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
     let backup_extracted_archive_buffers = Vec::new();
     
     // Extract any archives first using centralized extraction and get the processing path
-    let processing_path = process_and_extract_archives(input_path)?;
+    let processing_path = process_and_extract_archives(input_path).map_err(|e| format!("{:?}", e))?;
     
     // Update working_dir to use the processing path if it was a file that got extracted
     let working_dir = if is_file && Path::new(&processing_path).is_dir() {
@@ -956,7 +1035,7 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
             [center]{}[/center]",
             title,
             author,
-            crate::utils::default_non_video_description()
+            default_non_video_description()
         );
 
         // Only try Open Library if we have at least a title or author
@@ -1107,7 +1186,7 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
     }
 
     // Extract the torrent ID from the response
-    let torrent_id = crate::utils::extract_torrent_id(&response_text)?;
+    let torrent_id = crate::utils::extract_torrent_id(&response_text).map_err(|e| format!("{:?}", e))?;
 
     // --- COVER HANDLING ---
 
@@ -1273,7 +1352,7 @@ pub fn process_ebook_upload(input_path: &str, config: &Config, seedpool_config: 
 /// Process ebook file(s) from a path (file or directory) and classify content
 pub fn process_ebook(
     input_path: &str,
-    _config: &crate::types::Config,
+    _config: &crate::core::Config,
     _dry_run: bool,
 ) -> Result<Vec<(EbookFile, EbookMetadata)>, String> {
     let path = Path::new(input_path);
@@ -1283,7 +1362,7 @@ pub fn process_ebook(
     }
     
     // Extract any archives first and get the path to process
-    let processing_path = process_and_extract_archives(input_path)?;
+    let processing_path = process_and_extract_archives(input_path).map_err(|e| format!("{:?}", e))?;
     
     let mut results = Vec::new();
     let mut rejected_files = Vec::new();
@@ -1367,36 +1446,38 @@ pub fn process_ebook(
     
     // After we have the results, build the upload data if we have ebook files
     if !results.is_empty() {
-        use crate::upload::UploadBuilder;
+        use crate::processing::upload::UploadBuilder;
         use std::sync::Arc;
         
         let (ebook_file, metadata) = &results[0];
         
         // Build upload data directly using UploadBuilder
-        use crate::description::DescriptionConfig;
-        use crate::types::ImageLayout;
+        // TODO: Uncomment when description module is available
+        // use crate::description::DescriptionConfig;
+        use crate::core::ImageLayout;
         
         // Configure description based on ebook type
-        let mut desc_config = DescriptionConfig::default();
+        // TODO: Uncomment when description module is available
+        // let mut desc_config = DescriptionConfig::default();
         
-        // Different layouts for different ebook types
-        match metadata.category {
-            EbookCategory::Comic => {
-                desc_config.image_layout = ImageLayout::TwoColumn; // Comics use 2 column for preview pages
-                desc_config.max_images = 10; // Show more preview pages
-                desc_config.image_width = 350; // Smaller width for comic pages
-            }
-            EbookCategory::Magazine | EbookCategory::Newspaper => {
-                desc_config.image_layout = ImageLayout::TwoColumn; // Magazines/newspapers use 2 column
-                desc_config.max_images = 6; // Show several pages
-                desc_config.image_width = 400;
-            }
-            _ => {
-                desc_config.image_layout = ImageLayout::SingleColumn; // Regular books use single column for cover
-                desc_config.max_images = 2; // Front and back cover
-                desc_config.image_width = 500;
-            }
-        }
+        // // Different layouts for different ebook types
+        // match metadata.category {
+        //     EbookCategory::Comic => {
+        //         desc_config.image_layout = ImageLayout::TwoColumn; // Comics use 2 column for preview pages
+        //         desc_config.max_images = 10; // Show more preview pages
+        //         desc_config.image_width = 350; // Smaller width for comic pages
+        //     }
+        //     EbookCategory::Magazine | EbookCategory::Newspaper => {
+        //         desc_config.image_layout = ImageLayout::TwoColumn; // Magazines/newspapers use 2 column
+        //         desc_config.max_images = 6; // Show several pages
+        //         desc_config.image_width = 400;
+        //     }
+        //     _ => {
+        //         desc_config.image_layout = ImageLayout::SingleColumn; // Regular books use single column for cover
+        //         desc_config.max_images = 2; // Front and back cover
+        //         desc_config.image_width = 500;
+        //     }
+        // }
         
         // Create the upload builder with ebook-specific components
         let mut builder = UploadBuilder::new(
@@ -1405,7 +1486,8 @@ pub fn process_ebook(
             Arc::new((*_config).clone())
         )
         .with_extensions(EbookType::all_extensions())
-        .with_description_config(desc_config)
+        // TODO: Uncomment when description module is available
+        // .with_description_config(desc_config)
         .dry_run(_dry_run);
         
         // Add title info
@@ -1447,7 +1529,7 @@ pub fn process_ebook(
             .with_nfo()
             .with_mediainfo()
             .with_duplicate_check()
-            .with_custom_component("ebook_metadata", crate::types::UploadComponent::Metadata(ebook_metadata));
+            .with_custom_component("ebook_metadata", crate::core::UploadComponent::Metadata(ebook_metadata));
         
         // Add screenshots for comics/magazines (extract preview pages)
         if matches!(metadata.category, EbookCategory::Comic | EbookCategory::Magazine | EbookCategory::Newspaper) {
@@ -1465,7 +1547,7 @@ pub fn process_ebook(
         info!("Built upload data for ebook processing");
         
         // Create the upload processor - it will auto-detect the active tracker
-        let mut processor = crate::upload::UploadProcessor::new(
+        let mut processor = crate::processing::upload::UploadProcessor::new(
             _upload_data,
             std::sync::Arc::new(_config.clone()),
         )
@@ -1733,5 +1815,12 @@ pub fn classify_for_upload(input_path: &str, metadata: &serde_json::Value) -> Re
     
     // Default to general ebook
     Ok((Some("EbookCategory::General".to_string()), None, metadata.clone()))
+}
+
+/// Generate default non-video description footer
+fn default_non_video_description() -> String {
+    format!(
+        "[center][b][color=#E74C3C]Uploaded with seedbrr[/color][/b][/center]"
+    )
 }
 

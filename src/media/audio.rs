@@ -1,8 +1,10 @@
-use crate::types::{AudioFile, AudioType, MediaFile, MediaType, AudioCategory, AudioSourceType};
+use crate::core::types::{AudioFile, AudioType, MediaFile, MediaType, AudioCategory, AudioSourceType};
 use std::path::Path;
 use regex::Regex;
 use log::{info, warn, debug};
-use crate::extraction::process_and_extract_archives;
+use crate::processing::extraction::process_and_extract_archives;
+use crate::processing::description::{DescriptionBuilder, DescriptionConfig};
+use crate::core::DescriptionComponent;
 
 /// Metadata extracted from audio filename and folder structure
 #[derive(Debug, Clone)]
@@ -49,7 +51,7 @@ impl Default for AudioMetadata {
 /// Process audio file(s) from a path (file or directory) and classify content
 pub fn process_audio(
     input_path: &str,
-    _config: &crate::types::Config,
+    _config: &crate::core::Config,
     _dry_run: bool,
 ) -> Result<Vec<(AudioFile, AudioMetadata)>, String> {
     let path = Path::new(input_path);
@@ -59,7 +61,7 @@ pub fn process_audio(
     }
     
     // Extract any archives first and get the path to process
-    let processing_path = process_and_extract_archives(input_path)?;
+    let processing_path = process_and_extract_archives(input_path).map_err(|e| format!("{:?}", e))?;
     
     let mut results = Vec::new();
     let mut rejected_files = Vec::new();
@@ -151,14 +153,13 @@ pub fn process_audio(
     
     // After we have the results, build the upload data if we have audio files
     if !results.is_empty() {
-        use crate::upload::UploadBuilder;
+        use crate::processing::upload::UploadBuilder;
         use std::sync::Arc;
         
         let (_audio_file, metadata) = &results[0];
         
         // Build upload data directly using UploadBuilder
-        use crate::description::DescriptionConfig;
-        use crate::types::ImageLayout;
+        use crate::core::ImageLayout;
         
         // Configure description for audio
         let mut desc_config = DescriptionConfig::default();
@@ -171,7 +172,7 @@ pub fn process_audio(
             MediaType::Audio(metadata.format.clone()),
             Arc::new((*_config).clone())
         )
-        .with_extensions(crate::types::AudioType::all_extensions())
+        .with_extensions(crate::core::types::AudioType::all_extensions())
         .with_description_config(desc_config)
         .dry_run(_dry_run);
         
@@ -212,7 +213,7 @@ pub fn process_audio(
             .with_nfo()
             .with_mediainfo()
             .with_duplicate_check()
-            .with_custom_component("audio_metadata", crate::types::UploadComponent::Metadata(audio_metadata));
+            .with_custom_component("audio_metadata", crate::core::UploadComponent::Metadata(audio_metadata));
         
         // Add cover art extraction for audio (if applicable)
         // Audio files often have embedded cover art that could be extracted
@@ -222,7 +223,7 @@ pub fn process_audio(
         info!("Built upload data for audio processing");
         
         // Create the upload processor - it will auto-detect the active tracker
-        let mut processor = crate::upload::UploadProcessor::new(
+        let mut processor = crate::processing::upload::UploadProcessor::new(
             _upload_data,
             std::sync::Arc::new(_config.clone()),
         )
@@ -496,7 +497,7 @@ pub fn classify_for_upload(input_path: &str, metadata: &serde_json::Value) -> Re
                 _ => Some("AudioCategory::Music".to_string()),
             };
             
-            // Manually create JSON metadata
+            // Manually create JSON metadata with all expected fields
             let json_metadata = serde_json::json!({
                 "artist": audio_metadata.artist,
                 "album": audio_metadata.album,
@@ -513,6 +514,14 @@ pub fn classify_for_upload(input_path: &str, metadata: &serde_json::Value) -> Re
                 "is_various_artists": audio_metadata.is_various_artists,
                 "label": audio_metadata.label,
                 "catalog_number": audio_metadata.catalog_number,
+                // Placeholder fields that can be populated by enrichment services
+                "cover_images": serde_json::Value::Array(vec![]), // Empty array for cover art URLs
+                "tracklist": serde_json::Value::Array(vec![]), // Empty array for track listing
+                "description": serde_json::Value::Null, // Custom description text
+                // MusicBrainz metadata (for future enrichment)
+                "musicbrainz_artist_id": serde_json::Value::Null,
+                "musicbrainz_album_id": serde_json::Value::Null,
+                "musicbrainz_release_group_id": serde_json::Value::Null,
             });
             
             return Ok((category, None, json_metadata));
@@ -521,4 +530,271 @@ pub fn classify_for_upload(input_path: &str, metadata: &serde_json::Value) -> Re
     
     // Default to music
     Ok((Some("AudioCategory::Music".to_string()), None, metadata.clone()))
+}
+
+/// Generate description for audio uploads
+pub fn generate_description(
+    input_path: &str,
+    metadata: &serde_json::Value,
+    mediainfo: Option<&str>,
+) -> Result<String, String> {
+    generate_description_with_enriched_metadata(input_path, metadata, mediainfo, None)
+}
+
+/// Generate description using template system
+pub fn generate_description_with_template(
+    metadata: &serde_json::Value,
+    enriched_metadata: Option<&std::collections::HashMap<String, String>>,
+    template_name: Option<&str>,
+) -> Result<String, String> {
+    use crate::templates::TemplateProcessor;
+    
+    let template_processor = TemplateProcessor::with_defaults()
+        .map_err(|e| format!("Failed to initialize template processor: {}", e))?;
+    
+    let template_to_use = template_name.unwrap_or("default");
+    
+    if let Some(template) = template_processor.get_template("audio", template_to_use) {
+        template_processor.apply_template(template, metadata, enriched_metadata)
+    } else {
+        // Fallback to traditional description generation
+        generate_description_with_enriched_metadata("", metadata, None, enriched_metadata)
+    }
+}
+
+/// Generate enhanced audio description with MusicBrainz metadata
+pub fn generate_description_with_enriched_metadata(
+    input_path: &str,
+    base_metadata: &serde_json::Value,
+    mediainfo: Option<&str>,
+    musicbrainz_enrichment: Option<&std::collections::HashMap<String, String>>,
+) -> Result<String, String> {
+    use crate::processing::description::{DescriptionBuilder, DescriptionConfig};
+    use crate::core::{MediaType, AudioType, ImageLayout, SectionFormat, DescriptionComponent};
+    
+    // Helper function to get value from either enriched metadata or base metadata
+    let get_value = |key: &str| -> Option<&str> {
+        musicbrainz_enrichment
+            .and_then(|enriched| enriched.get(key))
+            .map(|s| s.as_str())
+            .or_else(|| base_metadata.get(key).and_then(|v| v.as_str()))
+    };
+    
+    // Extract audio metadata from JSON
+    let audio_metadata = extract_audio_metadata_from_json(base_metadata);
+    
+    // Configure description builder for audio
+    let mut config = DescriptionConfig::default();
+    config.image_layout = ImageLayout::SingleColumn;
+    config.max_images = 2; // Front/back cover or album art
+    
+    let mut builder = DescriptionBuilder::with_config(
+        MediaType::Audio(audio_metadata.format.clone()),
+        config
+    );
+    
+    // Add title (prefer MusicBrainz data)
+    let title = if let Some(mb_title) = get_value("musicbrainz_title") {
+        if let Some(mb_artist) = get_value("musicbrainz_artist") {
+            format!("{} - {}", mb_artist, mb_title)
+        } else {
+            mb_title.to_string()
+        }
+    } else if let Some(album) = &audio_metadata.album {
+        if audio_metadata.is_various_artists {
+            format!("Various Artists - {}", album)
+        } else if let Some(artist) = &audio_metadata.artist {
+            format!("{} - {}", artist, album)
+        } else {
+            album.clone()
+        }
+    } else if let Some(title) = &audio_metadata.title {
+        title.clone()
+    } else {
+        // Extract from filename as fallback
+        std::path::Path::new(input_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Unknown Audio")
+            .to_string()
+    };
+    
+    builder = builder.title(&title);
+    
+    // Add artist if not already in title (prefer MusicBrainz data)
+    let artist_to_use = get_value("musicbrainz_artist")
+        .or_else(|| audio_metadata.artist.as_deref());
+    
+    if !audio_metadata.is_various_artists && audio_metadata.album.is_some() {
+        if let Some(artist) = artist_to_use {
+            builder = builder.author(artist);
+        }
+    }
+    
+    // Add album art/cover images if provided in metadata
+    let cover_images: Vec<String> = base_metadata.get("cover_images")
+        .and_then(|c| c.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(String::from).collect())
+        .unwrap_or_default();
+    
+    if !cover_images.is_empty() {
+        builder = builder.images(cover_images);
+    }
+    
+    // Create metadata table with enriched data
+    let mut metadata_rows = Vec::new();
+    
+    // Format and quality info
+    metadata_rows.push(vec!["Format".to_string(), format!("{:?}", audio_metadata.format)]);
+    metadata_rows.push(vec!["Category".to_string(), format!("{:?}", audio_metadata.category)]);
+    
+    if audio_metadata.is_lossless {
+        metadata_rows.push(vec!["Quality".to_string(), "Lossless".to_string()]);
+    }
+    
+    if audio_metadata.is_24bit {
+        metadata_rows.push(vec!["Bit Depth".to_string(), "24-bit".to_string()]);
+    }
+    
+    if let Some(sample_rate) = &audio_metadata.sample_rate {
+        metadata_rows.push(vec!["Sample Rate".to_string(), sample_rate.clone()]);
+    }
+    
+    // Release info (prefer MusicBrainz data)
+    let year_to_use = if let Some(mb_year) = get_value("musicbrainz_year") {
+        mb_year
+    } else if let Some(year) = &audio_metadata.year {
+        &year.to_string()
+    } else {
+        ""
+    };
+    if !year_to_use.is_empty() {
+        metadata_rows.push(vec!["Year".to_string(), year_to_use.to_string()]);
+    }
+    
+    // Label (prefer MusicBrainz data)
+    let label_to_use = get_value("musicbrainz_labels")
+        .or_else(|| audio_metadata.label.as_deref());
+    if let Some(label) = label_to_use {
+        metadata_rows.push(vec!["Label".to_string(), label.to_string()]);
+    }
+    
+    // Catalog number (prefer MusicBrainz data)
+    let catalog_to_use = get_value("musicbrainz_catalog_numbers")
+        .or_else(|| audio_metadata.catalog_number.as_deref());
+    if let Some(catalog) = catalog_to_use {
+        metadata_rows.push(vec!["Catalog".to_string(), catalog.to_string()]);
+    }
+    
+    // MusicBrainz specific data
+    if let Some(mb_status) = get_value("musicbrainz_status") {
+        metadata_rows.push(vec!["Status".to_string(), mb_status.to_string()]);
+    }
+    
+    if let Some(mb_country) = get_value("musicbrainz_country") {
+        metadata_rows.push(vec!["Country".to_string(), mb_country.to_string()]);
+    }
+    
+    if let Some(mb_type) = get_value("musicbrainz_primary_type") {
+        metadata_rows.push(vec!["Type".to_string(), mb_type.to_string()]);
+    }
+    
+    if let Some(track_count) = get_value("musicbrainz_track_count") {
+        metadata_rows.push(vec!["Tracks".to_string(), track_count.to_string()]);
+    }
+    
+    if let Some(total_length) = get_value("musicbrainz_total_length") {
+        metadata_rows.push(vec!["Length".to_string(), total_length.to_string()]);
+    }
+    
+    metadata_rows.push(vec!["Source".to_string(), format!("{:?}", audio_metadata.source_type)]);
+    
+    // Add metadata table
+    builder = builder.add_component(DescriptionComponent::Table { rows: metadata_rows });
+    
+    // Add tracklist if available (prefer MusicBrainz data)
+    if let Some(mb_tracklist) = get_value("musicbrainz_tracklist") {
+        if !mb_tracklist.is_empty() {
+            builder = builder.custom_section("Tracklist", mb_tracklist, SectionFormat::Quoted);
+        }
+    } else if let Some(tracklist_array) = base_metadata.get("tracklist").and_then(|t| t.as_array()) {
+        let tracklist_string = tracklist_array.iter()
+            .filter_map(|t| t.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !tracklist_string.is_empty() {
+            builder = builder.custom_section("Tracklist", &tracklist_string, SectionFormat::Quoted);
+        }
+    }
+    
+    // Add mediainfo if available
+    if let Some(mi) = mediainfo {
+        builder = builder.custom_section("MediaInfo", mi, SectionFormat::Quoted);
+    }
+    
+    // Add any custom description
+    if let Some(description) = base_metadata.get("description").and_then(|d| d.as_str()) {
+        builder = builder.raw(description);
+    }
+    
+    Ok(builder.build())
+}
+
+/// Helper function to extract AudioMetadata from JSON metadata
+fn extract_audio_metadata_from_json(metadata: &serde_json::Value) -> AudioMetadata {
+    AudioMetadata {
+        artist: metadata.get("artist").and_then(|a| a.as_str()).map(String::from),
+        album: metadata.get("album").and_then(|a| a.as_str()).map(String::from),
+        title: metadata.get("title").and_then(|t| t.as_str()).map(String::from),
+        year: metadata.get("year").and_then(|y| y.as_u64()).map(|y| y as u32),
+        track_number: metadata.get("track_number").and_then(|t| t.as_str()).map(String::from),
+        disc_number: metadata.get("disc_number").and_then(|d| d.as_str()).map(String::from),
+        category: metadata.get("category").and_then(|c| c.as_str())
+            .and_then(|c| match c {
+                "Album" => Some(AudioCategory::Album),
+                "Single" => Some(AudioCategory::Single),
+                "EP" => Some(AudioCategory::EP),
+                "Compilation" => Some(AudioCategory::Compilation),
+                "Soundtrack" => Some(AudioCategory::Soundtrack),
+                "Live" => Some(AudioCategory::Live),
+                "Bootleg" => Some(AudioCategory::Bootleg),
+                "Podcast" => Some(AudioCategory::Podcast),
+                "Audiobook" => Some(AudioCategory::Audiobook),
+                "Mix" => Some(AudioCategory::Mix),
+                "Demo" => Some(AudioCategory::Demo),
+                "Remix" => Some(AudioCategory::Remix),
+                "Classical" => Some(AudioCategory::Classical),
+                _ => Some(AudioCategory::Unknown),
+            }).unwrap_or(AudioCategory::Unknown),
+        source_type: metadata.get("source_type").and_then(|s| s.as_str())
+            .and_then(|s| match s {
+                "CD" => Some(AudioSourceType::CD),
+                "Vinyl" => Some(AudioSourceType::Vinyl),
+                "Web" => Some(AudioSourceType::Web),
+                "FM" => Some(AudioSourceType::FM),
+                "Cassette" => Some(AudioSourceType::Cassette),
+                "Remaster" => Some(AudioSourceType::Remaster),
+                _ => Some(AudioSourceType::Unknown),
+            }).unwrap_or(AudioSourceType::Unknown),
+        format: metadata.get("format").and_then(|f| f.as_str())
+            .and_then(|f| match f.to_lowercase().as_str() {
+                "mp3" => Some(AudioType::Mp3),
+                "flac" => Some(AudioType::Flac),
+                "wav" => Some(AudioType::Wav),
+                "aac" => Some(AudioType::Aac),
+                "ogg" => Some(AudioType::Ogg),
+                "m4a" => Some(AudioType::M4a),
+                "wma" => Some(AudioType::Wma),
+                "aiff" => Some(AudioType::Aiff),
+                "ape" => Some(AudioType::Ape),
+                "opus" => Some(AudioType::Opus),
+                _ => Some(AudioType::Mp3),
+            }).unwrap_or(AudioType::Mp3),
+        is_lossless: metadata.get("is_lossless").and_then(|l| l.as_bool()).unwrap_or(false),
+        is_24bit: metadata.get("is_24bit").and_then(|b| b.as_bool()).unwrap_or(false),
+        sample_rate: metadata.get("sample_rate").and_then(|s| s.as_str()).map(String::from),
+        is_various_artists: metadata.get("is_various_artists").and_then(|v| v.as_bool()).unwrap_or(false),
+        label: metadata.get("label").and_then(|l| l.as_str()).map(String::from),
+        catalog_number: metadata.get("catalog_number").and_then(|c| c.as_str()).map(String::from),
+    }
 }

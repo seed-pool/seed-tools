@@ -4,9 +4,12 @@ use std::process::Command;
 use log::{info, error, debug, warn};
 use regex::Regex;
 
-use crate::types::{PathsConfig, VideoSettings, VideoFile, VideoType, MediaFile, MediaType, VideoCategory, VideoSourceType};
-use crate::naming::generate_release_name;
-use crate::extraction::process_and_extract_archives;
+use crate::core::{PathsConfig, VideoSettings};
+use crate::core::{VideoFile, VideoType, MediaFile, MediaType, VideoCategory, VideoSourceType};
+use crate::processing::naming::generate_release_name;
+use crate::processing::extraction::process_and_extract_archives;
+use crate::processing::description::{DescriptionBuilder, DescriptionConfig};
+use crate::core::DescriptionComponent;
 
 /// Metadata extracted from video filename
 #[derive(Debug, Clone)]
@@ -66,6 +69,37 @@ impl UploadData {
             release_name: None,
             description: None,
         }
+    }
+}
+
+/// Generate video description with template support
+pub fn generate_description_with_template(
+    metadata: &serde_json::Value,
+    enriched_metadata: Option<&std::collections::HashMap<String, String>>,
+    template_name: Option<&str>,
+) -> Result<String, String> {
+    use crate::templates::TemplateProcessor;
+    
+    let template_processor = TemplateProcessor::with_defaults()
+        .map_err(|e| format!("Failed to initialize template processor: {}", e))?;
+    
+    let template_to_use = template_name.unwrap_or("default");
+    
+    if let Some(template) = template_processor.get_template("video", template_to_use) {
+        template_processor.apply_template(template, metadata, enriched_metadata)
+    } else {
+        // Fallback to traditional description generation
+        let screenshots = metadata.get("screenshots")
+            .and_then(|s| s.as_array())
+            .map(|arr| arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(String::from)
+                .collect::<Vec<_>>())
+            .unwrap_or_default();
+        
+        let sample_url = metadata.get("sample_url").and_then(|s| s.as_str());
+        
+        Ok(generate_description_with_metadata(metadata, &screenshots, sample_url, enriched_metadata))
     }
 }
 
@@ -193,7 +227,7 @@ pub fn generate_sample(
         crate::utils::upload_to_cdn(
             &sample_file,
             &format!("{}/previews/", remote_path.trim_end_matches('/'))
-        )?;
+        ).map_err(|e| format!("{:?}", e))?;
         info!("Sample file uploaded to CDN.");
     } else {
         info!("[DRY RUN] Would upload sample to CDN: {} {}", &format!("{}/previews/", remote_path.trim_end_matches('/')), sanitized_input_name);
@@ -246,15 +280,15 @@ pub fn generate_description(
     _base_url: &str,
     _release_name: &str,
 ) -> String {
-    use crate::description::{DescriptionBuilder, DescriptionConfig};
-    use crate::types::ImageLayout;
+    // Description builder imports already at top of file
+    use crate::core::ImageLayout;
     
     // Create config for video screenshots
     let mut config = DescriptionConfig::default();
     config.image_layout = ImageLayout::Grid2x2;
     
     let mut builder = DescriptionBuilder::with_config(
-        crate::types::MediaType::Video(crate::types::VideoType::Mkv),
+        MediaType::Video(VideoType::Mkv),
         config
     );
     
@@ -278,6 +312,129 @@ pub fn generate_description(
     // Add custom description
     if let Some(custom_desc) = custom_description {
         builder = builder.raw(custom_desc);
+    }
+    
+    builder.build()
+}
+
+/// Generate enhanced video description with TMDB metadata
+pub fn generate_description_with_metadata(
+    metadata: &serde_json::Value,
+    screenshots: &[String],
+    sample_url: Option<&str>,
+    tmdb_enrichment: Option<&std::collections::HashMap<String, String>>,
+) -> String {
+    use crate::processing::description::{DescriptionBuilder, DescriptionConfig};
+    use crate::core::{MediaType, VideoType, ImageLayout, SectionFormat, DescriptionComponent};
+    
+    // Helper function to get value from either enriched metadata or base metadata
+    let get_value = |key: &str| -> Option<&str> {
+        tmdb_enrichment
+            .and_then(|enriched| enriched.get(key))
+            .map(|s| s.as_str())
+            .or_else(|| metadata.get(key).and_then(|v| v.as_str()))
+    };
+    
+    // Create config for video screenshots
+    let mut config = DescriptionConfig::default();
+    config.image_layout = ImageLayout::Grid2x2;
+    
+    let mut builder = DescriptionBuilder::with_config(
+        MediaType::Video(VideoType::Mkv),
+        config
+    );
+    
+    // Add title
+    if let Some(title) = metadata.get("title").and_then(|t| t.as_str()) {
+        builder = builder.title(title);
+    }
+    
+    // Add TMDB overview/synopsis if available
+    if let Some(tmdb_overview) = get_value("tmdb_overview") {
+        builder = builder.synopsis(tmdb_overview);
+    } else if let Some(description) = get_value("description") {
+        builder = builder.synopsis(description);
+    }
+    
+    // Add screenshots
+    if !screenshots.is_empty() {
+        builder = builder.images(screenshots.to_vec());
+    }
+    
+    // Add sample
+    if let Some(sample_url) = sample_url {
+        if !sample_url.is_empty() {
+            if let Some(filename) = Path::new(sample_url).file_name().and_then(|f| f.to_str()) {
+                builder = builder.sample(sample_url, filename);
+            }
+        }
+    }
+    
+    // Add TMDB trailer if available
+    if let Some(trailer_url) = get_value("tmdb_trailer_url") {
+        builder = builder.trailer(trailer_url, "YouTube");
+    }
+    
+    // Create video information table
+    let mut info_rows = Vec::new();
+    
+    // Year
+    if let Some(year) = get_value("year") {
+        info_rows.push(vec!["Year".to_string(), year.to_string()]);
+    }
+    
+    // Genres (prefer TMDB data)
+    if let Some(genres) = get_value("tmdb_genres") {
+        info_rows.push(vec!["Genres".to_string(), genres.to_string()]);
+    }
+    
+    // Runtime
+    if let Some(runtime) = get_value("tmdb_runtime") {
+        info_rows.push(vec!["Runtime".to_string(), runtime.to_string()]);
+    }
+    
+    // Rating
+    if let Some(rating) = get_value("tmdb_rating") {
+        info_rows.push(vec!["TMDB Rating".to_string(), format!("{}/10", rating)]);
+    }
+    
+    // Directors
+    if let Some(directors) = get_value("tmdb_directors") {
+        info_rows.push(vec!["Directors".to_string(), directors.to_string()]);
+    }
+    
+    // Cast
+    if let Some(cast) = get_value("tmdb_cast") {
+        info_rows.push(vec!["Cast".to_string(), cast.to_string()]);
+    }
+    
+    // Networks (for TV shows)
+    if let Some(networks) = get_value("tmdb_networks") {
+        info_rows.push(vec!["Networks".to_string(), networks.to_string()]);
+    }
+    
+    // Production companies
+    if let Some(companies) = get_value("tmdb_production_companies") {
+        info_rows.push(vec!["Production".to_string(), companies.to_string()]);
+    }
+    
+    // Add video information table
+    if !info_rows.is_empty() {
+        builder = builder.add_component(DescriptionComponent::Table { rows: info_rows });
+    }
+    
+    // Add budget/revenue for movies
+    if let Some(budget) = get_value("tmdb_budget") {
+        builder = builder.custom_section("Budget", budget, SectionFormat::Plain);
+    }
+    
+    if let Some(revenue) = get_value("tmdb_revenue") {
+        builder = builder.custom_section("Box Office", revenue, SectionFormat::Plain);
+    }
+    
+    // Add keywords as a spoiler section
+    if let Some(keywords) = get_value("tmdb_keywords") {
+        builder = builder.custom_section("Keywords", keywords, SectionFormat::Spoiler);
     }
     
     builder.build()
@@ -336,7 +493,7 @@ fn process_directory_recursive(
 /// Process video file(s) from a path (file or directory) and classify content
 pub fn process_video(
     input_path: &str,
-    _config: &crate::types::Config,
+    _config: &crate::core::Config,
     _dry_run: bool,
 ) -> Result<Vec<(VideoFile, VideoMetadata)>, String> {
         
@@ -347,7 +504,7 @@ pub fn process_video(
     }
     
     // Extract any archives first and get the path to process
-    let processing_path = process_and_extract_archives(input_path)?;
+    let processing_path = process_and_extract_archives(input_path).map_err(|e| format!("{:?}", e))?;
 
     // Now process the path (which may contain extracted files)
     let mut results = Vec::new();
@@ -413,14 +570,14 @@ pub fn process_video(
     
     // After we have the results, build the upload data if we have videos
     if !results.is_empty() {
-        use crate::upload::UploadBuilder;
+        use crate::processing::upload::UploadBuilder;
         use std::sync::Arc;
         
         let (video_file, metadata) = &results[0];
         
         // Build upload data directly using UploadBuilder
-        use crate::description::DescriptionConfig;
-        use crate::types::ImageLayout;
+        // DescriptionConfig import already at top of file
+        use crate::core::ImageLayout;
         
         // Configure description for video
         let mut desc_config = DescriptionConfig::default();
@@ -447,7 +604,7 @@ pub fn process_video(
         info!("Built upload data for video processing");
         
         // Create the upload processor - it will auto-detect the active tracker
-        let mut processor = crate::upload::UploadProcessor::new(
+        let mut processor = crate::processing::upload::UploadProcessor::new(
             _upload_data,
             std::sync::Arc::new(_config.clone()),
         )

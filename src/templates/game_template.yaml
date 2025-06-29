@@ -1,0 +1,84 @@
+name: "default"
+media_type: "game"
+version: "1.0"
+description: "Default game template with IGDB integration"
+
+layout:
+  title_color: "#2E86C1"
+  author_color: "#117A65"
+  section_colors:
+    summary: "#6C3483"
+    details: "#117A65"
+    companies: "#2E86C1"
+    default: "#2E86C1"
+  image_layout: "two_column"
+  image_width: 720
+  max_images: 6
+  include_footer: true
+
+sections:
+  - name: "title"
+    section_type: "title"
+    content: "{{igdb_name}}"
+    order: 1
+    required_fields: ["title"]
+
+  - name: "developer"
+    section_type: "author"
+    content: "{{igdb_developers}}"
+    order: 2
+    required_fields: ["igdb_developers"]
+
+  - name: "summary"
+    section_type: "synopsis"
+    content: "{{igdb_summary}}"
+    order: 3
+    required_fields: ["igdb_summary"]
+
+  - name: "images"
+    section_type: "images"
+    order: 4
+
+  - name: "details"
+    section_type: "table"
+    order: 5
+    table_fields:
+      - label: "Genre"
+        field: "igdb_genres"
+      - label: "Platform"
+        field: "igdb_platforms"
+      - label: "Release Date"
+        field: "igdb_first_release_date"
+      - label: "Game Modes"
+        field: "igdb_game_modes"
+      - label: "Rating"
+        field: "igdb_total_rating"
+        format: "{{value}}/100"
+      - label: "Age Rating"
+        field: "igdb_age_ratings"
+      - label: "Category"
+        field: "category"
+
+  - name: "companies"
+    section_type: "custom"
+    content: "{{igdb_involved_companies}}"
+    format: "quoted"
+    order: 6
+    required_fields: ["igdb_involved_companies"]
+
+conditionals:
+  - name: "storyline"
+    condition: "field_exists:igdb_storyline"
+    section:
+      name: "storyline"
+      section_type: "custom"
+      content: "{{igdb_storyline}}"
+      format: "spoiler"
+
+  - name: "multiplayer"
+    condition: "field_exists:igdb_multiplayer_modes"
+    section:
+      name: "multiplayer"
+      section_type: "custom"
+      content: "{{igdb_multiplayer_modes}}"
+      format: "quoted"

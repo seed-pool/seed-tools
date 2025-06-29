@@ -11,3 +11,5 @@ target
 **/mutants.out*/
 seedbrr
 bin
+# Test output directories
+test_descriptions/

@@ -1,4 +1,4 @@
-use crate::types::{MediaFile, MediaType};
+use crate::core::types::{MediaFile, MediaType};
 
 use super::{audio, ebook, game, hobby, video};
 
