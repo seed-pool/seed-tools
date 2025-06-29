@@ -131,24 +131,35 @@ impl MediaClassification {
         input_path: &str,
         metadata: &JsonValue,
     ) -> Result<(Option<String>, Option<String>, JsonValue), String> {
+        use log::debug;
+        
         // First try to use centralized classification rules
         use crate::classification::rules;
         
         // Create enriched metadata with input path info
         let mut enriched_metadata = metadata.clone();
         if let Some(obj) = enriched_metadata.as_object_mut() {
-            obj.insert("input_path".to_string(), JsonValue::String(input_path.to_string()));
-            
-            // Extract filename from path
-            if let Some(filename) = std::path::Path::new(input_path).file_name() {
-                obj.insert("filename".to_string(), JsonValue::String(filename.to_string_lossy().to_string()));
+            // Ensure we have input_path
+            if !obj.contains_key("input_path") {
+                obj.insert("input_path".to_string(), JsonValue::String(input_path.to_string()));
             }
             
-            // Extract extension
-            if let Some(ext) = std::path::Path::new(input_path).extension() {
-                obj.insert("extension".to_string(), JsonValue::String(ext.to_string_lossy().to_string()));
+            // Extract filename from path if not already present
+            if !obj.contains_key("filename") {
+                if let Some(filename) = std::path::Path::new(input_path).file_name() {
+                    obj.insert("filename".to_string(), JsonValue::String(filename.to_string_lossy().to_string()));
+                }
+            }
+            
+            // Extract extension if not already present
+            if !obj.contains_key("extension") {
+                if let Some(ext) = std::path::Path::new(input_path).extension() {
+                    obj.insert("extension".to_string(), JsonValue::String(ext.to_string_lossy().to_string()));
+                }
             }
         }
+        
+        debug!("Enriched metadata for classification: {}", serde_json::to_string_pretty(&enriched_metadata).unwrap_or_else(|_| "Invalid JSON".to_string()));
         
         // Use centralized rules for classification
         let (category, source_type) = match media_type {

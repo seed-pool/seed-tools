@@ -11,7 +11,7 @@ use std::fs::OpenOptions;
 
 use seedbrr::core::{Config, types::{SeedpoolConfig, TorrentLeechConfig}};
 use seedbrr::processing::naming::generate_release_name;
-use seedbrr::utils::{validate_file_path, load_tracker_config};
+use seedbrr::utils::{validate_file_path, load_tracker_config, binary_manager::setup_binaries_if_needed};
 use seedbrr::trackers::{TorrentInfo, seedpool::{SeedpoolTorrentInfo, parse_seedpool_category_type, print_seedpool_categories_and_types}};
 use seedbrr::clients::{sync, irc::launch_irc_client};
 use seedbrr::ui::tui::launch_ui;
@@ -130,6 +130,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .ok_or("Failed to determine executable directory")?
         .to_path_buf();
     info!("Executable directory determined as: {:?}", exe_dir);
+
+    // Setup required binaries if needed
+    let bin_dir = exe_dir.join("bin");
+    if let Err(e) = setup_binaries_if_needed(&bin_dir).await {
+        error!("Failed to setup required binaries: {}", e);
+        eprintln!("❌ Failed to setup required binaries: {}", e);
+        eprintln!("Please ensure you have internet access and try again.");
+        std::process::exit(1);
+    }
 
     // Parse CLI arguments
     info!("Parsing arguments...");

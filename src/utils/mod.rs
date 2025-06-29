@@ -5,6 +5,7 @@ pub mod http;
 pub mod logging;
 pub mod duplicate_check;
 pub mod validation;
+pub mod binary_manager;
 
 // Re-export commonly used utilities
 pub use fs::{filter_files_by_extension, count_files_in_directory, find_and_read_nfo};

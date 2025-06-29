@@ -178,6 +178,7 @@ impl ProcessBuilder {
         if self.include_metadata_extraction {
             debug!("ProcessBuilder: Extracting metadata");
             metadata = self.extract_metadata(&media_type, metadata)?;
+            debug!("ProcessBuilder: Extracted metadata: {}", serde_json::to_string_pretty(&metadata).unwrap_or_else(|_| "Failed to serialize".to_string()));
         }
         
         // Step 3: Run classification if enabled
@@ -233,11 +234,61 @@ impl ProcessBuilder {
     }
     
     /// Extract metadata based on media type
-    fn extract_metadata(&self, _media_type: &MediaType, metadata: JsonValue) -> Result<JsonValue, String> {
-        // For now, just return the metadata as-is
-        // The actual metadata extraction happens during detection
-        // This could be expanded later to do additional metadata enrichment
-        Ok(metadata)
+    fn extract_metadata(&self, media_type: &MediaType, metadata: JsonValue) -> Result<JsonValue, String> {
+        // Extract basic metadata from path for all media types
+        let path = std::path::Path::new(&self.input_path);
+        let filename = path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        
+        let mut enriched = metadata;
+        if let Some(obj) = enriched.as_object_mut() {
+            // Add the filename for classification to use
+            obj.insert("filename".to_string(), serde_json::Value::String(filename.to_string()));
+            obj.insert("input_path".to_string(), serde_json::Value::String(self.input_path.clone()));
+            
+            // Extract extension
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                obj.insert("extension".to_string(), serde_json::Value::String(ext.to_string()));
+            }
+            
+            // For video files, run video-specific classification to extract metadata
+            match media_type {
+                MediaType::Video(_) => {
+                    // Use video classification to extract metadata
+                    let video_metadata = crate::media::video::classify_video_content(&self.input_path);
+                    debug!("Video metadata extracted: title='{}', year={:?}, season={:?}, category={:?}", 
+                        video_metadata.title, video_metadata.year, video_metadata.season, video_metadata.category);
+                    
+                    // Add video-specific metadata
+                    obj.insert("title".to_string(), serde_json::Value::String(video_metadata.title.clone()));
+                    if let Some(year) = video_metadata.year {
+                        obj.insert("year".to_string(), serde_json::Value::Number(serde_json::Number::from(year)));
+                    }
+                    if let Some(season) = video_metadata.season {
+                        obj.insert("season".to_string(), serde_json::Value::Number(serde_json::Number::from(season)));
+                    }
+                    if let Some(episode) = video_metadata.episode {
+                        obj.insert("episode".to_string(), serde_json::Value::Number(serde_json::Number::from(episode)));
+                    }
+                    obj.insert("category".to_string(), serde_json::Value::String(format!("{:?}", video_metadata.category)));
+                    obj.insert("source_type".to_string(), serde_json::Value::String(format!("{:?}", video_metadata.source_type)));
+                    obj.insert("is_boxset".to_string(), serde_json::Value::Bool(video_metadata.is_boxset));
+                    obj.insert("is_dated_tv".to_string(), serde_json::Value::Bool(video_metadata.is_dated_tv));
+                    if let Some(resolution) = video_metadata.resolution {
+                        obj.insert("resolution".to_string(), serde_json::Value::String(resolution));
+                    }
+                    if let Some(codec) = video_metadata.codec {
+                        obj.insert("codec".to_string(), serde_json::Value::String(codec));
+                    }
+                }
+                _ => {
+                    // For non-video media, just use filename as title for now
+                    obj.insert("title".to_string(), serde_json::Value::String(filename.to_string()));
+                }
+            }
+        }
+        Ok(enriched)
     }
     
     /// Classify media using the classification system
@@ -264,7 +315,7 @@ impl ProcessBuilder {
     fn build_upload_data(
         &self,
         media_type: &MediaType,
-        _metadata: &JsonValue,
+        metadata: &JsonValue,
         _classification: &Option<ClassificationResult>,
     ) -> Result<UploadData, String> {
         let mut builder = UploadBuilder::new(&self.input_path, media_type.clone(), self.config.clone());
@@ -274,7 +325,78 @@ impl ProcessBuilder {
             builder = builder.with_description_config(desc_config.clone());
         }
         
-        // Classification is handled separately and doesn't need to be passed to UploadBuilder
+        // Add metadata based on media type
+        match media_type {
+            MediaType::Video(_) => {
+                // Extract video metadata and pass to builder
+                if let (Some(title), Some(category), Some(source_type)) = (
+                    metadata.get("title").and_then(|t| t.as_str()),
+                    metadata.get("category").and_then(|c| c.as_str()),
+                    metadata.get("source_type").and_then(|s| s.as_str())
+                ) {
+                    let mut video_metadata = crate::media::video::VideoMetadata::default();
+                    video_metadata.title = title.to_string();
+                    
+                    // Parse category
+                    video_metadata.category = match category {
+                        "Movie" => crate::core::VideoCategory::Movie,
+                        "TvShow" => crate::core::VideoCategory::TvShow,
+                        "Anime" => crate::core::VideoCategory::Anime,
+                        "Sports" => crate::core::VideoCategory::Sports,
+                        "Documentary" => crate::core::VideoCategory::Documentary,
+                        "Concert" => crate::core::VideoCategory::Concert,
+                        _ => crate::core::VideoCategory::Unknown,
+                    };
+                    
+                    // Parse source type
+                    video_metadata.source_type = match source_type {
+                        "BluRay" => crate::core::VideoSourceType::BluRay,
+                        "UHDBluRay" => crate::core::VideoSourceType::UHDBluRay,
+                        "DVD" => crate::core::VideoSourceType::DVD,
+                        "WebDL" => crate::core::VideoSourceType::WebDL,
+                        "WebRip" => crate::core::VideoSourceType::WebRip,
+                        "HDTV" => crate::core::VideoSourceType::HDTV,
+                        "PDTV" => crate::core::VideoSourceType::PDTV,
+                        "SDTV" => crate::core::VideoSourceType::SDTV,
+                        "Remux" => crate::core::VideoSourceType::Remux,
+                        "Encode" => crate::core::VideoSourceType::Encode,
+                        "FullDisc" => crate::core::VideoSourceType::FullDisc,
+                        "SeasonPack" => crate::core::VideoSourceType::SeasonPack,
+                        "Upscale" => crate::core::VideoSourceType::Upscale,
+                        _ => crate::core::VideoSourceType::Unknown,
+                    };
+                    
+                    // Extract other metadata
+                    if let Some(year) = metadata.get("year").and_then(|y| y.as_u64()) {
+                        video_metadata.year = Some(year as u32);
+                    }
+                    if let Some(season) = metadata.get("season").and_then(|s| s.as_u64()) {
+                        video_metadata.season = Some(season as u32);
+                    }
+                    if let Some(episode) = metadata.get("episode").and_then(|e| e.as_u64()) {
+                        video_metadata.episode = Some(episode as u32);
+                    }
+                    video_metadata.is_boxset = metadata.get("is_boxset").and_then(|b| b.as_bool()).unwrap_or(false);
+                    video_metadata.is_dated_tv = metadata.get("is_dated_tv").and_then(|b| b.as_bool()).unwrap_or(false);
+                    
+                    if let Some(resolution) = metadata.get("resolution").and_then(|r| r.as_str()) {
+                        video_metadata.resolution = Some(resolution.to_string());
+                    }
+                    if let Some(codec) = metadata.get("codec").and_then(|c| c.as_str()) {
+                        video_metadata.codec = Some(codec.to_string());
+                    }
+                    
+                    builder = builder.with_video_metadata(video_metadata);
+                }
+            }
+            MediaType::Audio(_) | MediaType::Ebook(_) | MediaType::Game(_) | MediaType::Hobby(_) => {
+                // For non-video media, use title info if available
+                if let Some(title) = metadata.get("title").and_then(|t| t.as_str()) {
+                    let year = metadata.get("year").and_then(|y| y.as_u64()).map(|y| y.to_string());
+                    builder = builder.with_title_info(title, year);
+                }
+            }
+        }
         
         // Add common components
         if self.include_duplicate_check {
@@ -357,12 +479,15 @@ impl ProcessBuilder {
         
         // Use metadata from classification if available, otherwise fall back to passed metadata
         let effective_metadata = if let Some(classification) = classification {
+            debug!("Using classification metadata: {}", serde_json::to_string_pretty(&classification.media_metadata).unwrap_or_default());
             &classification.media_metadata
         } else {
+            debug!("No classification metadata, using default: {}", serde_json::to_string_pretty(metadata).unwrap_or_default());
             metadata
         };
         
         let title = effective_metadata.get("title").and_then(|t| t.as_str()).unwrap_or("Unknown").to_string();
+        debug!("Extracted title for preflight: '{}'", title);
         
         // Generate release name
         let base_name = Path::new(&self.input_path)

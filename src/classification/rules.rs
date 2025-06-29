@@ -6,10 +6,16 @@ use crate::core::{VideoCategory, VideoSourceType, AudioCategory, AudioSourceType
 
 /// Classification rules for video content
 pub fn classify_video_rules(metadata: &JsonValue) -> Option<String> {
-    // Extract filename from metadata
-    let filename = metadata.get("filename")
-        .or_else(|| metadata.get("title"))
-        .and_then(|f| f.as_str())?;
+    // Extract filename from metadata - try multiple fields
+    let filename = if let Some(f) = metadata.get("filename").and_then(|f| f.as_str()) {
+        f
+    } else if let Some(t) = metadata.get("title").and_then(|t| t.as_str()) {
+        t
+    } else if let Some(p) = metadata.get("input_path").and_then(|p| p.as_str()) {
+        std::path::Path::new(p).file_name()?.to_str()?
+    } else {
+        return None;
+    };
     
     // Initialize regex patterns for TV show detection
     let season_episode_regex = Regex::new(r"(?i)S(\d{1,2})E(\d{1,3})").unwrap();
@@ -84,9 +90,15 @@ pub fn classify_video_rules(metadata: &JsonValue) -> Option<String> {
 
 /// Determine video source type from metadata
 pub fn classify_video_source_type(metadata: &JsonValue) -> Option<String> {
-    let filename = metadata.get("filename")
-        .or_else(|| metadata.get("title"))
-        .and_then(|f| f.as_str())?;
+    let filename = if let Some(f) = metadata.get("filename").and_then(|f| f.as_str()) {
+        f
+    } else if let Some(t) = metadata.get("title").and_then(|t| t.as_str()) {
+        t
+    } else if let Some(p) = metadata.get("input_path").and_then(|p| p.as_str()) {
+        std::path::Path::new(p).file_name()?.to_str()?
+    } else {
+        return None;
+    };
     
     // Check if it's a boxset or season pack
     let is_boxset = metadata.get("is_boxset")
