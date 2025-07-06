@@ -67,8 +67,7 @@ walkdir = "2"
 ratatui = "0.26"
 crossterm = "0.27"
 
-# IRC
-irc = "0.15"
+# Async utilities
 futures-util = "0.3"
 
 # Torrent

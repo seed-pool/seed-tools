@@ -1452,32 +1452,30 @@ pub fn process_ebook(
         let (ebook_file, metadata) = &results[0];
         
         // Build upload data directly using UploadBuilder
-        // TODO: Uncomment when description module is available
-        // use crate::description::DescriptionConfig;
+        use crate::processing::description::DescriptionConfig;
         use crate::core::ImageLayout;
         
         // Configure description based on ebook type
-        // TODO: Uncomment when description module is available
-        // let mut desc_config = DescriptionConfig::default();
+        let mut desc_config = DescriptionConfig::default();
         
-        // // Different layouts for different ebook types
-        // match metadata.category {
-        //     EbookCategory::Comic => {
-        //         desc_config.image_layout = ImageLayout::TwoColumn; // Comics use 2 column for preview pages
-        //         desc_config.max_images = 10; // Show more preview pages
-        //         desc_config.image_width = 350; // Smaller width for comic pages
-        //     }
-        //     EbookCategory::Magazine | EbookCategory::Newspaper => {
-        //         desc_config.image_layout = ImageLayout::TwoColumn; // Magazines/newspapers use 2 column
-        //         desc_config.max_images = 6; // Show several pages
-        //         desc_config.image_width = 400;
-        //     }
-        //     _ => {
-        //         desc_config.image_layout = ImageLayout::SingleColumn; // Regular books use single column for cover
-        //         desc_config.max_images = 2; // Front and back cover
-        //         desc_config.image_width = 500;
-        //     }
-        // }
+        // Different layouts for different ebook types
+        match metadata.category {
+            EbookCategory::Comic => {
+                desc_config.image_layout = ImageLayout::TwoColumn; // Comics use 2 column for preview pages
+                desc_config.max_images = 10; // Show more preview pages
+                desc_config.image_width = 350; // Smaller width for comic pages
+            }
+            EbookCategory::Magazine | EbookCategory::Newspaper => {
+                desc_config.image_layout = ImageLayout::TwoColumn; // Magazines/newspapers use 2 column
+                desc_config.max_images = 6; // Show several pages
+                desc_config.image_width = 400;
+            }
+            _ => {
+                desc_config.image_layout = ImageLayout::SingleColumn; // Regular books use single column for cover
+                desc_config.max_images = 2; // Front and back cover
+                desc_config.image_width = 500;
+            }
+        }
         
         // Create the upload builder with ebook-specific components
         let mut builder = UploadBuilder::new(
@@ -1486,8 +1484,7 @@ pub fn process_ebook(
             Arc::new((*_config).clone())
         )
         .with_extensions(EbookType::all_extensions())
-        // TODO: Uncomment when description module is available
-        // .with_description_config(desc_config)
+        .with_description_config(desc_config)
         .dry_run(_dry_run);
         
         // Add title info

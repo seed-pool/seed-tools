@@ -67,6 +67,7 @@ pub struct UploadConfig {
     pub skip_sample: bool,
     pub skip_tmdb: bool,
     pub skip_torrent_creation: bool,
+    pub skip_cover_art: bool,
     pub screenshot_count: usize,
     pub announce_url: Option<String>,
 }
@@ -82,6 +83,7 @@ impl Default for UploadConfig {
             skip_sample: false,
             skip_tmdb: false,
             skip_torrent_creation: false,
+            skip_cover_art: false,
             screenshot_count: 4,
             announce_url: None,
         }
@@ -214,9 +216,9 @@ impl UploadBuilder {
         self
     }
     
-    /// Enable cover art extraction (future improvement)
-    pub fn with_cover_art(self) -> Self {
-        // TODO: Implement cover art extraction for audio/ebook files
+    /// Enable cover art extraction for audio files
+    pub fn with_cover_art(mut self) -> Self {
+        self.upload_config.skip_cover_art = false;
         self
     }
     
@@ -487,6 +489,7 @@ impl UploadBuilder {
                         None, // remote_path - would need tracker-specific config
                         None, // image_path - would need tracker-specific config
                         input_name,
+                        self.upload_config.screenshot_count,
                         self.upload_config.dry_run,
                     ) {
                         Ok((screenshots, thumbnails)) => {
@@ -539,12 +542,21 @@ impl UploadBuilder {
                     let ffmpeg_path_str = ffmpeg_path.to_str().ok_or("Invalid ffmpeg path").unwrap_or("ffmpeg");
                     
                     // Generate sample
-                    // Note: Would need tracker-specific config for remote_path and image_path
+                    // Get CDN paths from config (if available)
+                    let remote_path = self.config.paths.cdnpaths.as_ref()
+                        .and_then(|p| p.remote_path.as_ref())
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
+                    let image_path = self.config.paths.cdnpaths.as_ref()
+                        .and_then(|p| p.image_path.as_ref())
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
+                    
                     match crate::media::video::generate_sample(
                         video_file.to_str().unwrap_or(""),
                         &self.config.paths.screenshots_dir,
-                        "", // remote_path - would need tracker-specific config
-                        "", // image_path - would need tracker-specific config
+                        remote_path,
+                        image_path,
                         ffmpeg_path_str,
                         input_name,
                         self.upload_config.dry_run,
@@ -576,6 +588,48 @@ impl UploadBuilder {
                     }
                 }
                 Err(e) => warn!("Failed to find video files: {}", e),
+            }
+        }
+        
+        // Process Cover Art (for audio content)
+        if !self.upload_config.skip_cover_art && matches!(self.media_type, MediaType::Audio(_)) {
+            use crate::processing::components::cover_art_utils::extract_cover_art;
+            
+            // Get metadata from the audio_metadata component if available
+            let metadata = if let Some(UploadComponent::Metadata(audio_meta)) = self.components.get("audio_metadata") {
+                // Convert HashMap to serde_json::Value
+                let mut map = serde_json::Map::new();
+                for (k, v) in audio_meta {
+                    map.insert(k.clone(), serde_json::Value::String(v.clone()));
+                }
+                serde_json::Value::Object(map)
+            } else {
+                serde_json::Value::Object(serde_json::Map::new())
+            };
+            
+            let release_name = self.title.as_ref()
+                .or_else(|| self.video_metadata.as_ref().map(|m| &m.title))
+                .unwrap_or(&"unknown".to_string())
+                .clone();
+            
+            match extract_cover_art(
+                &self.input_path,
+                &self.config,
+                &release_name,
+                &metadata,
+                self.upload_config.dry_run,
+            ) {
+                Ok(Some(cover_url)) => {
+                    info!("✅ Extracted cover art: {}", cover_url);
+                    self.components.insert(
+                        "cover_art".to_string(),
+                        UploadComponent::CoverImage(cover_url)
+                    );
+                }
+                Ok(None) => {
+                    info!("No cover art found for audio files");
+                }
+                Err(e) => warn!("Failed to extract cover art: {}", e),
             }
         }
         
@@ -790,8 +844,6 @@ impl UploadBuilder {
     
     /// Build the description using DescriptionBuilder
     fn build_description(&mut self) -> Result<(), String> {
-        // use crate::description::{DescriptionBuilder, DescriptionConfig}; // TODO: Implement description
-        
         // Use provided config or create default for media type
         let config = self.description_config.clone()
             .unwrap_or_else(|| DescriptionConfig::default());
@@ -812,6 +864,13 @@ impl UploadBuilder {
         if let Some(UploadComponent::Screenshots(screenshots)) = self.components.get("screenshots") {
             if !screenshots.is_empty() {
                 builder = builder.images(screenshots.clone());
+            }
+        }
+        
+        // Add cover art for audio files
+        if matches!(self.media_type, MediaType::Audio(_)) {
+            if let Some(UploadComponent::CoverImage(cover_url)) = self.components.get("cover_art") {
+                builder = builder.images(vec![cover_url.clone()]);
             }
         }
         

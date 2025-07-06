@@ -1,9 +1,8 @@
 // qBittorrent client implementation
 
-use crate::core::{Config, QbittorrentConfig};
+use crate::core::QbittorrentConfig;
 use super::{TorrentClient, TorrentInfo};
 use reqwest::blocking::Client;
-use serde_json::Value;
 
 pub struct QBittorrentClient {
     config: QbittorrentConfig,

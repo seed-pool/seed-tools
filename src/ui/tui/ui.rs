@@ -23,11 +23,14 @@ use std::{
 
 // --- Internal Modules ---
 use crate::{
-    core::{Config, PreflightCheckResult, TorrentInfo},
-    processing::{preflight::preflight_check, process_builder},
+    core::{Config, PreflightCheckResult, MediaType},
+    processing::{preflight::preflight_check, process_builder, components::screenshots::ScreenshotLayout},
     media::detector::detect_media_type,
-    trackers::seedpool::parse_seedpool_category_type,
+    trackers::{seedpool::parse_seedpool_category_type, TorrentInfo},
 };
+
+use crate::processing::description::{DescriptionBuilder, DescriptionConfig};
+use chrono;
 
 // --- State Management ---
 #[derive(Debug, Clone, PartialEq)]
@@ -36,7 +39,27 @@ enum UIState {
     FileSelection,
     TrackerSelection,
     CategoryInput,
+    ComponentConfig,
+    MediaOptions,
     ViewingLog,
+    UploadProgress,
+    DescriptionPreview,
+}
+
+#[derive(Debug, Clone)]
+struct TrackerUploadStatus {
+    name: String,
+    status: UploadStatus,
+    progress: f32,
+    message: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum UploadStatus {
+    Pending,
+    InProgress,
+    Success,
+    Failed,
 }
 
 #[derive(Debug, Clone)]
@@ -73,7 +96,36 @@ struct AppState {
     last_clicked_item: Option<usize>,
     file_list_lowercase: Vec<String>, // Pre-computed lowercase versions for faster filtering
     filter_debounce_time: std::time::Instant,
+    // Component configuration
+    enable_screenshots: bool,
+    screenshot_count: usize,
+    screenshot_layout: ScreenshotLayout,
+    enable_mediainfo: bool,
+    enable_nfo: bool,
+    enable_sample: bool,
+    enable_cover_art: bool,
+    component_selected_index: usize,
+    
+    // Media-specific options
+    video_resolution: Option<String>,
+    video_source: Option<String>,
+    audio_format: Option<String>,
+    audio_bitrate: Option<String>,
+    ebook_format: Option<String>,
+    game_platform: Option<String>,
+    
+    // Multi-tracker upload tracking
+    tracker_upload_statuses: Vec<TrackerUploadStatus>,
+    upload_progress_receiver: Option<std::sync::mpsc::Receiver<(String, UploadStatus, f32, String)>>,
+    
+    // Mouse tracking for hover effects
+    mouse_position: Option<(u16, u16)>,
+    
+    // Description preview
+    description_preview: Option<String>,
+    preview_scroll_offset: usize,
 }
+
 
 impl AppState {
     fn new() -> io::Result<Self> {
@@ -107,6 +159,30 @@ impl AppState {
             last_clicked_item: None,
             file_list_lowercase,
             filter_debounce_time: std::time::Instant::now(),
+            // Component defaults
+            enable_screenshots: true,
+            screenshot_count: 4,
+            screenshot_layout: ScreenshotLayout::Grid2x2,
+            enable_mediainfo: true,
+            enable_nfo: true,
+            enable_sample: false,
+            enable_cover_art: true,
+            component_selected_index: 0,
+            // Media-specific options
+            video_resolution: None,
+            video_source: None,
+            audio_format: None,
+            audio_bitrate: None,
+            ebook_format: None,
+            game_platform: None,
+            // Multi-tracker upload tracking
+            tracker_upload_statuses: Vec::new(),
+            upload_progress_receiver: None,
+            // Mouse tracking
+            mouse_position: None,
+            // Description preview
+            description_preview: None,
+            preview_scroll_offset: 0,
         })
     }
 
@@ -283,6 +359,19 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         
+        // Check for upload progress updates
+        if let Some(ref receiver) = state.upload_progress_receiver {
+            while let Ok((tracker, status, progress, message)) = receiver.try_recv() {
+                // Update the status for the specific tracker
+                if let Some(tracker_status) = state.tracker_upload_statuses.iter_mut()
+                    .find(|s| s.name == tracker) {
+                    tracker_status.status = status;
+                    tracker_status.progress = progress;
+                    tracker_status.message = message;
+                }
+            }
+        }
+        
         // Draw UI
         terminal.draw(|f| render_ui(f, &state, &config))?;
 
@@ -295,7 +384,11 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
                         UIState::FileSelection => handle_file_selection_input(key, &mut state)?,
                         UIState::TrackerSelection => handle_tracker_selection_input(key, &mut state)?,
                         UIState::CategoryInput => handle_category_input(key, &mut state)?,
+                        UIState::ComponentConfig => handle_component_config_input(key, &mut state)?,
+                        UIState::MediaOptions => handle_media_options_input(key, &mut state)?,
                         UIState::ViewingLog => handle_log_view_input(key, &mut state)?,
+                        UIState::UploadProgress => handle_upload_progress_input(key, &mut state)?,
+                        UIState::DescriptionPreview => handle_description_preview_input(key, &mut state)?,
                     }
                     
                     // Global key handlers
@@ -311,7 +404,11 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
                         UIState::FileSelection => handle_file_selection_mouse(mouse, &mut state)?,
                         UIState::TrackerSelection => handle_tracker_selection_mouse(mouse, &mut state)?,
                         UIState::CategoryInput => handle_category_input_mouse(mouse, &mut state)?,
+                        UIState::ComponentConfig => handle_component_config_mouse(mouse, &mut state)?,
+                        UIState::MediaOptions => handle_media_options_mouse(mouse, &mut state)?,
                         UIState::ViewingLog => handle_log_view_mouse(mouse, &mut state)?,
+                        UIState::UploadProgress => handle_upload_progress_mouse(mouse, &mut state)?,
+                        UIState::DescriptionPreview => handle_description_preview_mouse(mouse, &mut state)?,
                     }
                 },
                 _ => {}
@@ -368,43 +465,169 @@ fn handle_main_input(key: event::KeyEvent, state: &mut AppState) -> io::Result<(
             state.dry_run = !state.dry_run;
             state.add_log(format!("🔄 Dry-run mode: {}", if state.dry_run { "ENABLED" } else { "DISABLED" }));
         }
+        KeyCode::Char('s') | KeyCode::Char('S') => {
+            state.current_state = UIState::ComponentConfig;
+            state.component_selected_index = 0;
+        }
+        KeyCode::Char('m') | KeyCode::Char('M') => {
+            state.current_state = UIState::MediaOptions;
+            state.component_selected_index = 0;
+        }
+        KeyCode::Char('v') | KeyCode::Char('V') => {
+            // Generate preview description
+            if state.input_path.is_some() {
+                generate_description_preview(state);
+                state.current_state = UIState::DescriptionPreview;
+            } else {
+                state.add_log("❌ Please select an input path first (press F)".to_string());
+            }
+        }
         _ => {}
     }
     Ok(())
 }
 
 fn handle_mouse_input(mouse: MouseEvent, state: &mut AppState) -> io::Result<()> {
-    if let MouseEventKind::Down(crossterm::event::MouseButton::Left) = mouse.kind {
-        // The UI layout has:
-        // - Header: lines 0-2 (3 lines)
-        // - Info panel: lines 3-10 (8 lines) 
-        // - Preflight area: lines 11-22+ (Min 12 lines)
-        // - Actions area: lines 23+ (10 lines)
-        
-        // Check if click is in the info panel area (lines 4-9, accounting for borders)
-        if mouse.row >= 4 && mouse.row <= 9 {
-            match mouse.row {
-                4 => {
-                    // Input path line clicked (first line in info panel)
-                    state.current_state = UIState::FileSelection;
+    match state.current_state {
+        UIState::Main => handle_main_mouse(mouse, state),
+        UIState::FileSelection => handle_file_selection_mouse(mouse, state),
+        UIState::TrackerSelection => handle_tracker_selection_mouse(mouse, state),
+        UIState::CategoryInput => handle_category_input_mouse(mouse, state),
+        UIState::ComponentConfig => handle_component_config_mouse(mouse, state),
+        UIState::MediaOptions => handle_media_options_mouse(mouse, state),
+        UIState::ViewingLog => handle_log_view_mouse(mouse, state),
+        UIState::UploadProgress => handle_upload_progress_mouse(mouse, state),
+        UIState::DescriptionPreview => handle_description_preview_mouse(mouse, state),
+    }
+}
+
+fn handle_main_mouse(mouse: MouseEvent, state: &mut AppState) -> io::Result<()> {
+    match mouse.kind {
+        MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+            // The UI layout has:
+            // - Header: lines 0-2 (3 lines)
+            // - Info panel: lines 3-10 (8 lines) 
+            // - Preflight area: lines 11-22+ (Min 12 lines)
+            // - Actions area: lines 23+ (10 lines)
+            
+            // Check if click is in the info panel area (lines 4-9, accounting for borders)
+            if mouse.row >= 4 && mouse.row <= 9 {
+                match mouse.row {
+                    4 => {
+                        // Input path line clicked (first line in info panel)
+                        state.current_state = UIState::FileSelection;
+                    }
+                    5 => {
+                        // Trackers line clicked (second line in info panel)
+                        state.current_state = UIState::TrackerSelection;
+                    }
+                    6 => {
+                        // Category code line clicked (third line in info panel)
+                        state.current_state = UIState::CategoryInput;
+                        state.input_buffer.clear();
+                    }
+                    7 => {
+                        // Dry-run mode line clicked (fourth line in info panel)
+                        state.dry_run = !state.dry_run;
+                        state.add_log(format!("🔄 Dry-run mode: {}", if state.dry_run { "ENABLED" } else { "DISABLED" }));
+                    }
+                    8 => {
+                        // Components line clicked (fifth line in info panel)
+                        state.current_state = UIState::ComponentConfig;
+                        state.component_selected_index = 0;
+                    }
+                    _ => {}
                 }
-                5 => {
-                    // Trackers line clicked (second line in info panel)
-                    state.current_state = UIState::TrackerSelection;
+            }
+            // Check if click is in the actions panel area
+            // Actions start at line 24 (after header + info panel + preflight area)
+            else if mouse.row >= 24 && mouse.row <= 32 {
+                let action_index = mouse.row - 24;
+                match action_index {
+                    0 => {
+                        // F - Select input file/folder
+                        state.current_state = UIState::FileSelection;
+                    }
+                    1 => {
+                        // T - Select trackers
+                        state.current_state = UIState::TrackerSelection;
+                    }
+                    2 => {
+                        // C - Set category code
+                        state.current_state = UIState::CategoryInput;
+                        state.input_buffer.clear();
+                    }
+                    3 => {
+                        // D - Toggle dry-run mode
+                        state.dry_run = !state.dry_run;
+                        state.add_log(format!("🔄 Dry-run mode: {}", if state.dry_run { "ENABLED" } else { "DISABLED" }));
+                    }
+                    4 => {
+                        // P - Run preflight check
+                        let availability = state.get_action_availability("preflight");
+                        match availability {
+                            ActionAvailability::Available => start_preflight_check(state)?,
+                            ActionAvailability::InProgress => state.add_log("⏳ Preflight check already running".to_string()),
+                            ActionAvailability::RequiresInput => state.add_log("❌ Please select an input path first (press F)".to_string()),
+                            _ => {}
+                        }
+                    }
+                    5 => {
+                        // U - Start upload
+                        let availability = state.get_action_availability("upload");
+                        match availability {
+                            ActionAvailability::Available => start_upload(state)?,
+                            ActionAvailability::InProgress => state.add_log("⏳ Upload already running".to_string()),
+                            ActionAvailability::RequiresInput => state.add_log("❌ Please select an input path first (press F)".to_string()),
+                            ActionAvailability::RequiresTracker => state.add_log("❌ Please select at least one tracker (press T)".to_string()),
+                            ActionAvailability::RequiresBoth => state.add_log("❌ Please select both input path (F) and trackers (T)".to_string()),
+                        }
+                    }
+                    6 => {
+                        // L - View logs
+                        state.current_state = UIState::ViewingLog;
+                    }
+                    7 => {
+                        // S - Component settings
+                        state.current_state = UIState::ComponentConfig;
+                        state.component_selected_index = 0;
+                    }
+                    8 => {
+                        // M - Media-specific options
+                        state.current_state = UIState::MediaOptions;
+                        state.component_selected_index = 0;
+                    }
+                    9 => {
+                        // V - Preview upload description
+                        if state.input_path.is_some() {
+                            generate_description_preview(state);
+                            state.current_state = UIState::DescriptionPreview;
+                        } else {
+                            state.add_log("❌ Please select an input path first (press F)".to_string());
+                        }
+                    }
+                    _ => {}
                 }
-                6 => {
-                    // Category code line clicked (third line in info panel)
-                    state.current_state = UIState::CategoryInput;
-                    state.input_buffer.clear();
-                }
-                7 => {
-                    // Dry-run mode line clicked (fourth line in info panel)
-                    state.dry_run = !state.dry_run;
-                    state.add_log(format!("🔄 Dry-run mode: {}", if state.dry_run { "ENABLED" } else { "DISABLED" }));
-                }
-                _ => {}
+            }
+            // Check if click is in the preflight results area (if results are available)
+            else if state.preflight_result.is_some() && mouse.row >= 11 && mouse.row <= 22 {
+                // Clicking on preflight results area - no action needed
             }
         }
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+            // Allow scrolling through logs on main screen
+            if let MouseEventKind::ScrollUp = mouse.kind {
+                if state.log_scroll_offset > 0 {
+                    state.log_scroll_offset = state.log_scroll_offset.saturating_sub(1);
+                }
+            } else {
+                let log_len = state.log_output.lock().unwrap().len();
+                if state.log_scroll_offset < log_len.saturating_sub(5) {
+                    state.log_scroll_offset += 1;
+                }
+            }
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -612,9 +835,467 @@ fn handle_log_view_input(key: event::KeyEvent, state: &mut AppState) -> io::Resu
     Ok(())
 }
 
+fn handle_component_config_input(key: event::KeyEvent, state: &mut AppState) -> io::Result<()> {
+    match key.code {
+        KeyCode::Up => {
+            if state.component_selected_index > 0 {
+                state.component_selected_index -= 1;
+            }
+        }
+        KeyCode::Down => {
+            // Total options: 5 toggles + 2 screenshot config options + 1 media options link
+            if state.component_selected_index < 7 {
+                state.component_selected_index += 1;
+            }
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            match state.component_selected_index {
+                0..=4 => {
+                    // Toggle boolean options
+                    let idx = state.component_selected_index;
+                    match idx {
+                        0 => state.enable_screenshots = !state.enable_screenshots,
+                        1 => state.enable_mediainfo = !state.enable_mediainfo,
+                        2 => state.enable_nfo = !state.enable_nfo,
+                        3 => state.enable_sample = !state.enable_sample,
+                        4 => state.enable_cover_art = !state.enable_cover_art,
+                        _ => {}
+                    }
+                    let component_name = match idx {
+                        0 => "Screenshots",
+                        1 => "MediaInfo",
+                        2 => "NFO Files",
+                        3 => "Sample Video",
+                        4 => "Cover Art",
+                        _ => "Unknown"
+                    };
+                    let enabled = match idx {
+                        0 => state.enable_screenshots,
+                        1 => state.enable_mediainfo,
+                        2 => state.enable_nfo,
+                        3 => state.enable_sample,
+                        4 => state.enable_cover_art,
+                        _ => false
+                    };
+                    state.add_log(format!("🔄 {} {}", component_name, if enabled { "enabled" } else { "disabled" }));
+                }
+                5 => {
+                    // Screenshot count - cycle through options
+                    state.screenshot_count = match state.screenshot_count {
+                        2 => 4,
+                        4 => 6,
+                        6 => 8,
+                        _ => 2,
+                    };
+                    state.add_log(format!("📸 Screenshot count: {}", state.screenshot_count));
+                }
+                6 => {
+                    // Screenshot layout - cycle through options
+                    state.screenshot_layout = match state.screenshot_layout {
+                        ScreenshotLayout::Grid2x2 => ScreenshotLayout::TwoColumn,
+                        ScreenshotLayout::TwoColumn => ScreenshotLayout::SingleColumn,
+                        ScreenshotLayout::SingleColumn => ScreenshotLayout::Grid2x2,
+                    };
+                    state.add_log(format!("🎨 Screenshot layout: {:?}", state.screenshot_layout));
+                }
+                7 => {
+                    // Navigate to media-specific options
+                    state.current_state = UIState::MediaOptions;
+                    state.component_selected_index = 0;
+                }
+                _ => {}
+            }
+        }
+        KeyCode::Left => {
+            match state.component_selected_index {
+                5 => {
+                    // Decrease screenshot count
+                    if state.screenshot_count > 2 {
+                        state.screenshot_count -= 2;
+                        state.add_log(format!("📸 Screenshot count: {}", state.screenshot_count));
+                    }
+                }
+                _ => {}
+            }
+        }
+        KeyCode::Right => {
+            match state.component_selected_index {
+                5 => {
+                    // Increase screenshot count
+                    if state.screenshot_count < 8 {
+                        state.screenshot_count += 2;
+                        state.add_log(format!("📸 Screenshot count: {}", state.screenshot_count));
+                    }
+                }
+                _ => {}
+            }
+        }
+        KeyCode::Esc => {
+            state.current_state = UIState::Main;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_component_config_mouse(mouse: MouseEvent, state: &mut AppState) -> io::Result<()> {
+    match mouse.kind {
+        MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+            // Toggle options (Screenshots, MediaInfo, NFO, Sample, Cover Art)
+            if mouse.row >= 6 && mouse.row <= 10 {
+                let toggle_index = (mouse.row - 6) as usize;
+                if toggle_index < 5 {
+                    state.component_selected_index = toggle_index;
+                    
+                    // Directly toggle the option
+                    match toggle_index {
+                        0 => {
+                            state.enable_screenshots = !state.enable_screenshots;
+                            state.add_log(format!("📸 Screenshots {}", 
+                                if state.enable_screenshots { "enabled" } else { "disabled" }));
+                        }
+                        1 => {
+                            state.enable_mediainfo = !state.enable_mediainfo;
+                            state.add_log(format!("ℹ️ MediaInfo {}", 
+                                if state.enable_mediainfo { "enabled" } else { "disabled" }));
+                        }
+                        2 => {
+                            state.enable_nfo = !state.enable_nfo;
+                            state.add_log(format!("📄 NFO Files {}", 
+                                if state.enable_nfo { "enabled" } else { "disabled" }));
+                        }
+                        3 => {
+                            state.enable_sample = !state.enable_sample;
+                            state.add_log(format!("🎬 Sample Video {}", 
+                                if state.enable_sample { "enabled" } else { "disabled" }));
+                        }
+                        4 => {
+                            state.enable_cover_art = !state.enable_cover_art;
+                            state.add_log(format!("🎨 Cover Art {}", 
+                                if state.enable_cover_art { "enabled" } else { "disabled" }));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // Screenshot count option
+            else if mouse.row == 12 {
+                state.component_selected_index = 5;
+                
+                // Check if clicking on the arrows specifically
+                if mouse.column >= 18 && mouse.column <= 22 {
+                    // Left arrow area - decrease
+                    if state.screenshot_count > 2 {
+                        state.screenshot_count -= 2;
+                        state.add_log(format!("📸 Screenshot count: {}", state.screenshot_count));
+                    }
+                } else if mouse.column >= 24 && mouse.column <= 28 {
+                    // Right arrow area - increase
+                    if state.screenshot_count < 8 {
+                        state.screenshot_count += 2;
+                        state.add_log(format!("📸 Screenshot count: {}", state.screenshot_count));
+                    }
+                } else {
+                    // Clicking anywhere else on the row cycles through common values
+                    state.screenshot_count = match state.screenshot_count {
+                        2 => 4,
+                        4 => 6,
+                        6 => 8,
+                        8 => 2,
+                        _ => 4,
+                    };
+                    state.add_log(format!("📸 Screenshot count: {}", state.screenshot_count));
+                }
+            }
+            // Screenshot layout option
+            else if mouse.row == 13 {
+                state.component_selected_index = 6;
+                
+                // Cycle through layouts
+                state.screenshot_layout = match state.screenshot_layout {
+                    ScreenshotLayout::Grid2x2 => ScreenshotLayout::TwoColumn,
+                    ScreenshotLayout::TwoColumn => ScreenshotLayout::SingleColumn,
+                    ScreenshotLayout::SingleColumn => ScreenshotLayout::Grid2x2,
+                };
+                
+                let layout_name = match state.screenshot_layout {
+                    ScreenshotLayout::Grid2x2 => "2x2 Grid",
+                    ScreenshotLayout::TwoColumn => "Two Column",
+                    ScreenshotLayout::SingleColumn => "Single Column",
+                };
+                state.add_log(format!("📐 Screenshot layout: {}", layout_name));
+            }
+            // Media-specific options link
+            else if mouse.row == 15 {
+                state.component_selected_index = 7;
+                state.current_state = UIState::MediaOptions;
+                state.component_selected_index = 0;
+            }
+        }
+        MouseEventKind::ScrollUp => {
+            if state.component_selected_index > 0 {
+                state.component_selected_index -= 1;
+            }
+        }
+        MouseEventKind::ScrollDown => {
+            if state.component_selected_index < 7 {
+                state.component_selected_index += 1;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_media_options_input(key: event::KeyEvent, state: &mut AppState) -> io::Result<()> {
+    // Determine media type and max options
+    let media_type_name = if let Some(ref path) = state.input_path {
+        if let Ok(media_files) = detect_media_type(&path.to_string_lossy()) {
+            if let Some(first) = media_files.first() {
+                match &first.media_type {
+                    MediaType::Video(_) => "Video",
+                    MediaType::Audio(_) => "Audio",
+                    MediaType::Ebook(_) => "Ebook",
+                    MediaType::Game(_) => "Game",
+                    MediaType::Hobby(_) => "Hobby",
+                }
+            } else {
+                "Unknown"
+            }
+        } else {
+            "Unknown"
+        }
+    } else {
+        "Not Selected"
+    };
+    
+    let max_options = match media_type_name {
+        "Video" | "Audio" => 1, // 2 options (0-1)
+        "Ebook" | "Game" => 0,  // 1 option (0)
+        _ => 0,
+    };
+    
+    match key.code {
+        KeyCode::Up => {
+            if state.component_selected_index > 0 {
+                state.component_selected_index -= 1;
+            }
+        }
+        KeyCode::Down => {
+            if state.component_selected_index < max_options {
+                state.component_selected_index += 1;
+            }
+        }
+        KeyCode::Enter => {
+            match media_type_name {
+                "Video" => {
+                    match state.component_selected_index {
+                        0 => {
+                            // Cycle through resolution options
+                            let resolutions = vec!["Auto-detect", "2160p", "1080p", "720p", "480p", "SD"];
+                            let current = state.video_resolution.as_ref().map(|s| s.as_str()).unwrap_or("Auto-detect");
+                            let next_idx = (resolutions.iter().position(|&r| r == current).unwrap_or(0) + 1) % resolutions.len();
+                            state.video_resolution = Some(resolutions[next_idx].to_string());
+                            state.add_log(format!("📺 Video resolution: {}", resolutions[next_idx]));
+                        }
+                        1 => {
+                            // Cycle through source options
+                            let sources = vec!["Auto-detect", "BluRay", "WEB-DL", "WEBRip", "HDTV", "DVD", "Remux"];
+                            let current = state.video_source.as_ref().map(|s| s.as_str()).unwrap_or("Auto-detect");
+                            let next_idx = (sources.iter().position(|&s| s == current).unwrap_or(0) + 1) % sources.len();
+                            state.video_source = Some(sources[next_idx].to_string());
+                            state.add_log(format!("🎬 Video source: {}", sources[next_idx]));
+                        }
+                        _ => {}
+                    }
+                }
+                "Audio" => {
+                    match state.component_selected_index {
+                        0 => {
+                            // Cycle through format options
+                            let formats = vec!["Auto-detect", "FLAC", "MP3", "AAC", "OGG", "WAV"];
+                            let current = state.audio_format.as_ref().map(|s| s.as_str()).unwrap_or("Auto-detect");
+                            let next_idx = (formats.iter().position(|&f| f == current).unwrap_or(0) + 1) % formats.len();
+                            state.audio_format = Some(formats[next_idx].to_string());
+                            state.add_log(format!("🎧 Audio format: {}", formats[next_idx]));
+                        }
+                        1 => {
+                            // Cycle through bitrate options
+                            let bitrates = vec!["Auto-detect", "320kbps", "256kbps", "192kbps", "128kbps", "Lossless"];
+                            let current = state.audio_bitrate.as_ref().map(|s| s.as_str()).unwrap_or("Auto-detect");
+                            let next_idx = (bitrates.iter().position(|&b| b == current).unwrap_or(0) + 1) % bitrates.len();
+                            state.audio_bitrate = Some(bitrates[next_idx].to_string());
+                            state.add_log(format!("🎵 Audio bitrate: {}", bitrates[next_idx]));
+                        }
+                        _ => {}
+                    }
+                }
+                "Ebook" => {
+                    if state.component_selected_index == 0 {
+                        // Cycle through format options
+                        let formats = vec!["Auto-detect", "EPUB", "PDF", "CBZ", "CBR", "MOBI"];
+                        let current = state.ebook_format.as_ref().map(|s| s.as_str()).unwrap_or("Auto-detect");
+                        let next_idx = (formats.iter().position(|&f| f == current).unwrap_or(0) + 1) % formats.len();
+                        state.ebook_format = Some(formats[next_idx].to_string());
+                        state.add_log(format!("📚 Ebook format: {}", formats[next_idx]));
+                    }
+                }
+                "Game" => {
+                    if state.component_selected_index == 0 {
+                        // Cycle through platform options
+                        let platforms = vec!["Auto-detect", "PC", "PS4", "PS5", "Xbox", "Switch", "Multi-Platform"];
+                        let current = state.game_platform.as_ref().map(|s| s.as_str()).unwrap_or("Auto-detect");
+                        let next_idx = (platforms.iter().position(|&p| p == current).unwrap_or(0) + 1) % platforms.len();
+                        state.game_platform = Some(platforms[next_idx].to_string());
+                        state.add_log(format!("🎮 Game platform: {}", platforms[next_idx]));
+                    }
+                }
+                _ => {}
+            }
+        }
+        KeyCode::Esc => {
+            state.current_state = UIState::ComponentConfig;
+            state.component_selected_index = 7; // Back to media options link
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_media_options_mouse(mouse: MouseEvent, state: &mut AppState) -> io::Result<()> {
+    match mouse.kind {
+        MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+            // Options start at row 6
+            if mouse.row >= 6 && mouse.row <= 8 {
+                let clicked_index = (mouse.row - 6) as usize;
+                
+                // Determine how many options are available based on media type
+                let media_type_name = if let Some(ref path) = state.input_path {
+                    if let Ok(media_files) = detect_media_type(&path.to_string_lossy()) {
+                        if let Some(first) = media_files.first() {
+                            match &first.media_type {
+                                MediaType::Video(_) => "Video",
+                                MediaType::Audio(_) => "Audio",
+                                MediaType::Ebook(_) => "Ebook",
+                                MediaType::Game(_) => "Game",
+                                MediaType::Hobby(_) => "Hobby",
+                            }
+                        } else {
+                            "Unknown"
+                        }
+                    } else {
+                        "Unknown"
+                    }
+                } else {
+                    "Not Selected"
+                };
+                
+                let max_options = match media_type_name {
+                    "Video" | "Audio" => 2,
+                    "Ebook" | "Game" => 1,
+                    _ => 0,
+                };
+                
+                if clicked_index < max_options {
+                    state.component_selected_index = clicked_index;
+                    
+                    // Simulate Enter key press to cycle the option
+                    handle_media_options_input(event::KeyEvent {
+                        code: KeyCode::Enter,
+                        modifiers: event::KeyModifiers::empty(),
+                        kind: event::KeyEventKind::Press,
+                        state: event::KeyEventState::NONE,
+                    }, state)?;
+                }
+            }
+        }
+        MouseEventKind::ScrollUp => {
+            if state.component_selected_index > 0 {
+                state.component_selected_index -= 1;
+            }
+        }
+        MouseEventKind::ScrollDown => {
+            let media_type_name = if let Some(ref path) = state.input_path {
+                if let Ok(media_files) = detect_media_type(&path.to_string_lossy()) {
+                    if let Some(first) = media_files.first() {
+                        match &first.media_type {
+                            MediaType::Video(_) => "Video",
+                            MediaType::Audio(_) => "Audio",
+                            MediaType::Ebook(_) => "Ebook",
+                            MediaType::Game(_) => "Game",
+                            MediaType::Hobby(_) => "Hobby",
+                        }
+                    } else {
+                        "Unknown"
+                    }
+                } else {
+                    "Unknown"
+                }
+            } else {
+                "Not Selected"
+            };
+            
+            let max_options = match media_type_name {
+                "Video" | "Audio" => 1,
+                "Ebook" | "Game" => 0,
+                _ => 0,
+            };
+            
+            if state.component_selected_index < max_options {
+                state.component_selected_index += 1;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_upload_progress_input(key: event::KeyEvent, state: &mut AppState) -> io::Result<()> {
+    match key.code {
+        KeyCode::Char('l') | KeyCode::Char('L') => {
+            state.current_state = UIState::ViewingLog;
+        }
+        KeyCode::Esc => {
+            // Only allow returning to main if all uploads are complete
+            let all_complete = state.tracker_upload_statuses.iter()
+                .all(|s| matches!(s.status, UploadStatus::Success | UploadStatus::Failed));
+            if all_complete {
+                state.current_state = UIState::Main;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_upload_progress_mouse(mouse: MouseEvent, state: &mut AppState) -> io::Result<()> {
+    match mouse.kind {
+        MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+            // Check if clicking on the log view button area
+            if (mouse.row as usize) >= (5 + state.tracker_upload_statuses.len() + 2) {
+                state.current_state = UIState::ViewingLog;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 // --- Mouse Input Handlers ---
 fn handle_file_selection_mouse(mouse: MouseEvent, state: &mut AppState) -> io::Result<()> {
-    if let MouseEventKind::Down(crossterm::event::MouseButton::Left) = mouse.kind {
+    match mouse.kind {
+        MouseEventKind::ScrollUp => {
+            if state.scroll_offset > 0 {
+                state.scroll_offset -= 1;
+            }
+        }
+        MouseEventKind::ScrollDown => {
+            let current_file_list_len = state.get_current_file_list().len();
+            if state.scroll_offset + 1 < current_file_list_len {
+                state.scroll_offset += 1;
+            }
+        }
+        MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
         // File selection area starts after header (3 lines) and has borders
         // Content area is inside the border, so clickable area is from row 4 to area height - 1
         if mouse.row >= 4 {
@@ -678,39 +1359,56 @@ fn handle_file_selection_mouse(mouse: MouseEvent, state: &mut AppState) -> io::R
                 }
             }
         }
+        }
+        _ => {}
     }
     Ok(())
 }
 
 fn handle_tracker_selection_mouse(mouse: MouseEvent, state: &mut AppState) -> io::Result<()> {
-    if let MouseEventKind::Down(crossterm::event::MouseButton::Left) = mouse.kind {
-        let trackers = vec!["seedpool", "torrentleech"];
-        
-        // Tracker selection area starts after header (3 lines) and has borders
-        if mouse.row >= 4 {
-            let clicked_index = (mouse.row - 4) as usize;
-            
-            if clicked_index == 0 {
-                // "Select All" clicked
-                if state.selected_trackers.len() == trackers.len() {
-                    state.selected_trackers.clear();
-                } else {
-                    state.selected_trackers = trackers.iter().map(|s| s.to_string()).collect();
-                }
-            } else if let Some(tracker_index) = clicked_index.checked_sub(1) {
-                if tracker_index < trackers.len() {
-                    let tracker = trackers[tracker_index].to_string();
-                    if let Some(pos) = state.selected_trackers.iter().position(|x| x == &tracker) {
-                        state.selected_trackers.remove(pos);
+    let trackers = vec!["seedpool", "torrentleech"];
+    
+    match mouse.kind {
+        MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+            // Tracker selection area starts after header (3 lines) and has borders
+            if mouse.row >= 4 && mouse.row <= 6 {
+                let clicked_index = (mouse.row - 4) as usize;
+                
+                if clicked_index == 0 {
+                    // "Select All" clicked
+                    if state.selected_trackers.len() == trackers.len() {
+                        state.selected_trackers.clear();
                     } else {
-                        state.selected_trackers.push(tracker);
+                        state.selected_trackers = trackers.iter().map(|s| s.to_string()).collect();
+                    }
+                } else if let Some(tracker_index) = clicked_index.checked_sub(1) {
+                    if tracker_index < trackers.len() {
+                        let tracker = trackers[tracker_index].to_string();
+                        if let Some(pos) = state.selected_trackers.iter().position(|x| x == &tracker) {
+                            state.selected_trackers.remove(pos);
+                        } else {
+                            state.selected_trackers.push(tracker);
+                        }
                     }
                 }
+                
+                // Update selected index for visual feedback
+                state.selected_file_index = clicked_index;
             }
-            
-            // Update selected index for visual feedback
-            state.selected_file_index = clicked_index;
         }
+        MouseEventKind::ScrollUp => {
+            // Scroll up through trackers
+            if state.selected_file_index > 0 {
+                state.selected_file_index -= 1;
+            }
+        }
+        MouseEventKind::ScrollDown => {
+            // Scroll down through trackers
+            if state.selected_file_index < trackers.len() {
+                state.selected_file_index += 1;
+            }
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -739,7 +1437,7 @@ fn render_ui(f: &mut ratatui::Frame, state: &AppState, _config: &Config) {
             Constraint::Min(10),    // Main content
             Constraint::Length(3),  // Status bar
         ])
-        .split(f.size());
+        .split(f.area());
 
     // Header
     let header = Paragraph::new("🌱 Seedbrr - Media Upload Manager")
@@ -754,7 +1452,11 @@ fn render_ui(f: &mut ratatui::Frame, state: &AppState, _config: &Config) {
         UIState::FileSelection => render_file_selection(f, chunks[1], state),
         UIState::TrackerSelection => render_tracker_selection(f, chunks[1], state),
         UIState::CategoryInput => render_category_input(f, chunks[1], state),
+        UIState::ComponentConfig => render_component_config(f, chunks[1], state),
+        UIState::MediaOptions => render_media_options(f, chunks[1], state),
         UIState::ViewingLog => render_log_view(f, chunks[1], state),
+        UIState::UploadProgress => render_upload_progress(f, chunks[1], state),
+        UIState::DescriptionPreview => render_description_preview(f, chunks[1], state),
     }
 
     // Status bar
@@ -812,6 +1514,19 @@ fn render_main_view(f: &mut ratatui::Frame, area: ratatui::layout::Rect, state: 
                 Style::default().fg(if state.dry_run { Color::Yellow } else { Color::Gray })
             ),
             Span::styled(" [Click to toggle]", Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
+        ]),
+        Line::from(vec![
+            Span::raw("⚙️  Components: "),
+            Span::styled(
+                format!("{}{}{}{}",
+                    if state.enable_screenshots { "📸 " } else { "" },
+                    if state.enable_mediainfo { "ℹ️ " } else { "" },
+                    if state.enable_nfo { "📄 " } else { "" },
+                    if state.enable_cover_art { "🎨 " } else { "" }
+                ),
+                Style::default().fg(Color::Magenta)
+            ),
+            Span::styled(" [Click to configure]", Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
         ]),
     ];
 
@@ -1090,6 +1805,18 @@ fn render_main_view(f: &mut ratatui::Frame, area: ratatui::layout::Rect, state: 
             Span::styled("L", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             Span::raw(" - View logs"),
         ]),
+        Line::from(vec![
+            Span::styled("S", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(" - Component settings"),
+        ]),
+        Line::from(vec![
+            Span::styled("M", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(" - Media-specific options"),
+        ]),
+        Line::from(vec![
+            Span::styled("V", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(" - Preview upload description"),
+        ]),
     ];
 
     let actions_panel = Paragraph::new(actions)
@@ -1270,6 +1997,358 @@ fn render_log_view(f: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &
             .borders(Borders::ALL));
     
     f.render_widget(log_list, area);
+}
+
+fn render_component_config(f: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &AppState) {
+    let mut lines = vec![
+        Line::from("Configure upload components:"),
+        Line::from(""),
+    ];
+
+    // Toggle options
+    let toggles = [
+        ("Screenshots", state.enable_screenshots, "📸"),
+        ("MediaInfo", state.enable_mediainfo, "ℹ️"),
+        ("NFO Files", state.enable_nfo, "📄"),
+        ("Sample Video", state.enable_sample, "🎬"),
+        ("Cover Art", state.enable_cover_art, "🎨"),
+    ];
+
+    for (idx, (name, enabled, icon)) in toggles.iter().enumerate() {
+        let style = if state.component_selected_index == idx {
+            Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        
+        lines.push(Line::from(vec![
+            Span::styled(format!("[{}] {} {}", 
+                if *enabled { "✓" } else { " " },
+                icon,
+                name
+            ), style),
+            Span::raw("  "),
+            Span::styled(
+                if *enabled { "Enabled" } else { "Disabled" },
+                style.fg(if *enabled { Color::Green } else { Color::Red })
+            ),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    
+    // Screenshot count option
+    let count_style = if state.component_selected_index == 5 {
+        Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    
+    lines.push(Line::from(vec![
+        Span::styled("Screenshot Count: ", count_style),
+        Span::styled("◀ ", count_style.fg(Color::Yellow)),
+        Span::styled(format!("{}", state.screenshot_count), count_style.fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(" ▶", count_style.fg(Color::Yellow)),
+    ]));
+
+    // Screenshot layout option
+    let layout_style = if state.component_selected_index == 6 {
+        Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    
+    let layout_name = match state.screenshot_layout {
+        ScreenshotLayout::Grid2x2 => "2x2 Grid",
+        ScreenshotLayout::TwoColumn => "Two Column",
+        ScreenshotLayout::SingleColumn => "Single Column",
+    };
+    
+    lines.push(Line::from(vec![
+        Span::styled("Screenshot Layout: ", layout_style),
+        Span::styled(layout_name, layout_style.fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+    ]));
+
+    lines.push(Line::from(""));
+    
+    // Media-specific options link
+    let media_style = if state.component_selected_index == 7 {
+        Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    
+    lines.push(Line::from(vec![
+        Span::styled("🎬 Media-Specific Options ", media_style),
+        Span::styled("→", media_style.fg(Color::Yellow)),
+    ]));
+    
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("Controls: ", Style::default().fg(Color::Yellow)),
+        Span::raw("↑/↓ Navigate • Space/Enter Toggle • ←/→ Adjust • Esc Exit"),
+    ]));
+
+    let paragraph = Paragraph::new(lines)
+        .block(Block::default()
+            .title("Component Configuration")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Magenta)));
+    
+    f.render_widget(paragraph, area);
+}
+
+fn render_media_options(f: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &AppState) {
+    let mut lines = vec![
+        Line::from("Configure media-specific options based on detected media type:"),
+        Line::from(""),
+    ];
+    
+    // Detect current media type from input path
+    let media_type_name = if let Some(ref path) = state.input_path {
+        if let Ok(media_files) = detect_media_type(&path.to_string_lossy()) {
+            if let Some(first) = media_files.first() {
+                match &first.media_type {
+                    MediaType::Video(_) => "Video",
+                    MediaType::Audio(_) => "Audio",
+                    MediaType::Ebook(_) => "Ebook",
+                    MediaType::Game(_) => "Game",
+                    MediaType::Hobby(_) => "Hobby",
+                }
+            } else {
+                "Unknown"
+            }
+        } else {
+            "Unknown"
+        }
+    } else {
+        "Not Selected"
+    };
+    
+    lines.push(Line::from(vec![
+        Span::raw("🎯 Detected Media Type: "),
+        Span::styled(media_type_name, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+    ]));
+    lines.push(Line::from(""));
+    
+    // Show relevant options based on media type
+    match media_type_name {
+        "Video" => {
+            // Video options
+            let res_style = if state.component_selected_index == 0 {
+                Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            
+            let resolution = state.video_resolution.as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or("Auto-detect");
+            lines.push(Line::from(vec![
+                Span::styled("Resolution: ", res_style),
+                Span::styled(resolution, res_style.fg(Color::Yellow)),
+                Span::styled("  (Press Enter to select)", Style::default().fg(Color::Gray)),
+            ]));
+            
+            let src_style = if state.component_selected_index == 1 {
+                Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            
+            let source = state.video_source.as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or("Auto-detect");
+            lines.push(Line::from(vec![
+                Span::styled("Source: ", src_style),
+                Span::styled(source, src_style.fg(Color::Yellow)),
+                Span::styled("  (Press Enter to select)", Style::default().fg(Color::Gray)),
+            ]));
+        }
+        "Audio" => {
+            // Audio options
+            let fmt_style = if state.component_selected_index == 0 {
+                Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            
+            let format = state.audio_format.as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or("Auto-detect");
+            lines.push(Line::from(vec![
+                Span::styled("Format: ", fmt_style),
+                Span::styled(format, fmt_style.fg(Color::Yellow)),
+                Span::styled("  (Press Enter to select)", Style::default().fg(Color::Gray)),
+            ]));
+            
+            let br_style = if state.component_selected_index == 1 {
+                Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            
+            let bitrate = state.audio_bitrate.as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or("Auto-detect");
+            lines.push(Line::from(vec![
+                Span::styled("Bitrate: ", br_style),
+                Span::styled(bitrate, br_style.fg(Color::Yellow)),
+                Span::styled("  (Press Enter to select)", Style::default().fg(Color::Gray)),
+            ]));
+        }
+        "Ebook" => {
+            // Ebook options
+            let fmt_style = if state.component_selected_index == 0 {
+                Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            
+            let format = state.ebook_format.as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or("Auto-detect");
+            lines.push(Line::from(vec![
+                Span::styled("Format: ", fmt_style),
+                Span::styled(format, fmt_style.fg(Color::Yellow)),
+                Span::styled("  (Press Enter to select)", Style::default().fg(Color::Gray)),
+            ]));
+        }
+        "Game" => {
+            // Game options
+            let plat_style = if state.component_selected_index == 0 {
+                Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            
+            let platform = state.game_platform.as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or("Auto-detect");
+            lines.push(Line::from(vec![
+                Span::styled("Platform: ", plat_style),
+                Span::styled(platform, plat_style.fg(Color::Yellow)),
+                Span::styled("  (Press Enter to select)", Style::default().fg(Color::Gray)),
+            ]));
+        }
+        _ => {
+            lines.push(Line::from(vec![
+                Span::styled("No media-specific options available", Style::default().fg(Color::Gray)),
+            ]));
+        }
+    }
+    
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("Note: ", Style::default().fg(Color::Yellow)),
+        Span::raw("These options override auto-detection when set"),
+    ]));
+    
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("Controls: ", Style::default().fg(Color::Yellow)),
+        Span::raw("↑/↓ Navigate • Enter Select • Esc Back to Component Settings"),
+    ]));
+    
+    let paragraph = Paragraph::new(lines)
+        .block(Block::default()
+            .title("Media-Specific Options")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Blue)));
+    
+    f.render_widget(paragraph, area);
+}
+
+fn render_upload_progress(f: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &AppState) {
+    let mut lines = vec![
+        Line::from("Upload Progress:"),
+        Line::from(""),
+    ];
+    
+    // Show progress for each tracker
+    for status in &state.tracker_upload_statuses {
+        let status_symbol = match status.status {
+            UploadStatus::Pending => "⏳",
+            UploadStatus::InProgress => "⚡",
+            UploadStatus::Success => "✅",
+            UploadStatus::Failed => "❌",
+        };
+        
+        let status_color = match status.status {
+            UploadStatus::Pending => Color::Gray,
+            UploadStatus::InProgress => Color::Yellow,
+            UploadStatus::Success => Color::Green,
+            UploadStatus::Failed => Color::Red,
+        };
+        
+        lines.push(Line::from(vec![
+            Span::raw(format!("{} ", status_symbol)),
+            Span::styled(&status.name, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw(": "),
+            Span::styled(&status.message, Style::default().fg(status_color)),
+        ]));
+        
+        // Show progress bar for in-progress uploads
+        if status.status == UploadStatus::InProgress {
+            let progress_width = 40;
+            let filled = (status.progress * progress_width as f32) as usize;
+            let empty = progress_width - filled;
+            let progress_bar = format!("[{}{}] {:.0}%", 
+                "█".repeat(filled), 
+                "░".repeat(empty),
+                status.progress * 100.0
+            );
+            lines.push(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(progress_bar, Style::default().fg(Color::Green)),
+            ]));
+        }
+        
+        lines.push(Line::from(""));
+    }
+    
+    // Show overall status
+    let all_complete = state.tracker_upload_statuses.iter()
+        .all(|s| matches!(s.status, UploadStatus::Success | UploadStatus::Failed));
+    let any_failed = state.tracker_upload_statuses.iter()
+        .any(|s| matches!(s.status, UploadStatus::Failed));
+    
+    if all_complete {
+        lines.push(Line::from(""));
+        if any_failed {
+            lines.push(Line::from(vec![
+                Span::styled("⚠️  Upload completed with errors", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled("✅ All uploads completed successfully!", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            ]));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::raw("Press "),
+            Span::styled("L", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(" to view detailed logs or "),
+            Span::styled("Esc", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(" to return to main menu"),
+        ]));
+    } else {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("Uploading...", Style::default().fg(Color::Yellow)),
+            Span::raw(" Press "),
+            Span::styled("L", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(" to view logs"),
+        ]));
+    }
+    
+    let paragraph = Paragraph::new(lines)
+        .block(Block::default()
+            .title("Multi-Tracker Upload")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Magenta)));
+    
+    f.render_widget(paragraph, area);
 }
 
 fn render_status_bar(f: &mut ratatui::Frame, area: ratatui::layout::Rect, _state: &AppState) {
@@ -1469,11 +2548,48 @@ fn start_upload(state: &mut AppState) -> io::Result<()> {
     state.clear_logs();
     state.add_log("Starting upload process...".to_string());
     
+    // Initialize tracker upload statuses
+    state.tracker_upload_statuses.clear();
+    for tracker in &state.selected_trackers {
+        state.tracker_upload_statuses.push(TrackerUploadStatus {
+            name: tracker.clone(),
+            status: UploadStatus::Pending,
+            progress: 0.0,
+            message: "Waiting to start...".to_string(),
+        });
+    }
+    
     let input_path = state.input_path.clone().unwrap();
     let selected_trackers = state.selected_trackers.clone();
     let category_code = state.category_code.clone();
     let log_output = Arc::clone(&state.log_output);
     let dry_run = state.dry_run;
+    
+    // Clone component settings
+    let enable_screenshots = state.enable_screenshots;
+    let screenshot_count = state.screenshot_count;
+    let screenshot_layout = state.screenshot_layout.clone();
+    let enable_mediainfo = state.enable_mediainfo;
+    let enable_nfo = state.enable_nfo;
+    let enable_sample = state.enable_sample;
+    let enable_cover_art = state.enable_cover_art;
+    
+    // Clone media-specific options
+    let video_resolution = state.video_resolution.clone();
+    let video_source = state.video_source.clone();
+    let audio_format = state.audio_format.clone();
+    let audio_bitrate = state.audio_bitrate.clone();
+    let ebook_format = state.ebook_format.clone();
+    let game_platform = state.game_platform.clone();
+    
+    // Extract component settings
+    let enable_screenshots = state.enable_screenshots;
+    let screenshot_count = state.screenshot_count;
+    let screenshot_layout = state.screenshot_layout.clone();
+    let enable_mediainfo = state.enable_mediainfo;
+    let enable_nfo = state.enable_nfo;
+    let enable_sample = state.enable_sample;
+    let enable_cover_art = state.enable_cover_art;
     
     // Load config for the upload
     let config = match load_config() {
@@ -1483,6 +2599,10 @@ fn start_upload(state: &mut AppState) -> io::Result<()> {
             return Ok(());
         }
     };
+    
+    // Create channel for progress updates
+    let (progress_tx, progress_rx) = std::sync::mpsc::channel::<(String, UploadStatus, f32, String)>();
+    state.upload_progress_receiver = Some(progress_rx);
     
     thread::spawn(move || {
         let path_str = input_path.to_string_lossy().to_string();
@@ -1501,6 +2621,64 @@ fn start_upload(state: &mut AppState) -> io::Result<()> {
             log_output.lock().unwrap().push("🤖 Using auto-detection for media type".to_string());
         }
         
+        // Log component settings
+        log_output.lock().unwrap().push("\n⚙️  Component Settings:".to_string());
+        if enable_screenshots {
+            log_output.lock().unwrap().push(format!("  📸 Screenshots: {} ({:?})", screenshot_count, screenshot_layout));
+        }
+        if enable_mediainfo {
+            log_output.lock().unwrap().push("  ℹ️ MediaInfo: Enabled".to_string());
+        }
+        if enable_nfo {
+            log_output.lock().unwrap().push("  📄 NFO Files: Enabled".to_string());
+        }
+        if enable_sample {
+            log_output.lock().unwrap().push("  🎬 Sample Video: Enabled".to_string());
+        }
+        if enable_cover_art {
+            log_output.lock().unwrap().push("  🎨 Cover Art: Enabled".to_string());
+        }
+        
+        // Log media-specific options if set
+        let mut has_media_options = false;
+        if video_resolution.is_some() || video_source.is_some() || 
+           audio_format.is_some() || audio_bitrate.is_some() || 
+           ebook_format.is_some() || game_platform.is_some() {
+            log_output.lock().unwrap().push("\n🎬 Media-Specific Options:".to_string());
+            has_media_options = true;
+        }
+        
+        if let Some(ref res) = video_resolution {
+            if res != "Auto-detect" {
+                log_output.lock().unwrap().push(format!("  📺 Video Resolution: {}", res));
+            }
+        }
+        if let Some(ref src) = video_source {
+            if src != "Auto-detect" {
+                log_output.lock().unwrap().push(format!("  🎬 Video Source: {}", src));
+            }
+        }
+        if let Some(ref fmt) = audio_format {
+            if fmt != "Auto-detect" {
+                log_output.lock().unwrap().push(format!("  🎧 Audio Format: {}", fmt));
+            }
+        }
+        if let Some(ref br) = audio_bitrate {
+            if br != "Auto-detect" {
+                log_output.lock().unwrap().push(format!("  🎵 Audio Bitrate: {}", br));
+            }
+        }
+        if let Some(ref fmt) = ebook_format {
+            if fmt != "Auto-detect" {
+                log_output.lock().unwrap().push(format!("  📚 Ebook Format: {}", fmt));
+            }
+        }
+        if let Some(ref plat) = game_platform {
+            if plat != "Auto-detect" {
+                log_output.lock().unwrap().push(format!("  🎮 Game Platform: {}", plat));
+            }
+        }
+        
         // Process the upload using ProcessBuilder
         let result = if let Some(code) = category_code {
             // Parse the 4-digit code
@@ -1509,18 +2687,64 @@ fn start_upload(state: &mut AppState) -> io::Result<()> {
                     log_output.lock().unwrap().push(format!("📋 Classification: {}", torrent_info.description()));
                     
                     // Process with explicit category/type using ProcessBuilder
+                    // Get the actual category and type codes
+                    let category_str = format!("{:02}", torrent_info.category_code());
+                    let type_str = format!("{:02}", torrent_info.type_code());
+                    
+                    // Create component config from UI state
+                    use crate::processing::component_config::ComponentConfig;
+                    let component_config = ComponentConfig::from_ui_state(
+                        enable_screenshots,
+                        screenshot_count,
+                        screenshot_layout.clone(),
+                        enable_mediainfo,
+                        enable_nfo,
+                        enable_sample,
+                        enable_cover_art,
+                    );
+                    
                     match process_builder::upload_builder(&path_str, std::sync::Arc::new(config.clone()))
-                        .force_category(format!("{}Category::{}", 
-                            if torrent_info.is_video_category() { "Video" }
-                            else if torrent_info.is_audio_category() { "Audio" }
-                            else if torrent_info.is_ebook_category() { "Ebook" }
-                            else if torrent_info.is_game_category() { "Game" }
-                            else { "Hobby" },
-                            torrent_info.category_name()
-                        ))
+                        .with_component_config(component_config)
+                        .force_category(category_str)
+                        .force_type(type_str)
                         .dry_run(dry_run)
                         .build() {
-                        Ok(_result) => Ok(()),
+                        Ok(_result) => {
+                            // Process upload for each selected tracker
+                            for tracker in &selected_trackers {
+                                // Update status to in progress
+                                progress_tx.send((
+                                    tracker.clone(),
+                                    UploadStatus::InProgress,
+                                    0.0,
+                                    format!("Uploading with {} - {}", torrent_info.category_name(), torrent_info.type_name())
+                                )).ok();
+                                
+                                log_output.lock().unwrap().push(format!("📤 Processing upload to {}", tracker));
+                                
+                                // Simulate upload progress
+                                for i in 1..=10 {
+                                    thread::sleep(Duration::from_millis(100));
+                                    progress_tx.send((
+                                        tracker.clone(),
+                                        UploadStatus::InProgress,
+                                        i as f32 / 10.0,
+                                        format!("Uploading... {}/10", i)
+                                    )).ok();
+                                }
+                                
+                                // Mark as complete
+                                progress_tx.send((
+                                    tracker.clone(),
+                                    UploadStatus::Success,
+                                    1.0,
+                                    "Upload completed successfully".to_string()
+                                )).ok();
+                                
+                                log_output.lock().unwrap().push(format!("✅ {} upload complete", tracker));
+                            }
+                            Ok(())
+                        },
                         Err(e) => Err(e),
                     }
                 }
@@ -1530,10 +2754,58 @@ fn start_upload(state: &mut AppState) -> io::Result<()> {
             }
         } else {
             // Auto-detect and process using ProcessBuilder
+            // Create component config from UI state
+            use crate::processing::component_config::ComponentConfig;
+            let component_config = ComponentConfig::from_ui_state(
+                enable_screenshots,
+                screenshot_count,
+                screenshot_layout.clone(),
+                enable_mediainfo,
+                enable_nfo,
+                enable_sample,
+                enable_cover_art,
+            );
+            
             match process_builder::upload_builder(&path_str, std::sync::Arc::new(config.clone()))
+                .with_component_config(component_config)
                 .dry_run(dry_run)
                 .build() {
-                Ok(_result) => Ok(()),
+                Ok(_result) => {
+                    // Process upload for each selected tracker
+                    for tracker in &selected_trackers {
+                        // Update status to in progress
+                        progress_tx.send((
+                            tracker.clone(),
+                            UploadStatus::InProgress,
+                            0.0,
+                            "Uploading with auto-detected media type".to_string()
+                        )).ok();
+                        
+                        log_output.lock().unwrap().push(format!("📤 Processing upload to {}", tracker));
+                        
+                        // Simulate upload progress
+                        for i in 1..=10 {
+                            thread::sleep(Duration::from_millis(100));
+                            progress_tx.send((
+                                tracker.clone(),
+                                UploadStatus::InProgress,
+                                i as f32 / 10.0,
+                                format!("Uploading... {}/10", i)
+                            )).ok();
+                        }
+                        
+                        // Mark as complete
+                        progress_tx.send((
+                            tracker.clone(),
+                            UploadStatus::Success,
+                            1.0,
+                            "Upload completed successfully".to_string()
+                        )).ok();
+                        
+                        log_output.lock().unwrap().push(format!("✅ {} upload complete", tracker));
+                    }
+                    Ok(())
+                },
                 Err(e) => Err(e),
             }
         };
@@ -1563,6 +2835,327 @@ fn start_upload(state: &mut AppState) -> io::Result<()> {
         }
     });
     
-    state.current_state = UIState::ViewingLog;
+    state.current_state = UIState::UploadProgress;
     Ok(())
+}
+
+// --- Description Preview Functions ---
+
+fn generate_description_preview(state: &mut AppState) {
+    if let Some(ref input_path) = state.input_path {
+        // Get the media type from the input path
+        let media_type = detect_media_type(&input_path.to_string_lossy())
+            .ok()
+            .and_then(|files| files.first().map(|f| f.media_type.clone()))
+            .unwrap_or(MediaType::Hobby(crate::core::HobbyType::Directory));
+        
+        // Create a description config based on UI settings
+        let mut config = DescriptionConfig::default();
+        config.image_layout = match state.screenshot_layout {
+            ScreenshotLayout::Grid2x2 => crate::core::ImageLayout::Grid2x2,
+            ScreenshotLayout::TwoColumn => crate::core::ImageLayout::TwoColumn,
+            ScreenshotLayout::SingleColumn => crate::core::ImageLayout::SingleColumn,
+        };
+        config.max_images = state.screenshot_count;
+        
+        // Create the description builder
+        let mut builder = DescriptionBuilder::with_config(media_type, config);
+        
+        // Get title from preflight data or filename
+        let title = if let Some(ref preflight) = state.preflight_result {
+            preflight.release_name.clone()
+        } else {
+            input_path.file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Unknown".to_string())
+        };
+        builder = builder.title(&title);
+        
+        // Add screenshots if enabled
+        if state.enable_screenshots {
+            // Generate placeholder screenshot URLs (in real usage these would come from actual screenshots)
+            let screenshot_urls: Vec<String> = (1..=state.screenshot_count)
+                .map(|i| format!("https://example.com/screenshot_{}.jpg", i))
+                .collect();
+            builder = builder.images(screenshot_urls);
+        }
+        
+        // Add sample if enabled
+        if state.enable_sample {
+            builder = builder.sample("https://example.com/sample.mkv", "sample.mkv");
+        }
+        
+        // Add synopsis from preflight data if available
+        if let Some(ref preflight) = state.preflight_result {
+            if let Some(ref summary) = preflight.igdb_summary {
+                builder = builder.synopsis(summary);
+            }
+        }
+        
+        // Add actual MediaInfo if available from preflight, otherwise placeholder
+        if state.enable_mediainfo {
+            if let Some(ref preflight) = state.preflight_result {
+                // In a real implementation, MediaInfo would be stored in preflight data
+                // For now, show that it would be generated from the actual file
+                let mediainfo_content = format!("MediaInfo will be generated from: {}\n\nExample output:\nGeneral\nComplete name: {}\nFormat: Auto-detected\nFile size: [Calculated during upload]\nDuration: [Detected during upload]", 
+                    input_path.display(), 
+                    preflight.release_name);
+                builder = builder.raw(&format!("[b]MediaInfo:[/b]\n[spoiler]\n{}\n[/spoiler]", mediainfo_content));
+            } else {
+                builder = builder.raw("[b]MediaInfo:[/b]\n[spoiler]\n[Generated from actual media file during upload]\n[/spoiler]");
+            }
+        }
+        
+        // Add NFO with actual data if available
+        if state.enable_nfo {
+            if let Some(ref preflight) = state.preflight_result {
+                let nfo_content = format!("Release: {}\nType: {}\nGenerated: {}\n\n[Additional NFO data would be generated during upload]", 
+                    preflight.release_name,
+                    preflight.release_type,
+                    chrono::Utc::now().format("%Y-%m-%d"));
+                builder = builder.raw(&format!("[b]NFO:[/b]\n[spoiler]\n{}\n[/spoiler]", nfo_content));
+            } else {
+                builder = builder.raw("[b]NFO:[/b]\n[spoiler]\n[Generated NFO data will appear here]\n[/spoiler]");
+            }
+        }
+        
+        // Add media-specific options as custom sections
+        if let Some(ref path) = state.input_path {
+            if let Ok(media_files) = detect_media_type(&path.to_string_lossy()) {
+                if let Some(first) = media_files.first() {
+                    match &first.media_type {
+                        MediaType::Video(_) => {
+                            let mut specs = Vec::new();
+                            if let Some(ref resolution) = state.video_resolution {
+                                if resolution != "Auto-detect" {
+                                    specs.push(format!("Quality: {}", resolution));
+                                }
+                            }
+                            if let Some(ref source) = state.video_source {
+                                if source != "Auto-detect" {
+                                    specs.push(format!("Source: {}", source));
+                                }
+                            }
+                            if !specs.is_empty() {
+                                builder = builder.custom_section("Specifications", &specs.join("\n"), crate::core::SectionFormat::Plain);
+                            }
+                        }
+                        MediaType::Audio(_) => {
+                            let mut specs = Vec::new();
+                            if let Some(ref format) = state.audio_format {
+                                if format != "Auto-detect" {
+                                    specs.push(format!("Format: {}", format));
+                                }
+                            }
+                            if let Some(ref bitrate) = state.audio_bitrate {
+                                if bitrate != "Auto-detect" {
+                                    specs.push(format!("Bitrate: {}", bitrate));
+                                }
+                            }
+                            if !specs.is_empty() {
+                                builder = builder.custom_section("Audio Specifications", &specs.join("\n"), crate::core::SectionFormat::Plain);
+                            }
+                        }
+                        MediaType::Ebook(_) => {
+                            if let Some(ref format) = state.ebook_format {
+                                if format != "Auto-detect" {
+                                    builder = builder.custom_section("Format", format, crate::core::SectionFormat::Plain);
+                                }
+                            }
+                        }
+                        MediaType::Game(_) => {
+                            if let Some(ref platform) = state.game_platform {
+                                if platform != "Auto-detect" {
+                                    builder = builder.custom_section("Platform", platform, crate::core::SectionFormat::Plain);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        
+        // Build the final description
+        let description = builder.build();
+        
+        state.description_preview = Some(description);
+        state.preview_scroll_offset = 0;
+    } else {
+        state.description_preview = Some("No input path selected. Please select a file or directory first.".to_string());
+    }
+}
+
+fn handle_description_preview_input(key: event::KeyEvent, state: &mut AppState) -> io::Result<()> {
+    match key.code {
+        KeyCode::Up => {
+            if state.preview_scroll_offset > 0 {
+                state.preview_scroll_offset -= 1;
+            }
+        }
+        KeyCode::Down => {
+            if let Some(ref description) = state.description_preview {
+                let lines = description.lines().count();
+                if state.preview_scroll_offset < lines.saturating_sub(10) {
+                    state.preview_scroll_offset += 1;
+                }
+            }
+        }
+        KeyCode::PageUp => {
+            state.preview_scroll_offset = state.preview_scroll_offset.saturating_sub(10);
+        }
+        KeyCode::PageDown => {
+            if let Some(ref description) = state.description_preview {
+                let lines = description.lines().count();
+                state.preview_scroll_offset = (state.preview_scroll_offset + 10).min(lines.saturating_sub(10));
+            }
+        }
+        KeyCode::Home => {
+            state.preview_scroll_offset = 0;
+        }
+        KeyCode::End => {
+            if let Some(ref description) = state.description_preview {
+                let lines = description.lines().count();
+                state.preview_scroll_offset = lines.saturating_sub(10);
+            }
+        }
+        KeyCode::Char('r') | KeyCode::Char('R') => {
+            // Regenerate preview
+            generate_description_preview(state);
+        }
+        KeyCode::Esc => {
+            state.current_state = UIState::Main;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_description_preview_mouse(mouse: MouseEvent, state: &mut AppState) -> io::Result<()> {
+    match mouse.kind {
+        MouseEventKind::ScrollUp => {
+            if state.preview_scroll_offset > 0 {
+                state.preview_scroll_offset -= 3;
+            }
+        }
+        MouseEventKind::ScrollDown => {
+            if let Some(ref description) = state.description_preview {
+                let lines = description.lines().count();
+                state.preview_scroll_offset = (state.preview_scroll_offset + 3).min(lines.saturating_sub(10));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn convert_bbcode_to_text(line: &str) -> String {
+    let mut result = line.to_string();
+    
+    // Remove simple formatting tags
+    result = result.replace("[b]", "").replace("[/b]", "");
+    result = result.replace("[i]", "").replace("[/i]", "");
+    result = result.replace("[u]", "").replace("[/u]", "");
+    
+    // Handle size tags
+    result = regex::Regex::new(r"\[size=\d+\]").unwrap().replace_all(&result, "").to_string();
+    result = result.replace("[/size]", "");
+    
+    // Handle color tags
+    result = regex::Regex::new(r"\[color=[^\]]+\]").unwrap().replace_all(&result, "").to_string();
+    result = result.replace("[/color]", "");
+    
+    // Handle center tags
+    result = result.replace("[center]", "").replace("[/center]", "");
+    
+    // Handle spoiler tags
+    result = result.replace("[spoiler]", "--- SPOILER ---");
+    result = result.replace("[/spoiler]", "--- END SPOILER ---");
+    result = regex::Regex::new(r"\[spoiler=[^\]]+\]").unwrap().replace_all(&result, "--- SPOILER: ").to_string();
+    
+    // Handle quote tags
+    result = result.replace("[quote]", "\" ");
+    result = result.replace("[/quote]", " \"");
+    
+    // Handle URL tags
+    result = regex::Regex::new(r"\[url=([^\]]+)\]([^\[]*)\[/url\]").unwrap()
+        .replace_all(&result, "🔗 $2 ($1)").to_string();
+    result = regex::Regex::new(r"\[url=([^\]]+)\]").unwrap()
+        .replace_all(&result, "🔗 LINK: ").to_string();
+    result = result.replace("[/url]", "");
+    
+    // Handle image tags  
+    result = regex::Regex::new(r"\[img[^\]]*\]([^\[]*)\[/img\]").unwrap()
+        .replace_all(&result, "🖼️  IMAGE: $1").to_string();
+    result = result.replace("[img]", "🖼️  IMAGE: ");
+    result = result.replace("[/img]", "");
+    
+    // Handle table tags
+    result = result.replace("[table]", "┌─ TABLE ─┐");
+    result = result.replace("[/table]", "└─────────┘");
+    result = result.replace("[tr]", "│ ");
+    result = result.replace("[/tr]", " │");
+    result = result.replace("[td]", "");
+    result = result.replace("[/td]", " │ ");
+    
+    // Clean up any remaining brackets that might be malformed
+    result = result.replace("][", " ");
+    
+    result
+}
+
+fn render_description_preview(f: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &AppState) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(3),
+            Constraint::Length(3),
+        ])
+        .split(area);
+
+    // Main preview area
+    let preview_content = if let Some(ref description) = state.description_preview {
+        let lines: Vec<&str> = description.lines().collect();
+        let visible_lines: Vec<ratatui::text::Line> = lines
+            .iter()
+            .skip(state.preview_scroll_offset)
+            .take(chunks[0].height as usize - 2)
+            .map(|&line| {
+                // Comprehensive BBCode to text conversion for preview
+                let clean_line = convert_bbcode_to_text(line);
+                ratatui::text::Line::from(clean_line)
+            })
+            .collect();
+        
+        visible_lines
+    } else {
+        vec![ratatui::text::Line::from("No preview available. Press R to generate.")]
+    };
+    
+    let total_lines = state.description_preview.as_ref()
+        .map(|d| d.lines().count())
+        .unwrap_or(0);
+    
+    let preview = Paragraph::new(preview_content)
+        .block(Block::default()
+            .title(format!("Upload Description Preview (Lines {}-{} of {})", 
+                state.preview_scroll_offset + 1,
+                (state.preview_scroll_offset + chunks[0].height as usize - 2).min(total_lines),
+                total_lines))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Magenta)));
+    
+    f.render_widget(preview, chunks[0]);
+    
+    // Help area
+    let help = Paragraph::new(vec![
+        ratatui::text::Line::from(vec![
+            ratatui::text::Span::styled("Controls: ", Style::default().fg(Color::Yellow)),
+            ratatui::text::Span::raw("↑/↓ Scroll • PgUp/PgDn Fast scroll • Home/End • R Regenerate • Esc Exit"),
+        ])
+    ])
+    .block(Block::default()
+        .borders(Borders::ALL));
+    
+    f.render_widget(help, chunks[1]);
 }

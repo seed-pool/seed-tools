@@ -4,6 +4,9 @@ general:
   # The Movie Database API key for fetching movie/TV metadata
   # Get your API key from: https://www.themoviedb.org/settings/api
   tmdb_api_key: "your_tmdb_api_key_here"
+  # YouTube Data API v3 key for fetching movie/TV trailers (optional)
+  # Get your API key from: https://console.cloud.google.com/apis/library/youtube.googleapis.com
+  youtube_api_key: "your_youtube_api_key_here"
   # IGDB (Internet Game Database) credentials for game metadata
   # Register at: https://api-docs.igdb.com/#getting-started
   igdb_client_id: "your_igdb_client_id_here"

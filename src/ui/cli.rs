@@ -12,7 +12,7 @@ use std::path::PathBuf;
 )]
 pub struct Cli {
     /// Enable sync mode
-    #[arg(long, conflicts_with_all = ["sp", "tl", "custom_cat_type", "irc"])]
+    #[arg(long, conflicts_with_all = ["sp", "tl", "custom_cat_type"])]
     pub sync: bool,
 
     /// Upload to Seedpool
@@ -28,12 +28,8 @@ pub struct Cli {
     pub custom_cat_type: Option<String>,
 
     /// Launch UI mode
-    #[arg(long, conflicts_with_all = ["sync", "sp", "tl", "custom_cat_type", "irc"])]
+    #[arg(long, conflicts_with_all = ["sync", "sp", "tl", "custom_cat_type"])]
     pub ui: bool,
-
-    /// Launch IRC mode
-    #[arg(long, conflicts_with_all = ["sync", "sp", "tl", "custom_cat_type", "ui"])]
-    pub irc: bool,
 
     /// Run preflight check
     #[arg(long, conflicts_with_all = ["sync", "sp", "tl", "custom_cat_type"], requires = "input_path")]

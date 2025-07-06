@@ -9,7 +9,6 @@ use crate::core::{VideoFile, VideoType, MediaFile, MediaType, VideoCategory, Vid
 use crate::processing::naming::generate_release_name;
 use crate::processing::extraction::process_and_extract_archives;
 use crate::processing::description::{DescriptionBuilder, DescriptionConfig};
-use crate::core::DescriptionComponent;
 
 /// Metadata extracted from video filename
 #[derive(Debug, Clone)]

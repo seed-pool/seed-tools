@@ -10,6 +10,7 @@ pub mod nfo;
 // Utility modules for components
 pub mod screenshot_utils;
 pub mod mediainfo_utils;
+pub mod cover_art_utils;
 
 use crate::core::error::Result;
 

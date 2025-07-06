@@ -4,7 +4,8 @@ use crate::{
     classification::{MediaClassification, ClassificationResult},
     processing::{
         upload::UploadBuilder,
-        description::{DescriptionConfig, DescriptionBuilder},
+        description::DescriptionConfig,
+        component_config::ComponentConfig,
     },
 };
 use std::sync::Arc;
@@ -30,6 +31,7 @@ pub struct ProcessBuilder {
     
     // Component configurations
     description_config: Option<DescriptionConfig>,
+    component_config: Option<ComponentConfig>,
     dry_run: bool,
     
     // Classification overrides
@@ -64,6 +66,7 @@ impl ProcessBuilder {
             include_metadata_extraction: true,
             include_preflight_data: false,
             description_config: None,
+            component_config: None,
             dry_run: false,
             force_category: None,
             force_type: None,
@@ -143,6 +146,12 @@ impl ProcessBuilder {
     /// Force a specific type (overrides classification)
     pub fn force_type(mut self, type_code: impl Into<String>) -> Self {
         self.force_type = Some(type_code.into());
+        self
+    }
+    
+    /// Set component configuration
+    pub fn with_component_config(mut self, config: ComponentConfig) -> Self {
+        self.component_config = Some(config);
         self
     }
     
@@ -405,31 +414,60 @@ impl ProcessBuilder {
         
         builder = builder.dry_run(self.dry_run);
         
-        // Build based on media type
-        match media_type {
-            MediaType::Video(_) => {
-                builder = builder
-                    .with_screenshots(4)
-                    .with_mediainfo()
-                    .with_nfo();
+        // Apply component configuration
+        if let Some(component_config) = &self.component_config {
+            // Screenshots
+            if component_config.screenshot.enabled {
+                builder = builder.with_screenshots(component_config.screenshot.count);
+                // TODO: Pass screenshot layout to UploadBuilder
             }
-            MediaType::Audio(_) => {
-                builder = builder
-                    .with_mediainfo()
-                    .with_cover_art();
+            
+            // MediaInfo
+            if component_config.mediainfo.enabled {
+                builder = builder.with_mediainfo();
             }
-            MediaType::Ebook(_) => {
-                builder = builder
-                    .with_cover_art()
-                    .with_nfo();
-            }
-            MediaType::Game(_) => {
-                builder = builder
-                    .with_screenshots(4)
-                    .with_nfo();
-            }
-            MediaType::Hobby(_) => {
+            
+            // NFO
+            if component_config.nfo.enabled {
                 builder = builder.with_nfo();
+            }
+            
+            // Sample
+            if component_config.sample.enabled {
+                builder = builder.with_sample();
+            }
+            
+            // Cover Art
+            if component_config.cover_art.enabled {
+                builder = builder.with_cover_art();
+            }
+        } else {
+            // Use default media-specific components
+            match media_type {
+                MediaType::Video(_) => {
+                    builder = builder
+                        .with_screenshots(4)
+                        .with_mediainfo()
+                        .with_nfo();
+                }
+                MediaType::Audio(_) => {
+                    builder = builder
+                        .with_mediainfo()
+                        .with_cover_art();
+                }
+                MediaType::Ebook(_) => {
+                    builder = builder
+                        .with_cover_art()
+                        .with_nfo();
+                }
+                MediaType::Game(_) => {
+                    builder = builder
+                        .with_screenshots(4)
+                        .with_nfo();
+                }
+                MediaType::Hobby(_) => {
+                    builder = builder.with_nfo();
+                }
             }
         }
         

@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::io::{self, Write};
-use log::{info, debug};
+use log::info;
 use reqwest;
 use crate::processing::extraction::extract_single_archive;
 

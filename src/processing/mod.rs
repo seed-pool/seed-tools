@@ -8,6 +8,7 @@ pub mod preflight;
 pub mod components;
 pub mod extraction;
 pub mod description;
+pub mod component_config;
 
 // Re-export main processing types
 pub use upload::{UploadBuilder, UploadProcessor, UploadResult};

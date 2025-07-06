@@ -2,7 +2,7 @@
 
 use reqwest::blocking::Client;
 use serde_json::Value;
-use log::{info, warn};
+use log::info;
 use crate::core::error::{SeedError, Result};
 
 /// Search for release on MusicBrainz

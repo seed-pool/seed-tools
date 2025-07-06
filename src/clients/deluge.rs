@@ -1,9 +1,8 @@
 // Deluge client implementation
 
-use crate::core::{Config, DelugeConfig};
+use crate::core::DelugeConfig;
 use super::{TorrentClient, TorrentInfo};
 use reqwest::blocking::Client;
-use serde_json::Value;
 
 pub struct DelugeClient {
     config: DelugeConfig,

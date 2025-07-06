@@ -2,7 +2,7 @@
 
 use serde_json::Value as JsonValue;
 use regex::Regex;
-use crate::core::{VideoCategory, VideoSourceType, AudioCategory, AudioSourceType, EbookCategory, GameCategory, HobbyCategory};
+use crate::core::{VideoCategory, VideoSourceType, AudioCategory, AudioSourceType, EbookCategory, HobbyCategory};
 
 /// Classification rules for video content
 pub fn classify_video_rules(metadata: &JsonValue) -> Option<String> {

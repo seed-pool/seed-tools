@@ -3,8 +3,7 @@ use std::path::Path;
 use regex::Regex;
 use log::{info, warn, debug};
 use crate::processing::extraction::process_and_extract_archives;
-use crate::processing::description::{DescriptionBuilder, DescriptionConfig};
-use crate::core::DescriptionComponent;
+use crate::processing::description::DescriptionConfig;
 
 /// Metadata extracted from audio filename and folder structure
 #[derive(Debug, Clone)]
@@ -215,8 +214,8 @@ pub fn process_audio(
             .with_duplicate_check()
             .with_custom_component("audio_metadata", crate::core::UploadComponent::Metadata(audio_metadata));
         
-        // Add cover art extraction for audio (if applicable)
-        // Audio files often have embedded cover art that could be extracted
+        // Add cover art extraction for audio
+        builder = builder.with_cover_art();
         
         let _upload_data = builder.build()?;
         
@@ -570,7 +569,7 @@ pub fn generate_description_with_enriched_metadata(
     musicbrainz_enrichment: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<String, String> {
     use crate::processing::description::{DescriptionBuilder, DescriptionConfig};
-    use crate::core::{MediaType, AudioType, ImageLayout, SectionFormat, DescriptionComponent};
+    use crate::core::{MediaType, ImageLayout, SectionFormat, DescriptionComponent};
     
     // Helper function to get value from either enriched metadata or base metadata
     let get_value = |key: &str| -> Option<&str> {

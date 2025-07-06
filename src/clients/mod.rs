@@ -1,12 +1,10 @@
-// External service clients - torrent clients, IRC, etc.
+// External service clients - torrent clients, etc.
 
 pub mod qbittorrent;
 pub mod deluge;
-pub mod irc;
 pub mod sync;
 
 // Re-export main client functionality
-pub use irc::launch_irc_client;
 pub use sync::sync_qbittorrent;
 
 /// Common trait for torrent clients

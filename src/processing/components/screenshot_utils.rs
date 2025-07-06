@@ -19,6 +19,7 @@ use crate::processing::naming::generate_release_name;
 /// * `remote_path` - Optional remote CDN path for SCP upload
 /// * `image_path` - Optional base URL for CDN images
 /// * `input_name` - Name used for generating screenshot filenames
+/// * `count` - Number of screenshots to generate
 /// * `dry_run` - If true, skips actual upload
 /// 
 /// # Returns
@@ -31,6 +32,7 @@ pub fn generate_screenshots(
     remote_path: Option<&str>,
     image_path: Option<&str>,
     input_name: &str,
+    count: usize,
     dry_run: bool,
 ) -> Result<(Vec<String>, Vec<String>)> {
     // First check if we have any valid upload method
@@ -53,7 +55,7 @@ pub fn generate_screenshots(
     
     // Get video duration and generate timestamps
     let duration = get_video_duration(video_file, ffprobe_path_str)?;
-    let timestamps = generate_random_timestamps(duration, 4);
+    let timestamps = generate_random_timestamps(duration, count);
     
     // Generate sanitized base name
     let sanitized_input_name = generate_release_name(input_name);

@@ -104,6 +104,7 @@ impl UploadComponent for ScreenshotComponent {
             remote_path,
             image_path,
             &self.release_name,
+            self.count,
             self.dry_run,
         ) {
             Ok((screenshots, thumbnails)) => {

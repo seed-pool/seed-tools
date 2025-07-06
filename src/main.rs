@@ -13,7 +13,7 @@ use seedbrr::core::{Config, types::{SeedpoolConfig, TorrentLeechConfig}};
 use seedbrr::processing::naming::generate_release_name;
 use seedbrr::utils::{validate_file_path, load_tracker_config, binary_manager::setup_binaries_if_needed};
 use seedbrr::trackers::{TorrentInfo, seedpool::{SeedpoolTorrentInfo, parse_seedpool_category_type, print_seedpool_categories_and_types}};
-use seedbrr::clients::{sync, irc::launch_irc_client};
+use seedbrr::clients::sync;
 use seedbrr::ui::tui::launch_ui;
 use seedbrr::processing::{process_builder, preflight::{preflight_check, print_preflight_results}};
 
@@ -68,7 +68,7 @@ fn extract_binary_paths(config_path: &str) -> Result<(PathBuf, PathBuf, PathBuf,
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Automated tool for processing and uploading releases to trackers.", long_about = None)]
 struct Cli {
-    #[arg(long, conflicts_with_all = ["sp", "tl", "custom_cat_type", "irc"])]
+    #[arg(long, conflicts_with_all = ["sp", "tl", "custom_cat_type"])]
     sync: bool,
 
     #[arg(long = "SP", requires = "input_path")]
@@ -80,11 +80,8 @@ struct Cli {
     #[arg(short = 'c', long, value_name = "CAT_TYPE", requires = "input_path")]
     custom_cat_type: Option<String>,
 
-    #[arg(long, conflicts_with_all = ["sync", "sp", "tl", "custom_cat_type", "irc"])]
+    #[arg(long, conflicts_with_all = ["sync", "sp", "tl", "custom_cat_type"])]
     ui: bool, // Add the `ui` argument
-
-    #[arg(long, conflicts_with_all = ["sync", "sp", "tl", "custom_cat_type", "ui"])]
-    irc: bool, // Add the `irc` argument
 
     #[arg(long, conflicts_with_all = ["sync", "sp", "tl", "custom_cat_type"], requires = "input_path")]
     pre: bool, // Add the `pre` argument
@@ -149,12 +146,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if cli.dry_run {
         info!("🚫 DRY RUN MODE ENABLED - No actual uploads or downloads will occur");
     }
-
-    // --- Handle IRC Mode ---
-    if cli.irc {
-        info!("Launching IRC mode...");
-        return launch_irc_client().await;
-    }    
 
     // --- Handle UI Mode (Default) ---
     if cli.ui || (cli.command.is_none() && cli.input_path.is_none() && !cli.sync && !cli.pre) {

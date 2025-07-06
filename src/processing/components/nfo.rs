@@ -1,6 +1,5 @@
 // NFO file handling component
 
-use std::path::Path;
 use crate::core::error::Result;
 use crate::utils::fs::find_and_read_nfo;
 use super::{UploadComponent, ComponentResult};
