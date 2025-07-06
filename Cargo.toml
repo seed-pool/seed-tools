@@ -1,6 +1,6 @@
 [package]
 name = "seedbrr"
-version = "0.54.0"
+version = "0.55.0"
 edition = "2021"
 
 [dependencies]
@@ -47,15 +47,3 @@ lto = true
 [[bin]]
 name = "seedbrr"
 path = "src/main.rs"
-
-[[bin]]
-name = "test-media-classification"
-path = "src/bin/test_media_classification.rs"
-
-[[bin]]
-name = "test-full-process"
-path = "src/bin/test_full_process.rs"
-
-[[bin]]
-name = "test-process-classification"
-path = "src/bin/test_process_classification.rs"
