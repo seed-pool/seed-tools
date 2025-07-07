@@ -2,7 +2,7 @@
 
 pub mod api;
 
-pub use api::{TrackerApi, UploadData, UploadResponse, TrackerConfig};
+pub use api::{TrackerApi, TrackerConfig, UploadData, UploadResponse};
 
 /// Common functions for tracker operations
 pub fn format_description_bbcode(description: &str) -> String {

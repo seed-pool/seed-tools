@@ -1,18 +1,20 @@
+use log::{error, info};
 use std::fs;
 use std::{path::Path, thread, time::Duration};
-use log::{info, error};
 // use regex::Regex; // No longer needed after removing check_seedpool
-use serde_bencode::de;
 use reqwest::blocking::Client;
+use serde_bencode::de;
 use serde_json;
 // use crate::utils::generate_release_name; // No longer needed after removing check_seedpool
-use crate::core::{QbittorrentConfig, FastResumeData}; 
-
+use crate::core::{FastResumeData, QbittorrentConfig};
 
 // check_seedpool function has been replaced by ProcessBuilder duplicate checking
 // Original function archived in old_functions.txt
 
-pub fn sync_qbittorrent(configs: &[QbittorrentConfig], seedpool_api_key: &str) -> Result<(), String> {
+pub fn sync_qbittorrent(
+    configs: &[QbittorrentConfig],
+    seedpool_api_key: &str,
+) -> Result<(), String> {
     for config in configs {
         let client = Client::new();
 
@@ -34,7 +36,10 @@ pub fn sync_qbittorrent(configs: &[QbittorrentConfig], seedpool_api_key: &str) -
             );
             continue;
         }
-        info!("Logged in to qBittorrent at {} successfully.", config.webui_url);
+        info!(
+            "Logged in to qBittorrent at {} successfully.",
+            config.webui_url
+        );
 
         let torrents_response = client
             .get(format!("{}/api/v2/torrents/info", config.webui_url))
@@ -66,7 +71,10 @@ pub fn sync_qbittorrent(configs: &[QbittorrentConfig], seedpool_api_key: &str) -
             // Attempt to get the save path from the .fastresume file
             let save_path = match get_save_path_from_fastresume(torrent_hash, &config.fastresumes) {
                 Ok(path) => {
-                    info!("Save path for '{}' determined from .fastresume: {}", name, path);
+                    info!(
+                        "Save path for '{}' determined from .fastresume: {}",
+                        name, path
+                    );
                     path
                 }
                 Err(e) => {
@@ -133,7 +141,10 @@ pub fn sync_qbittorrent(configs: &[QbittorrentConfig], seedpool_api_key: &str) -
     Ok(())
 }
 
-fn get_save_path_from_fastresume(torrent_hash: &str, fastresume_dir: &str) -> Result<String, String> {
+fn get_save_path_from_fastresume(
+    torrent_hash: &str,
+    fastresume_dir: &str,
+) -> Result<String, String> {
     let fastresume_path = Path::new(fastresume_dir).join(format!("{}.fastresume", torrent_hash));
     info!("Reading .fastresume file: {}", fastresume_path.display());
 
@@ -141,12 +152,14 @@ fn get_save_path_from_fastresume(torrent_hash: &str, fastresume_dir: &str) -> Re
         .map_err(|e| format!("Failed to read .fastresume file: {}", e))?;
 
     let data: Result<FastResumeData, _> = de::from_bytes(&fastresume_data);
-    
+
     let (qb_save_path, save_path) = match data {
         Ok(resume_data) => {
-            let qb_save_path = resume_data.qbt_save_path
+            let qb_save_path = resume_data
+                .qbt_save_path
                 .map(|bytes| String::from_utf8_lossy(&bytes).to_string());
-            let save_path = resume_data.save_path
+            let save_path = resume_data
+                .save_path
                 .map(|bytes| String::from_utf8_lossy(&bytes).to_string());
             (qb_save_path, save_path)
         }

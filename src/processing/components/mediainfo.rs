@@ -1,7 +1,7 @@
 // MediaInfo generation component
 
-use crate::core::{Config, error::Result};
-use super::{UploadComponent, ComponentResult, mediainfo_utils};
+use super::{mediainfo_utils, ComponentResult, UploadComponent};
+use crate::core::{error::Result, Config};
 
 pub struct MediaInfoComponent {
     input_path: String,
@@ -10,10 +10,7 @@ pub struct MediaInfoComponent {
 
 impl MediaInfoComponent {
     pub fn new(input_path: String, config: Config) -> Self {
-        Self {
-            input_path,
-            config,
-        }
+        Self { input_path, config }
     }
 }
 
@@ -21,7 +18,7 @@ impl UploadComponent for MediaInfoComponent {
     fn name(&self) -> &'static str {
         "MediaInfo"
     }
-    
+
     fn process(&self) -> Result<ComponentResult> {
         match mediainfo_utils::generate_mediainfo(&self.input_path, &self.config) {
             Ok(mediainfo_output) => Ok(ComponentResult {

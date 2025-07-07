@@ -1,27 +1,57 @@
 // Core module - Essential shared code and types
 
-pub mod types;
 pub mod config;
 pub mod error;
+pub mod types;
 
 // Re-export commonly used types
 pub use types::{
-    Config, GeneralConfig, PathsConfig, QbittorrentConfig, DelugeConfig, ImgBBConfig,
-    MediaType, VideoType, AudioType, EbookType, GameType, HobbyType,
-    PreflightCheckResult, VideoSettings, FastResumeData,
-    SeedpoolConfig, SeedpoolGeneralConfig, SeedpoolSettings, SeedpoolScreenshots,
-    TorrentLeechConfig, TorrentLeechGeneralConfig, TorrentLeechSettings,
-    ImageLayout, SectionFormat, DescriptionComponent, UploadComponent,
+    AudioCategory,
+    AudioFile,
+    AudioSourceType,
+    AudioType,
     CDNPaths,
+    Config,
+    DelugeConfig,
+    DescriptionComponent,
+    EbookCategory,
+    EbookFile,
+    EbookType,
+    FastResumeData,
+    GameCategory,
+    GameFile,
+    GameType,
+    GeneralConfig,
+    HobbyCategory,
+    HobbyFile,
+    HobbyType,
+    ImageLayout,
+    ImgBBConfig,
     // File types
-    MediaFile, VideoFile, AudioFile, EbookFile, GameFile, HobbyFile,
+    MediaFile,
+    MediaType,
+    PathsConfig,
+    PreflightCheckResult,
+    QbittorrentConfig,
+    SectionFormat,
+    SeedpoolConfig,
+    SeedpoolGeneralConfig,
+    SeedpoolScreenshots,
+    SeedpoolSettings,
+    TorrentLeechConfig,
+    TorrentLeechGeneralConfig,
+    TorrentLeechSettings,
+    UploadComponent,
     // Category types
-    VideoCategory, AudioCategory, EbookCategory, GameCategory, HobbyCategory,
-    VideoSourceType, AudioSourceType,
+    VideoCategory,
+    VideoFile,
+    VideoSettings,
+    VideoSourceType,
+    VideoType,
 };
 
 pub use config::load_config;
-pub use error::{SeedError, Result};
+pub use error::{Result, SeedError};
 
 // Import TorrentInfo from trackers module since it's defined there
 pub use crate::trackers::TorrentInfo;

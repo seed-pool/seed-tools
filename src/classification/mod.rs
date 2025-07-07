@@ -1,8 +1,8 @@
 // Classification system for media categorization
 
 pub mod engine;
-pub mod rules;
 pub mod mappings;
+pub mod rules;
 
 // Re-export main classification types
-pub use engine::{MediaClassification, ClassificationResult, MediaClassifier};
+pub use engine::{ClassificationResult, MediaClassification, MediaClassifier};

@@ -1,38 +1,38 @@
 // Common error types for seedbrr
 
-use std::fmt;
 use std::error::Error;
+use std::fmt;
 
 /// Main error type for seedbrr
 #[derive(Debug)]
 pub enum SeedError {
     // Configuration errors
     Config(String),
-    
+
     // IO errors
     Io(std::io::Error),
-    
+
     // Media detection errors
     MediaDetection(String),
-    
+
     // Classification errors
     Classification(String),
-    
+
     // API errors
     ApiError(String),
-    
+
     // Upload errors
     Upload(String),
-    
+
     // Torrent client errors
     ClientError(String),
-    
+
     // Validation errors
     Validation(String),
-    
+
     // Parse errors
     Parse(String),
-    
+
     // Generic errors
     Other(String),
 }
@@ -71,6 +71,12 @@ impl From<String> for SeedError {
 impl From<&str> for SeedError {
     fn from(err: &str) -> Self {
         SeedError::Other(err.to_string())
+    }
+}
+
+impl From<reqwest::Error> for SeedError {
+    fn from(err: reqwest::Error) -> Self {
+        SeedError::ApiError(err.to_string())
     }
 }
 

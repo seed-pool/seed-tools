@@ -14,7 +14,7 @@ pub fn generate_release_name(base_name: &str) -> String {
     if let Ok(re) = Regex::new(r"-\s+") {
         release_name = re.replace_all(&release_name, "-").to_string();
     }
-    
+
     // Replace non-alphanumeric characters with dots
     if let Ok(re) = Regex::new(r"[^A-Za-z0-9+\-]") {
         release_name = re.replace_all(&release_name, ".").to_string();

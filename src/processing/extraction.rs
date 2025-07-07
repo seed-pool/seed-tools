@@ -1,8 +1,8 @@
+use crate::core::error::{Result, SeedError};
+use log::info;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use log::info;
-use crate::core::error::{SeedError, Result};
 
 /// Process and extract archives in a directory, returns the path to process
 pub fn process_and_extract_archives(working_path: &str) -> Result<String> {
@@ -11,7 +11,7 @@ pub fn process_and_extract_archives(working_path: &str) -> Result<String> {
         // Log error but don't fail - we can still process without extraction
         info!("Archive extraction failed: {}", e);
     }
-    
+
     // Return the working path for further processing
     Ok(working_path.to_string())
 }
@@ -22,7 +22,10 @@ pub fn extract_rar_archives(folder_path: &str) -> Result<Option<String>> {
 
     let path = Path::new(folder_path);
     if !path.is_dir() {
-        return Err(SeedError::Validation(format!("Provided path is not a directory: {}", folder_path)));
+        return Err(SeedError::Validation(format!(
+            "Provided path is not a directory: {}",
+            folder_path
+        )));
     }
 
     // Collect all .rar, .r00, and .r01 files
@@ -54,7 +57,10 @@ pub fn extract_rar_archives(folder_path: &str) -> Result<Option<String>> {
     };
 
     if to_extract.is_empty() {
-        info!("No RAR, R00, or R01 archives found in folder: {}", folder_path);
+        info!(
+            "No RAR, R00, or R01 archives found in folder: {}",
+            folder_path
+        );
         return Ok(None); // No extraction occurred
     }
 
@@ -79,7 +85,10 @@ pub fn extract_rar_archives(folder_path: &str) -> Result<Option<String>> {
         info!("Successfully extracted archive: {}", archive_file.display());
     }
 
-    info!("Extraction completed. Extracted files are in: {}", folder_path);
+    info!(
+        "Extraction completed. Extracted files are in: {}",
+        folder_path
+    );
     Ok(Some(folder_path.to_string()))
 }
 
@@ -99,7 +108,10 @@ pub fn extract_zip_archives(working_dir: &str) -> Result<()> {
         .filter_map(|entry| {
             let entry = entry.ok()?;
             let path = entry.path();
-            if path.extension().map_or(false, |ext| ext.eq_ignore_ascii_case("zip")) {
+            if path
+                .extension()
+                .map_or(false, |ext| ext.eq_ignore_ascii_case("zip"))
+            {
                 Some(path)
             } else {
                 None
@@ -135,10 +147,11 @@ pub fn extract_tar_archives(working_dir: &str) -> Result<()> {
             let entry = entry.ok()?;
             let path = entry.path();
             let file_name = path.to_string_lossy().to_lowercase();
-            if file_name.ends_with(".tar.xz") || 
-               file_name.ends_with(".tar.gz") || 
-               file_name.ends_with(".tar.bz2") ||
-               file_name.ends_with(".tgz") {
+            if file_name.ends_with(".tar.xz")
+                || file_name.ends_with(".tar.gz")
+                || file_name.ends_with(".tar.bz2")
+                || file_name.ends_with(".tgz")
+            {
                 Some(path)
             } else {
                 None
@@ -148,7 +161,7 @@ pub fn extract_tar_archives(working_dir: &str) -> Result<()> {
 
     for tar_file in &tar_files {
         info!("Extracting TAR archive: {}", tar_file.display());
-        
+
         // Determine compression type
         let file_name = tar_file.to_string_lossy().to_lowercase();
         let compression_flag = if file_name.ends_with(".tar.xz") {
@@ -160,7 +173,7 @@ pub fn extract_tar_archives(working_dir: &str) -> Result<()> {
         } else {
             ""
         };
-        
+
         let output = Command::new("tar")
             .arg(&format!("-x{}f", compression_flag))
             .arg(tar_file)
@@ -168,7 +181,7 @@ pub fn extract_tar_archives(working_dir: &str) -> Result<()> {
             .arg(working_dir)
             .output()
             .map_err(|e| SeedError::Other(format!("Failed to execute tar: {}", e)))?;
-            
+
         if !output.status.success() {
             return Err(SeedError::Other(format!(
                 "Failed to extract TAR archive: {}. Error: {}",
@@ -176,7 +189,7 @@ pub fn extract_tar_archives(working_dir: &str) -> Result<()> {
                 String::from_utf8_lossy(&output.stderr)
             )));
         }
-        
+
         info!("Successfully extracted TAR archive: {}", tar_file.display());
     }
     Ok(())
@@ -187,9 +200,9 @@ pub fn extract_single_archive(archive_path: &Path, dest_dir: &Path) -> Result<()
     if !dest_dir.exists() {
         fs::create_dir_all(dest_dir).map_err(|e| SeedError::Io(e))?;
     }
-    
+
     let file_name = archive_path.to_string_lossy().to_lowercase();
-    
+
     if file_name.ends_with(".zip") {
         info!("Extracting ZIP archive: {}", archive_path.display());
         let output = Command::new("unzip")
@@ -206,12 +219,13 @@ pub fn extract_single_archive(archive_path: &Path, dest_dir: &Path) -> Result<()
                 String::from_utf8_lossy(&output.stderr)
             )));
         }
-    } else if file_name.ends_with(".tar.xz") || 
-              file_name.ends_with(".tar.gz") || 
-              file_name.ends_with(".tar.bz2") ||
-              file_name.ends_with(".tgz") {
+    } else if file_name.ends_with(".tar.xz")
+        || file_name.ends_with(".tar.gz")
+        || file_name.ends_with(".tar.bz2")
+        || file_name.ends_with(".tgz")
+    {
         info!("Extracting TAR archive: {}", archive_path.display());
-        
+
         // Determine compression type
         let compression_flag = if file_name.ends_with(".tar.xz") {
             "J"
@@ -222,7 +236,7 @@ pub fn extract_single_archive(archive_path: &Path, dest_dir: &Path) -> Result<()
         } else {
             ""
         };
-        
+
         let output = Command::new("tar")
             .arg(&format!("-x{}f", compression_flag))
             .arg(archive_path)
@@ -230,7 +244,7 @@ pub fn extract_single_archive(archive_path: &Path, dest_dir: &Path) -> Result<()
             .arg(dest_dir)
             .output()
             .map_err(|e| SeedError::Other(format!("Failed to execute tar: {}", e)))?;
-            
+
         if !output.status.success() {
             return Err(SeedError::Other(format!(
                 "Failed to extract TAR archive: {}. Error: {}",
@@ -240,7 +254,7 @@ pub fn extract_single_archive(archive_path: &Path, dest_dir: &Path) -> Result<()
         }
     } else if file_name.ends_with(".deb") {
         info!("Extracting DEB package: {}", archive_path.display());
-        
+
         // Extract DEB package using dpkg-deb or ar
         let output = Command::new("dpkg-deb")
             .arg("-x")
@@ -248,7 +262,7 @@ pub fn extract_single_archive(archive_path: &Path, dest_dir: &Path) -> Result<()
             .arg(dest_dir)
             .output()
             .map_err(|e| SeedError::Other(format!("Failed to execute dpkg-deb: {}", e)))?;
-            
+
         if !output.status.success() {
             return Err(SeedError::Other(format!(
                 "Failed to extract DEB package: {}. Error: {}",
@@ -262,7 +276,7 @@ pub fn extract_single_archive(archive_path: &Path, dest_dir: &Path) -> Result<()
             archive_path.display()
         )));
     }
-    
+
     info!("Successfully extracted archive: {}", archive_path.display());
     Ok(())
 }

@@ -37,6 +37,7 @@ epub = "2.1.3"
 lopdf = "0.33"
 zip = "2.1"
 which = "6.0"
+async-trait = "0.1.88"
 
 [package.metadata.bundle]
 resources = ["binaries/"]

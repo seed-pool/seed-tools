@@ -40,7 +40,7 @@ qbittorrent:
     default_save_path: "/downloads"
     executable: ""  # Optional: path to qbittorrent executable
     fastresumes: "/home/user/.local/share/qBittorrent/BT_backup"  # Path to fastresume files
-  
+
   # Second qBittorrent instance (optional)
   - webui_url: "http://192.168.1.100:8081"
     username: "user2"

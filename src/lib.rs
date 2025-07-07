@@ -1,13 +1,13 @@
 // seedbrr - Automated tool for processing and uploading releases to trackers
-// 
+//
 // Domain-driven architecture with clear separation of concerns
 
 // Core functionality
 pub mod core;
 
 // Media detection and classification
-pub mod media;
 pub mod classification;
+pub mod media;
 
 // External metadata services
 pub mod metadata;
@@ -30,11 +30,11 @@ pub mod ui;
 // Utilities
 pub mod utils;
 
-// Public API 
-pub use core::{Config, MediaType, SeedError, Result};
+// Public API
+pub use classification::{ClassificationResult, MediaClassification};
+pub use core::{Config, MediaType, Result, SeedError};
 pub use media::detector::detect_media_type;
-pub use classification::{MediaClassification, ClassificationResult};
-pub use processing::{ProcessBuilder, UploadBuilder, preflight_check};
+pub use processing::{preflight_check, ProcessBuilder, UploadBuilder};
 pub use ui::launch_ui;
 
 // Version information

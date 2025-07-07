@@ -1,8 +1,8 @@
 // Screenshot generation component
 
+use super::{screenshot_utils, ComponentResult, UploadComponent};
+use crate::core::{error::Result, Config};
 use std::path::Path;
-use crate::core::{Config, error::Result};
-use super::{UploadComponent, ComponentResult, screenshot_utils};
 
 pub struct ScreenshotComponent {
     input_path: String,
@@ -31,17 +31,17 @@ impl ScreenshotComponent {
             dry_run: false,
         }
     }
-    
+
     pub fn with_layout(mut self, layout: ScreenshotLayout) -> Self {
         self.layout = layout;
         self
     }
-    
+
     pub fn with_count(mut self, count: usize) -> Self {
         self.count = count;
         self
     }
-    
+
     pub fn dry_run(mut self, dry_run: bool) -> Self {
         self.dry_run = dry_run;
         self
@@ -52,17 +52,30 @@ impl UploadComponent for ScreenshotComponent {
     fn name(&self) -> &'static str {
         "Screenshots"
     }
-    
+
     fn process(&self) -> Result<ComponentResult> {
         // Check if input is a video file
         let path = Path::new(&self.input_path);
         let is_video = if let Some(ext) = path.extension() {
             let ext_str = ext.to_str().unwrap_or("").to_lowercase();
-            matches!(ext_str.as_str(), "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm" | "m4v" | "ts" | "mpg" | "mpeg")
+            matches!(
+                ext_str.as_str(),
+                "mp4"
+                    | "mkv"
+                    | "avi"
+                    | "mov"
+                    | "wmv"
+                    | "flv"
+                    | "webm"
+                    | "m4v"
+                    | "ts"
+                    | "mpg"
+                    | "mpeg"
+            )
         } else {
             false
         };
-        
+
         if !is_video {
             return Ok(ComponentResult {
                 success: true,
@@ -71,7 +84,7 @@ impl UploadComponent for ScreenshotComponent {
                 error: Some("Not a video file, skipping screenshot generation".to_string()),
             });
         }
-        
+
         // Get video file path
         let video_file = if path.is_file() {
             self.input_path.clone()
@@ -91,12 +104,24 @@ impl UploadComponent for ScreenshotComponent {
             }
             video_files[0].to_string_lossy().to_string()
         };
-        
+
         // Generate screenshots
         let imgbb_api_key = self.config.imgbb.as_ref().map(|c| c.imgbb_api_key.as_str());
-        let remote_path = self.config.paths.cdnpaths.as_ref().and_then(|p| p.remote_path.as_ref()).map(|s| s.as_str());
-        let image_path = self.config.paths.cdnpaths.as_ref().and_then(|p| p.image_path.as_ref()).map(|s| s.as_str());
-        
+        let remote_path = self
+            .config
+            .paths
+            .cdnpaths
+            .as_ref()
+            .and_then(|p| p.remote_path.as_ref())
+            .map(|s| s.as_str());
+        let image_path = self
+            .config
+            .paths
+            .cdnpaths
+            .as_ref()
+            .and_then(|p| p.image_path.as_ref())
+            .map(|s| s.as_str());
+
         match screenshot_utils::generate_screenshots(
             &video_file,
             &self.config,

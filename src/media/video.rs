@@ -1,14 +1,14 @@
+use log::{debug, error, info, warn};
+use regex::Regex;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use log::{info, error, debug, warn};
-use regex::Regex;
 
+use crate::core::{MediaFile, MediaType, VideoCategory, VideoFile, VideoSourceType, VideoType};
 use crate::core::{PathsConfig, VideoSettings};
-use crate::core::{VideoFile, VideoType, MediaFile, MediaType, VideoCategory, VideoSourceType};
-use crate::processing::naming::generate_release_name;
-use crate::processing::extraction::process_and_extract_archives;
 use crate::processing::description::{DescriptionBuilder, DescriptionConfig};
+use crate::processing::extraction::process_and_extract_archives;
+use crate::processing::naming::generate_release_name;
 
 /// Metadata extracted from video filename
 #[derive(Debug, Clone)]
@@ -46,7 +46,7 @@ impl Default for VideoMetadata {
 /// This struct accumulates all the data needed for the upload process
 #[derive(Debug, Clone)]
 pub struct UploadData {
-    pub nfo_data: Option<(String, Vec<u8>)>,  // (path, content)
+    pub nfo_data: Option<(String, Vec<u8>)>, // (path, content)
     pub mediainfo: Option<String>,
     pub screenshots: Vec<String>,
     pub thumbnails: Vec<String>,
@@ -54,6 +54,10 @@ pub struct UploadData {
     pub torrent_path: Option<String>,
     pub release_name: Option<String>,
     pub description: Option<String>,
+    pub tmdb_id: Option<u32>,
+    pub imdb_id: Option<String>,
+    pub tvdb_id: Option<u32>,
+    pub cover_url: Option<String>,
 }
 
 impl UploadData {
@@ -67,6 +71,10 @@ impl UploadData {
             torrent_path: None,
             release_name: None,
             description: None,
+            tmdb_id: None,
+            imdb_id: None,
+            tvdb_id: None,
+            cover_url: None,
         }
     }
 }
@@ -78,27 +86,35 @@ pub fn generate_description_with_template(
     template_name: Option<&str>,
 ) -> Result<String, String> {
     use crate::templates::TemplateProcessor;
-    
+
     let template_processor = TemplateProcessor::with_defaults()
         .map_err(|e| format!("Failed to initialize template processor: {}", e))?;
-    
+
     let template_to_use = template_name.unwrap_or("default");
-    
+
     if let Some(template) = template_processor.get_template("video", template_to_use) {
         template_processor.apply_template(template, metadata, enriched_metadata)
     } else {
         // Fallback to traditional description generation
-        let screenshots = metadata.get("screenshots")
+        let screenshots = metadata
+            .get("screenshots")
             .and_then(|s| s.as_array())
-            .map(|arr| arr.iter()
-                .filter_map(|v| v.as_str())
-                .map(String::from)
-                .collect::<Vec<_>>())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(String::from)
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
-        
+
         let sample_url = metadata.get("sample_url").and_then(|s| s.as_str());
-        
-        Ok(generate_description_with_metadata(metadata, &screenshots, sample_url, enriched_metadata))
+
+        Ok(generate_description_with_metadata(
+            metadata,
+            &screenshots,
+            sample_url,
+            enriched_metadata,
+        ))
     }
 }
 
@@ -110,7 +126,9 @@ pub fn find_video_files<T>(
 where
     T: VideoSettings,
 {
-    let supported_extensions = ["mkv", "mp4", "avi", "mov", "wmv", "flv", "webm", "m4v", "ts", "mpg", "mpeg"];
+    let supported_extensions = [
+        "mkv", "mp4", "avi", "mov", "wmv", "flv", "webm", "m4v", "ts", "mpg", "mpeg",
+    ];
     let path = Path::new(input_path);
 
     let mut video_files = Vec::new();
@@ -127,19 +145,39 @@ where
         exclusions_enabled: bool,
     ) -> Result<(), String> {
         if file_path.is_dir() {
-            for entry in fs::read_dir(file_path).map_err(|e| format!("Failed to read directory: {}", e))? {
+            for entry in
+                fs::read_dir(file_path).map_err(|e| format!("Failed to read directory: {}", e))?
+            {
                 let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
                 let entry_path = entry.path();
-                process_path(&entry_path, video_files, nfo_file, supported_extensions, exclusions_enabled)?;
+                process_path(
+                    &entry_path,
+                    video_files,
+                    nfo_file,
+                    supported_extensions,
+                    exclusions_enabled,
+                )?;
             }
         } else {
             debug!("Processing file: {}", file_path.display());
-            process_file(file_path, video_files, nfo_file, supported_extensions, exclusions_enabled)?;
+            process_file(
+                file_path,
+                video_files,
+                nfo_file,
+                supported_extensions,
+                exclusions_enabled,
+            )?;
         }
         Ok(())
     }
 
-    process_path(path, &mut video_files, &mut nfo_file, &supported_extensions, exclusions_enabled)?;
+    process_path(
+        path,
+        &mut video_files,
+        &mut nfo_file,
+        &supported_extensions,
+        exclusions_enabled,
+    )?;
 
     if video_files.is_empty() {
         error!("No valid video files detected after exclusions.");
@@ -151,7 +189,6 @@ where
     Ok((video_files, nfo_file))
 }
 
-
 pub fn process_file(
     file_path: &Path,
     video_files: &mut Vec<String>,
@@ -159,7 +196,11 @@ pub fn process_file(
     _supported_extensions: &[&str], // Legacy parameter, now unused
     exclusions_enabled: bool,
 ) -> Result<(), String> {
-    let file_name = file_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let file_name = file_path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
 
     if let Some(ext) = file_path.extension() {
         let ext = ext.to_string_lossy().to_lowercase();
@@ -178,8 +219,13 @@ pub fn process_file(
 pub fn contains_excluded_keywords(name: &str) -> bool {
     let keywords = ["sample", "screens", "screenshots", "proof"];
     let lowercase_name = name.to_lowercase();
-    let result = keywords.iter().any(|keyword| lowercase_name.contains(keyword));
-    info!("Checking if '{}' contains excluded keywords: {}", name, result);
+    let result = keywords
+        .iter()
+        .any(|keyword| lowercase_name.contains(keyword));
+    info!(
+        "Checking if '{}' contains excluded keywords: {}",
+        name, result
+    );
     result
 }
 
@@ -217,31 +263,46 @@ pub fn generate_sample(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&sample_file, fs::Permissions::from_mode(0o777))
-            .map_err(|e| format!("Failed to set permissions for sample file '{}': {}", sample_file, e))?;
+        fs::set_permissions(&sample_file, fs::Permissions::from_mode(0o777)).map_err(|e| {
+            format!(
+                "Failed to set permissions for sample file '{}': {}",
+                sample_file, e
+            )
+        })?;
     }
 
     // Upload the sample file
     if !dry_run {
         crate::utils::upload_to_cdn(
             &sample_file,
-            &format!("{}/previews/", remote_path.trim_end_matches('/'))
-        ).map_err(|e| format!("{:?}", e))?;
+            &format!("{}/previews/", remote_path.trim_end_matches('/')),
+        )
+        .map_err(|e| format!("{:?}", e))?;
         info!("Sample file uploaded to CDN.");
     } else {
-        info!("[DRY RUN] Would upload sample to CDN: {} {}", &format!("{}/previews/", remote_path.trim_end_matches('/')), sanitized_input_name);
+        info!(
+            "[DRY RUN] Would upload sample to CDN: {} {}",
+            &format!("{}/previews/", remote_path.trim_end_matches('/')),
+            sanitized_input_name
+        );
     }
 
     // Return the public-facing URL for the sample
-    Ok(format!("{}/{}.sample.mkv", image_path, sanitized_input_name))
+    Ok(format!(
+        "{}/{}.sample.mkv",
+        image_path, sanitized_input_name
+    ))
 }
 
 pub fn get_video_duration(video_file: &str, ffprobe_path: &str) -> Result<f64, String> {
     let ffprobe_output = Command::new(ffprobe_path)
         .args(&[
-            "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
             video_file,
         ])
         .output()
@@ -255,14 +316,18 @@ pub fn get_video_duration(video_file: &str, ffprobe_path: &str) -> Result<f64, S
         ));
     }
 
-    let duration_str = String::from_utf8_lossy(&ffprobe_output.stdout).trim().to_string();
-    duration_str.parse::<f64>().map_err(|_| "Failed to parse video duration.".to_string())
+    let duration_str = String::from_utf8_lossy(&ffprobe_output.stdout)
+        .trim()
+        .to_string();
+    duration_str
+        .parse::<f64>()
+        .map_err(|_| "Failed to parse video duration.".to_string())
 }
 
 pub fn default_non_video_description() -> String {
     format!(
         "[b][size=12][color=#757575]Created with mkbrr, ffmpeg, and mediainfo. Posted to this fine tracker with seedbrr.[/color][/size][/b]
-        
+
         [url=https://github.com/seed-pool/seed-tools][img]https://cdn.seedpool.org/sp.png[/img][/url]  \
         [url=https://github.com/autobrr/mkbrr][img]https://cdn.seedpool.org/mkbrr.png[/img][/url]  \
         [url=https://www.rust-lang.org][img]https://cdn.seedpool.org/rust.png[/img][/url]"
@@ -281,38 +346,35 @@ pub fn generate_description(
 ) -> String {
     // Description builder imports already at top of file
     use crate::core::ImageLayout;
-    
+
     // Create config for video screenshots
     let mut config = DescriptionConfig::default();
     config.image_layout = ImageLayout::Grid2x2;
-    
-    let mut builder = DescriptionBuilder::with_config(
-        MediaType::Video(VideoType::Mkv),
-        config
-    );
-    
+
+    let mut builder = DescriptionBuilder::with_config(MediaType::Video(VideoType::Mkv), config);
+
     // Add screenshots
     if !screenshots.is_empty() {
         builder = builder.images(screenshots.to_vec());
     }
-    
+
     // Add sample
     if !sample_url.is_empty() {
         if let Some(filename) = Path::new(sample_url).file_name().and_then(|f| f.to_str()) {
             builder = builder.sample(sample_url, filename);
         }
     }
-    
+
     // Add trailer
     if let Some(trailer_url) = youtube_trailer_url {
         builder = builder.trailer(trailer_url, "YouTube");
     }
-    
+
     // Add custom description
     if let Some(custom_desc) = custom_description {
         builder = builder.raw(custom_desc);
     }
-    
+
     builder.build()
 }
 
@@ -323,9 +385,9 @@ pub fn generate_description_with_metadata(
     sample_url: Option<&str>,
     tmdb_enrichment: Option<&std::collections::HashMap<String, String>>,
 ) -> String {
+    use crate::core::{DescriptionComponent, ImageLayout, MediaType, SectionFormat, VideoType};
     use crate::processing::description::{DescriptionBuilder, DescriptionConfig};
-    use crate::core::{MediaType, VideoType, ImageLayout, SectionFormat, DescriptionComponent};
-    
+
     // Helper function to get value from either enriched metadata or base metadata
     let get_value = |key: &str| -> Option<&str> {
         tmdb_enrichment
@@ -333,33 +395,30 @@ pub fn generate_description_with_metadata(
             .map(|s| s.as_str())
             .or_else(|| metadata.get(key).and_then(|v| v.as_str()))
     };
-    
+
     // Create config for video screenshots
     let mut config = DescriptionConfig::default();
     config.image_layout = ImageLayout::Grid2x2;
-    
-    let mut builder = DescriptionBuilder::with_config(
-        MediaType::Video(VideoType::Mkv),
-        config
-    );
-    
+
+    let mut builder = DescriptionBuilder::with_config(MediaType::Video(VideoType::Mkv), config);
+
     // Add title
     if let Some(title) = metadata.get("title").and_then(|t| t.as_str()) {
         builder = builder.title(title);
     }
-    
+
     // Add TMDB overview/synopsis if available
     if let Some(tmdb_overview) = get_value("tmdb_overview") {
         builder = builder.synopsis(tmdb_overview);
     } else if let Some(description) = get_value("description") {
         builder = builder.synopsis(description);
     }
-    
+
     // Add screenshots
     if !screenshots.is_empty() {
         builder = builder.images(screenshots.to_vec());
     }
-    
+
     // Add sample
     if let Some(sample_url) = sample_url {
         if !sample_url.is_empty() {
@@ -368,78 +427,76 @@ pub fn generate_description_with_metadata(
             }
         }
     }
-    
+
     // Add TMDB trailer if available
     if let Some(trailer_url) = get_value("tmdb_trailer_url") {
         builder = builder.trailer(trailer_url, "YouTube");
     }
-    
+
     // Create video information table
     let mut info_rows = Vec::new();
-    
+
     // Year
     if let Some(year) = get_value("year") {
         info_rows.push(vec!["Year".to_string(), year.to_string()]);
     }
-    
+
     // Genres (prefer TMDB data)
     if let Some(genres) = get_value("tmdb_genres") {
         info_rows.push(vec!["Genres".to_string(), genres.to_string()]);
     }
-    
+
     // Runtime
     if let Some(runtime) = get_value("tmdb_runtime") {
         info_rows.push(vec!["Runtime".to_string(), runtime.to_string()]);
     }
-    
+
     // Rating
     if let Some(rating) = get_value("tmdb_rating") {
         info_rows.push(vec!["TMDB Rating".to_string(), format!("{}/10", rating)]);
     }
-    
+
     // Directors
     if let Some(directors) = get_value("tmdb_directors") {
         info_rows.push(vec!["Directors".to_string(), directors.to_string()]);
     }
-    
+
     // Cast
     if let Some(cast) = get_value("tmdb_cast") {
         info_rows.push(vec!["Cast".to_string(), cast.to_string()]);
     }
-    
+
     // Networks (for TV shows)
     if let Some(networks) = get_value("tmdb_networks") {
         info_rows.push(vec!["Networks".to_string(), networks.to_string()]);
     }
-    
+
     // Production companies
     if let Some(companies) = get_value("tmdb_production_companies") {
         info_rows.push(vec!["Production".to_string(), companies.to_string()]);
     }
-    
+
     // Add video information table
     if !info_rows.is_empty() {
         builder = builder.add_component(DescriptionComponent::Table { rows: info_rows });
     }
-    
+
     // Add budget/revenue for movies
     if let Some(budget) = get_value("tmdb_budget") {
         builder = builder.custom_section("Budget", budget, SectionFormat::Plain);
     }
-    
+
     if let Some(revenue) = get_value("tmdb_revenue") {
         builder = builder.custom_section("Box Office", revenue, SectionFormat::Plain);
     }
-    
+
     // Add keywords as a spoiler section
     if let Some(keywords) = get_value("tmdb_keywords") {
         builder = builder.custom_section("Keywords", keywords, SectionFormat::Spoiler);
     }
-    
+
     builder.build()
 }
-
-
 
 /// Recursively process a directory for video files
 fn process_directory_recursive(
@@ -447,12 +504,12 @@ fn process_directory_recursive(
     results: &mut Vec<(VideoFile, VideoMetadata)>,
     rejected_files: &mut Vec<String>,
 ) -> Result<(), String> {
-    for entry in fs::read_dir(dir)
-        .map_err(|e| format!("Failed to read directory {:?}: {}", dir, e))? 
+    for entry in
+        fs::read_dir(dir).map_err(|e| format!("Failed to read directory {:?}: {}", dir, e))?
     {
         let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
         let entry_path = entry.path();
-        
+
         if entry_path.is_dir() {
             // Recursively process subdirectories
             process_directory_recursive(&entry_path, results, rejected_files)?;
@@ -463,29 +520,32 @@ fn process_directory_recursive(
                         path: entry_path.clone(),
                         video_type,
                     };
-                    
-                    let filename = entry_path.file_name()
+
+                    let filename = entry_path
+                        .file_name()
                         .and_then(|name| name.to_str())
                         .unwrap_or("");
-                    
+
                     // Pass the full path for classification
                     let metadata = classify_video_content(entry_path.to_str().unwrap_or(filename));
-                    
+
                     if metadata.category == VideoCategory::Unknown {
                         rejected_files.push(filename.to_string());
                         warn!("Rejected video file with unknown category: {}", filename);
                         continue;
                     }
-                    
-                    info!("Processed video: {} -> Category: {:?}, Source: {:?}", 
-                          filename, metadata.category, metadata.source_type);
-                    
+
+                    info!(
+                        "Processed video: {} -> Category: {:?}, Source: {:?}",
+                        filename, metadata.category, metadata.source_type
+                    );
+
                     results.push((video_file, metadata));
                 }
             }
         }
     }
-    
+
     Ok(())
 }
 
@@ -495,23 +555,23 @@ pub fn process_video(
     _config: &crate::core::Config,
     _dry_run: bool,
 ) -> Result<Vec<(VideoFile, VideoMetadata)>, String> {
-        
     let path = Path::new(input_path);
-    
+
     if !path.exists() {
         return Err(format!("Path not found: {}", input_path));
     }
-    
+
     // Extract any archives first and get the path to process
-    let processing_path = process_and_extract_archives(input_path).map_err(|e| format!("{:?}", e))?;
+    let processing_path =
+        process_and_extract_archives(input_path).map_err(|e| format!("{:?}", e))?;
 
     // Now process the path (which may contain extracted files)
     let mut results = Vec::new();
     let mut rejected_files = Vec::new();
-    
+
     // Update path to use the processing path
     let path = Path::new(&processing_path);
-    
+
     if path.is_file() {
         // Single file case (non-archive video file)
         let extension = path
@@ -521,32 +581,32 @@ pub fn process_video(
 
         let video_type = VideoType::from_extension(extension)
             .ok_or_else(|| format!("Unsupported video file type: {}", extension))?;
-        
+
         let video_file = VideoFile {
             path: path.to_path_buf(),
             video_type,
         };
-        
-        let filename = path.file_name()
+
+        let filename = path
+            .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("");
-        
+
         // Pass the full path for classification
         let metadata = classify_video_content(path.to_str().unwrap_or(filename));
-        
+
         if metadata.category == VideoCategory::Unknown {
             return Err(format!(
-                "Unable to determine video category for '{}'. File must have recognizable TV show (S##E##), movie (year), anime, sports, documentary, or concert patterns in the filename.", 
+                "Unable to determine video category for '{}'. File must have recognizable TV show (S##E##), movie (year), anime, sports, documentary, or concert patterns in the filename.",
                 filename
             ));
         }
-        
+
         results.push((video_file, metadata));
-        
     } else if path.is_dir() {
         // Handle directory - recursively process all video files
         process_directory_recursive(path, &mut results, &mut rejected_files)?;
-        
+
         if results.is_empty() {
             if !rejected_files.is_empty() {
                 return Err(format!(
@@ -558,35 +618,38 @@ pub fn process_video(
                 return Err("No video files found in directory".to_string());
             }
         }
-        
+
         if !rejected_files.is_empty() {
-            warn!("Processed {} valid video files, rejected {} files with unknown categories", 
-                  results.len(), rejected_files.len());
+            warn!(
+                "Processed {} valid video files, rejected {} files with unknown categories",
+                results.len(),
+                rejected_files.len()
+            );
         }
     } else {
         return Err("Path is neither a file nor a directory".to_string());
     }
-    
+
     // After we have the results, build the upload data if we have videos
     if !results.is_empty() {
         use crate::processing::upload::UploadBuilder;
         use std::sync::Arc;
-        
+
         let (video_file, metadata) = &results[0];
-        
+
         // Build upload data directly using UploadBuilder
         // DescriptionConfig import already at top of file
         use crate::core::ImageLayout;
-        
+
         // Configure description for video
         let mut desc_config = DescriptionConfig::default();
         desc_config.image_layout = ImageLayout::Grid2x2; // Videos use 2x2 grid for screenshots
         desc_config.max_images = 8;
-        
+
         let _upload_data = UploadBuilder::new(
             &processing_path,
             MediaType::Video(video_file.video_type.clone()),
-            Arc::new((*_config).clone())
+            Arc::new((*_config).clone()),
         )
         .with_extensions(VideoType::all_extensions())
         .with_video_metadata(metadata.clone())
@@ -599,31 +662,28 @@ pub fn process_video(
         .with_tmdb_lookup()
         .dry_run(_dry_run)
         .build()?;
-        
+
         info!("Built upload data for video processing");
-        
+
         // Create the upload processor - it will auto-detect the active tracker
         let mut processor = crate::processing::upload::UploadProcessor::new(
             _upload_data,
             std::sync::Arc::new(_config.clone()),
         )
         .dry_run(_dry_run);
-        
+
         // Get media classification for mapping
         if !results.is_empty() {
             let (_, metadata) = &results[0];
             let category_str = format!("VideoCategory::{:?}", metadata.category);
             let source_str = Some(format!("VideoSourceType::{:?}", metadata.source_type));
-            
-            processor = processor.with_media_classification(
-                Some(category_str),
-                source_str,
-            );
+
+            processor = processor.with_media_classification(Some(category_str), source_str);
         }
-        
+
         // Process the upload - it handles tracker detection and mapping internally
         let upload_result = processor.process()?;
-        
+
         if upload_result.success {
             info!("Upload completed successfully to {}", upload_result.tracker);
             if let Some(torrent_id) = upload_result.torrent_id {
@@ -633,7 +693,7 @@ pub fn process_video(
             warn!("Upload failed: {}", upload_result.message);
         }
     }
-    
+
     Ok(results)
 }
 
@@ -645,7 +705,10 @@ pub fn detect_video_files(path: &str) -> Result<Vec<VideoFile>, String> {
 }
 
 /// Recursively search for video files in a directory tree
-fn detect_video_files_recursive(path: &Path, video_files: &mut Vec<VideoFile>) -> Result<(), String> {
+fn detect_video_files_recursive(
+    path: &Path,
+    video_files: &mut Vec<VideoFile>,
+) -> Result<(), String> {
     if path.is_file() {
         if let Some(extension) = path.extension().and_then(|ext| ext.to_str()) {
             if let Some(video_type) = VideoType::from_extension(extension) {
@@ -656,17 +719,17 @@ fn detect_video_files_recursive(path: &Path, video_files: &mut Vec<VideoFile>) -
             }
         }
     } else if path.is_dir() {
-        for entry in fs::read_dir(path)
-            .map_err(|e| format!("Failed to read directory {:?}: {}", path, e))? 
+        for entry in
+            fs::read_dir(path).map_err(|e| format!("Failed to read directory {:?}: {}", path, e))?
         {
             let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
             let entry_path = entry.path();
-            
+
             // Recursively process subdirectories and files
             detect_video_files_recursive(&entry_path, video_files)?;
         }
     }
-    
+
     Ok(())
 }
 
@@ -682,65 +745,73 @@ pub fn to_media_file(video_file: &VideoFile) -> MediaFile {
 /// Enhanced version of determine_release_type_and_title from seedpool.rs
 pub fn classify_video_content(path: &str) -> VideoMetadata {
     let mut metadata = VideoMetadata::default();
-    
+
     // Determine what to classify - prioritize directory name for directories
     let path_obj = Path::new(path);
     let filename_str = if path_obj.is_dir() {
         // Use directory name for classification
-        path_obj.file_name()
+        path_obj
+            .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .to_string()
     } else {
         // Use filename for single files
-        path_obj.file_name()
+        path_obj
+            .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .to_string()
     };
     let filename = filename_str.as_str();
-    
+
     // Initialize regex patterns (enhanced from seedpool.rs)
     let season_episode_regex = Regex::new(r"(?i)S(\d{1,2})E(\d{1,3})").unwrap();
     let season_only_regex = Regex::new(r"(?i)S(\d{1,2})").unwrap();
-    let episode_only_regex = Regex::new(r"(?i)\bE(\d{1,4})\b").unwrap();  // Support E1-E9999 for anime
-    let boxset_regex = Regex::new(r"(?i)\b(boxset|complete|collection|season\s*\d+.*complete)\b").unwrap();
+    let episode_only_regex = Regex::new(r"(?i)\bE(\d{1,4})\b").unwrap(); // Support E1-E9999 for anime
+    let boxset_regex =
+        Regex::new(r"(?i)\b(boxset|complete|collection|season\s*\d+.*complete)\b").unwrap();
     let year_regex = Regex::new(r"\b(19|20)\d{2}\b").unwrap();
-    let full_date_regex = Regex::new(r"\b((19|20)\d{2})[.\-](0[1-9]|1[0-2])[.\-](0[1-9]|[12][0-9]|3[01])\b").unwrap();
-    
+    let full_date_regex =
+        Regex::new(r"\b((19|20)\d{2})[.\-](0[1-9]|1[0-2])[.\-](0[1-9]|[12][0-9]|3[01])\b").unwrap();
+
     // Enhanced pattern matching for anime, sports, documentaries
     // Common anime titles and keywords
     let anime_regex = Regex::new(r"(?i)\b(anime|dubbed|subbed|jpn|japanese|[Ss]ub|[Dd]ub|naruto|one\.piece|attack\.on\.titan|bleach|dragon\.ball|demon\.slayer|jujutsu\.kaisen|my\.hero\.academia|boku\.no\.hero|death\.note|hunter\.x\.hunter|fullmetal\.alchemist|sword\.art\.online|tokyo\.ghoul|steins\.gate|evangelion|cowboy\.bebop|one\.punch\.man|mob\.psycho|chainsaw\.man|spy\.x\.family|vinland\.saga|haikyuu|fairy\.tail|black\.clover|boruto|shippuden|kimetsu\.no\.yaiba)\b").unwrap();
-    
+
     // Sports patterns - more specific to avoid false positives
     let sports_regex = Regex::new(r"(?i)\b(nba|nfl|nhl|mlb|uefa|fifa|premier\.league|bundesliga|la\.liga|serie\.a|ligue\.1|championship|tournament|vs\.|boxing|mma|ufc|wwe|aew|f1|formula\.1|formula\.one|olympics?|world\.cup|super\.bowl|wrestlemania|summerslam|grand\.prix|tennis|wimbledon|golf|pga|cricket|rugby)\b").unwrap();
-    
+
     let documentary_regex = Regex::new(r"(?i)\b(documentary|docu|national\.geographic|discovery|history|nature|wildlife|science|biography|bio)\b").unwrap();
-    let concert_regex = Regex::new(r"(?i)\b(concert|live\.at|tour|festival|acoustic|unplugged|live\.from)\b").unwrap();
-    
+    let concert_regex =
+        Regex::new(r"(?i)\b(concert|live\.at|tour|festival|acoustic|unplugged|live\.from)\b")
+            .unwrap();
+
     // Source type patterns - order matters for proper detection
     let uhd_bluray_regex = Regex::new(r"(?i)\b(uhd\.?blu.?ray|4k\.?blu.?ray)\b").unwrap();
     let bluray_regex = Regex::new(r"(?i)\b(blu.?ray|bd|m2ts)\b").unwrap();
     let dvd_regex = Regex::new(r"(?i)\b(dvd|dvdrip)\b").unwrap();
     let remux_regex = Regex::new(r"(?i)\b(remux)\b").unwrap();
-    let full_disc_regex = Regex::new(r"(?i)\b(full\.?disc|complete\.?disc|bdmv|disc\.?image)\b").unwrap();
+    let full_disc_regex =
+        Regex::new(r"(?i)\b(full\.?disc|complete\.?disc|bdmv|disc\.?image)\b").unwrap();
     let iso_regex = Regex::new(r"(?i)\.iso$").unwrap();
-    let web_dl_regex = Regex::new(r"(?i)\b(web[\.\-]?dl|webdl|amzn|nf|hmax|dsnp|atvp|hulu|pcok|pmtp)\b").unwrap();
+    let web_dl_regex =
+        Regex::new(r"(?i)\b(web[\.\-]?dl|webdl|amzn|nf|hmax|dsnp|atvp|hulu|pcok|pmtp)\b").unwrap();
     let web_rip_regex = Regex::new(r"(?i)\b(web[\.\-]?rip|webrip)\b").unwrap();
     let hdtv_regex = Regex::new(r"(?i)\b(hdtv)\b").unwrap();
     let pdtv_regex = Regex::new(r"(?i)\b(pdtv)\b").unwrap();
     let sdtv_regex = Regex::new(r"(?i)\b(sdtv)\b").unwrap();
     let encode_regex = Regex::new(r"(?i)\b(encode|x264|x265|h264|h265|hevc|xvid|divx)\b").unwrap();
     let upscale_regex = Regex::new(r"(?i)\b(upscale|upscaled|ai.?upscale)\b").unwrap();
-    
+
     // Resolution patterns
     let resolution_regex = Regex::new(r"\b(2160p|1080p|720p|480p|360p|4K|UHD)\b").unwrap();
-    
+
     // Codec patterns
     let codec_regex = Regex::new(r"\b(x264|x265|h264|h265|hevc|avc|xvid|divx|av1)\b").unwrap();
-    
+
     debug!("Classifying video content for: {}", filename);
-    
+
     // 1. First check for TV show patterns (S##E## takes priority)
     if let Some(captures) = season_episode_regex.captures(filename) {
         debug!("Matched SxxEyy pattern: {:?}", captures);
@@ -758,8 +829,8 @@ pub fn classify_video_content(path: &str) -> VideoMetadata {
         debug!("Matched Sxx pattern: {:?}", captures);
         metadata.category = VideoCategory::TvShow;
         metadata.season = captures.get(1).and_then(|m| m.as_str().parse::<u32>().ok());
-        metadata.episode = Some(0);  // Season pack has no specific episode
-        metadata.is_boxset = true;   // Season-only pattern indicates a boxset/season pack
+        metadata.episode = Some(0); // Season pack has no specific episode
+        metadata.is_boxset = true; // Season-only pattern indicates a boxset/season pack
         metadata.title = extract_title_before_pattern(filename, &season_only_regex);
     } else if boxset_regex.is_match(filename) {
         debug!("Matched boxset keywords in filename: {}", filename);
@@ -784,41 +855,43 @@ pub fn classify_video_content(path: &str) -> VideoMetadata {
     } else if year_regex.is_match(filename) {
         debug!("Matched year pattern in filename: {}", filename);
         metadata.category = VideoCategory::Movie;
-        
+
         // Find all year matches and pick the most likely release year
-        let year_matches: Vec<u32> = year_regex.find_iter(filename)
+        let year_matches: Vec<u32> = year_regex
+            .find_iter(filename)
             .filter_map(|m| m.as_str().parse::<u32>().ok())
             .collect();
-        
+
         if !year_matches.is_empty() {
             // Prefer years between 1960 and current year + 1
             let current_year = 2024; // Or use chrono to get actual current year
-            let valid_year = year_matches.iter()
+            let valid_year = year_matches
+                .iter()
                 .find(|&&y| y >= 1960 && y <= current_year + 1)
                 .or_else(|| year_matches.first());
-            
+
             if let Some(&year) = valid_year {
                 metadata.year = Some(year);
             }
         }
-        
+
         metadata.title = extract_title_before_pattern(filename, &year_regex);
     } else {
         // No clear pattern, extract full title
         metadata.title = clean_title(filename);
-        
+
         // For ISO files without clear patterns, check for movie-like titles
-        if iso_regex.is_match(filename) && (
-            filename.to_lowercase().contains("trilogy") ||
-            filename.to_lowercase().contains("collection") ||
-            filename.to_lowercase().contains("saga") ||
-            bluray_regex.is_match(filename) ||
-            dvd_regex.is_match(filename)
-        ) {
+        if iso_regex.is_match(filename)
+            && (filename.to_lowercase().contains("trilogy")
+                || filename.to_lowercase().contains("collection")
+                || filename.to_lowercase().contains("saga")
+                || bluray_regex.is_match(filename)
+                || dvd_regex.is_match(filename))
+        {
             metadata.category = VideoCategory::Movie;
         }
     }
-    
+
     // 2. Refine category based on content-specific patterns
     // Check anime first as it often has episode patterns
     if anime_regex.is_match(filename) {
@@ -834,7 +907,7 @@ pub fn classify_video_content(path: &str) -> VideoMetadata {
         debug!("Detected sports patterns in filename");
         metadata.category = VideoCategory::Sports;
     }
-    
+
     // 3. Determine source type (priority order matters)
     // First check if this is a boxset/season pack
     if metadata.is_boxset {
@@ -868,17 +941,17 @@ pub fn classify_video_content(path: &str) -> VideoMetadata {
         // Default to Unknown if nothing matches
         metadata.source_type = VideoSourceType::Unknown;
     }
-    
+
     // 4. Extract resolution
     if let Some(res_match) = resolution_regex.find(filename) {
         metadata.resolution = Some(res_match.as_str().to_uppercase());
     }
-    
+
     // 5. Extract codec
     if let Some(codec_match) = codec_regex.find(filename) {
         metadata.codec = Some(codec_match.as_str().to_uppercase());
     }
-    
+
     // Additional check for directories - see if it's a season pack
     if path_obj.is_dir() && metadata.category == VideoCategory::TvShow {
         // Check if directory contains multiple episodes from same season
@@ -886,8 +959,9 @@ pub fn classify_video_content(path: &str) -> VideoMetadata {
             let mut seasons = std::collections::HashSet::new();
             let mut episodes = std::collections::HashSet::new();
             let mut video_count = 0;
-            
-            for entry in entries.flatten().take(20) { // Check first 20 files
+
+            for entry in entries.flatten().take(20) {
+                // Check first 20 files
                 if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
                     if VideoType::from_extension(ext).is_some() {
                         video_count += 1;
@@ -906,7 +980,7 @@ pub fn classify_video_content(path: &str) -> VideoMetadata {
                     }
                 }
             }
-            
+
             // If we have multiple episodes from the same season, it's a boxset
             if seasons.len() == 1 && episodes.len() > 1 && video_count > 1 {
                 metadata.is_boxset = true;
@@ -917,7 +991,7 @@ pub fn classify_video_content(path: &str) -> VideoMetadata {
             }
         }
     }
-    
+
     debug!("Video classification result: {:?}", metadata);
     metadata
 }
@@ -938,34 +1012,42 @@ fn clean_title(title: &str) -> String {
         .replace('.', " ")
         .replace('_', " ")
         .replace('-', " ");
-    
+
     // Only clean up extra whitespace, preserve all technical indicators
     let whitespace_regex = Regex::new(r"\s+").unwrap();
-    whitespace_regex.replace_all(&cleaned, " ").trim().to_string()
+    whitespace_regex
+        .replace_all(&cleaned, " ")
+        .trim()
+        .to_string()
 }
 
 /// Classify video content for upload pipeline
-pub fn classify_for_upload(input_path: &str, metadata: &serde_json::Value) -> Result<(Option<String>, Option<String>, serde_json::Value), String> {
+pub fn classify_for_upload(
+    input_path: &str,
+    metadata: &serde_json::Value,
+) -> Result<(Option<String>, Option<String>, serde_json::Value), String> {
     // If we already have classification data in metadata, use it
     if metadata.get("category").is_some() {
-        let category = metadata.get("category")
+        let category = metadata
+            .get("category")
             .and_then(|c| c.as_str())
             .map(|c| format!("VideoCategory::{}", c.replace("VideoCategory::", "")));
-            
-        let source_type = metadata.get("source_type")
+
+        let source_type = metadata
+            .get("source_type")
             .and_then(|s| s.as_str())
             .filter(|s| !s.is_empty())
             .map(|s| format!("VideoSourceType::{}", s.replace("VideoSourceType::", "")));
-        
+
         return Ok((category, source_type, metadata.clone()));
     }
-    
+
     // Otherwise, run classification
     let video_metadata = classify_video_content(input_path);
-    
+
     let category = Some(format!("VideoCategory::{:?}", video_metadata.category));
     let source_type = Some(format!("VideoSourceType::{:?}", video_metadata.source_type));
-    
+
     // Manually create JSON metadata
     let mut json_metadata = serde_json::json!({
         "title": video_metadata.title,
@@ -979,13 +1061,15 @@ pub fn classify_for_upload(input_path: &str, metadata: &serde_json::Value) -> Re
         "resolution": video_metadata.resolution,
         "codec": video_metadata.codec,
     });
-    
+
     // Merge with existing metadata
-    if let (Some(json_obj), Some(existing_obj)) = (json_metadata.as_object_mut(), metadata.as_object()) {
+    if let (Some(json_obj), Some(existing_obj)) =
+        (json_metadata.as_object_mut(), metadata.as_object())
+    {
         for (key, value) in existing_obj {
             json_obj.entry(key.clone()).or_insert(value.clone());
         }
     }
-    
+
     Ok((category, source_type, json_metadata))
 }

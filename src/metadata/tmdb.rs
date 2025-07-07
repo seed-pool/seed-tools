@@ -1,15 +1,23 @@
 // The Movie Database (TMDB) API integration
 
+use crate::core::error::{Result, SeedError};
+use log::info;
+use regex::Regex;
 use reqwest::blocking::Client;
 use serde_json::Value;
-use regex::Regex;
-use log::info;
-use crate::core::error::{SeedError, Result};
 
 /// Fetch TMDB ID for a movie or TV show
-pub fn fetch_tmdb_id(title: &str, year: Option<String>, tmdb_api_key: &str, release_type: &str) -> Result<u32> {
-    info!("🎬 Starting TMDB lookup for '{}' (type: {}, year: {:?})", title, release_type, year);
-    
+pub fn fetch_tmdb_id(
+    title: &str,
+    year: Option<String>,
+    tmdb_api_key: &str,
+    release_type: &str,
+) -> Result<u32> {
+    info!(
+        "🎬 Starting TMDB lookup for '{}' (type: {}, year: {:?})",
+        title, release_type, year
+    );
+
     let sanitized_title = if release_type == "TvShow" {
         // Extract everything before the SXX* pattern
         let season_regex = Regex::new(r"(?i)(S\d{2}.*)").unwrap();
@@ -24,7 +32,10 @@ pub fn fetch_tmdb_id(title: &str, year: Option<String>, tmdb_api_key: &str, rele
         year_regex.replace(title, "").trim().to_string()
     };
 
-    info!("🧹 Cleaned TMDB title: '{}' -> '{}'", title, sanitized_title);
+    info!(
+        "🧹 Cleaned TMDB title: '{}' -> '{}'",
+        title, sanitized_title
+    );
     let encoded_title = urlencoding::encode(&sanitized_title);
 
     let url = if release_type == "tv" {
@@ -58,9 +69,12 @@ pub fn fetch_tmdb_id(title: &str, year: Option<String>, tmdb_api_key: &str, rele
         )));
     }
 
-    let json: Value = response
-        .json()
-        .map_err(|e| SeedError::ApiError(format!("Failed to parse TMDB response for '{}': {}", title, e)))?;
+    let json: Value = response.json().map_err(|e| {
+        SeedError::ApiError(format!(
+            "Failed to parse TMDB response for '{}': {}",
+            title, e
+        ))
+    })?;
 
     // Log response status instead of full JSON to avoid breaking UI
     if let Some(total_results) = json["total_results"].as_u64() {
@@ -91,12 +105,20 @@ pub fn fetch_tmdb_id(title: &str, year: Option<String>, tmdb_api_key: &str, rele
 }
 
 /// Fetch external IDs (IMDB, TVDB) from TMDB
-pub fn fetch_external_ids(tmdb_id: u32, release_type: &str, tmdb_api_key: &str) -> Result<(Option<String>, Option<u32>)> {
+pub fn fetch_external_ids(
+    tmdb_id: u32,
+    release_type: &str,
+    tmdb_api_key: &str,
+) -> Result<(Option<String>, Option<u32>)> {
     if tmdb_id == 0 {
         return Ok((None, None));
     }
 
-    let tmdb_type = if release_type == "boxset" { "tv" } else { release_type };
+    let tmdb_type = if release_type == "boxset" {
+        "tv"
+    } else {
+        release_type
+    };
     let url = format!(
         "https://api.themoviedb.org/3/{}/{}/external_ids?api_key={}",
         tmdb_type, tmdb_id, tmdb_api_key
@@ -111,13 +133,16 @@ pub fn fetch_external_ids(tmdb_id: u32, release_type: &str, tmdb_api_key: &str) 
         .map_err(|e| SeedError::ApiError(format!("Failed to fetch external IDs: {}", e)))?;
 
     if !response.status().is_success() {
-        return Err(SeedError::ApiError(format!("Failed to fetch external IDs: HTTP {}", response.status())));
+        return Err(SeedError::ApiError(format!(
+            "Failed to fetch external IDs: HTTP {}",
+            response.status()
+        )));
     }
 
-    let json: Value = response
-        .json()
-        .map_err(|e| SeedError::ApiError(format!("Failed to parse external IDs response: {}", e)))?;
-    
+    let json: Value = response.json().map_err(|e| {
+        SeedError::ApiError(format!("Failed to parse external IDs response: {}", e))
+    })?;
+
     let imdb_id = json["imdb_id"].as_str().map(|s| s.to_string());
     let tvdb_id = json["tvdb_id"].as_u64().map(|id| id as u32);
 
@@ -133,13 +158,20 @@ pub fn fetch_tmdb_details(tmdb_id: u32, release_type: &str, tmdb_api_key: &str) 
         return Err(SeedError::ApiError("Invalid TMDB ID".to_string()));
     }
 
-    let tmdb_type = if release_type == "tv" || release_type == "TvShow" { "tv" } else { "movie" };
+    let tmdb_type = if release_type == "tv" || release_type == "TvShow" {
+        "tv"
+    } else {
+        "movie"
+    };
     let url = format!(
         "https://api.themoviedb.org/3/{}/{}?api_key={}&append_to_response=credits,videos,images,keywords",
         tmdb_type, tmdb_id, tmdb_api_key
     );
 
-    info!("Fetching TMDB details for ID: {} (type: {})", tmdb_id, tmdb_type);
+    info!(
+        "Fetching TMDB details for ID: {} (type: {})",
+        tmdb_id, tmdb_type
+    );
 
     let client = Client::new();
     let response = client
@@ -154,16 +186,19 @@ pub fn fetch_tmdb_details(tmdb_id: u32, release_type: &str, tmdb_api_key: &str) 
         )));
     }
 
-    let json: Value = response
-        .json()
-        .map_err(|e| SeedError::ApiError(format!("Failed to parse TMDB details response: {}", e)))?;
+    let json: Value = response.json().map_err(|e| {
+        SeedError::ApiError(format!("Failed to parse TMDB details response: {}", e))
+    })?;
 
     info!("✅ Successfully fetched TMDB details for ID: {}", tmdb_id);
     Ok(json)
 }
 
 /// Extract comprehensive metadata from TMDB details response
-pub fn extract_tmdb_metadata(tmdb_details: &Value, release_type: &str) -> std::collections::HashMap<String, String> {
+pub fn extract_tmdb_metadata(
+    tmdb_details: &Value,
+    release_type: &str,
+) -> std::collections::HashMap<String, String> {
     let mut metadata = std::collections::HashMap::new();
 
     // Basic info
@@ -181,7 +216,8 @@ pub fn extract_tmdb_metadata(tmdb_details: &Value, release_type: &str) -> std::c
 
     // Genres
     if let Some(genres) = tmdb_details["genres"].as_array() {
-        let genre_names: Vec<String> = genres.iter()
+        let genre_names: Vec<String> = genres
+            .iter()
             .filter_map(|g| g["name"].as_str())
             .map(|s| s.to_string())
             .collect();
@@ -192,18 +228,21 @@ pub fn extract_tmdb_metadata(tmdb_details: &Value, release_type: &str) -> std::c
 
     // Runtime/Episode runtime
     if release_type == "tv" || release_type == "TvShow" {
-        if let Some(runtime) = tmdb_details["episode_run_time"].as_array()
+        if let Some(runtime) = tmdb_details["episode_run_time"]
+            .as_array()
             .and_then(|arr| arr.get(0))
-            .and_then(|v| v.as_u64()) {
+            .and_then(|v| v.as_u64())
+        {
             metadata.insert("tmdb_runtime".to_string(), format!("{} min", runtime));
         }
-        
+
         if let Some(status) = tmdb_details["status"].as_str() {
             metadata.insert("tmdb_status".to_string(), status.to_string());
         }
-        
+
         if let Some(networks) = tmdb_details["networks"].as_array() {
-            let network_names: Vec<String> = networks.iter()
+            let network_names: Vec<String> = networks
+                .iter()
                 .filter_map(|n| n["name"].as_str())
                 .map(|s| s.to_string())
                 .collect();
@@ -215,13 +254,13 @@ pub fn extract_tmdb_metadata(tmdb_details: &Value, release_type: &str) -> std::c
         if let Some(runtime) = tmdb_details["runtime"].as_u64() {
             metadata.insert("tmdb_runtime".to_string(), format!("{} min", runtime));
         }
-        
+
         if let Some(budget) = tmdb_details["budget"].as_u64() {
             if budget > 0 {
                 metadata.insert("tmdb_budget".to_string(), format!("${}", budget));
             }
         }
-        
+
         if let Some(revenue) = tmdb_details["revenue"].as_u64() {
             if revenue > 0 {
                 metadata.insert("tmdb_revenue".to_string(), format!("${}", revenue));
@@ -232,7 +271,8 @@ pub fn extract_tmdb_metadata(tmdb_details: &Value, release_type: &str) -> std::c
     // Cast and crew
     if let Some(credits) = tmdb_details["credits"].as_object() {
         if let Some(cast) = credits["cast"].as_array() {
-            let main_cast: Vec<String> = cast.iter()
+            let main_cast: Vec<String> = cast
+                .iter()
                 .take(5) // Top 5 cast members
                 .filter_map(|c| c["name"].as_str())
                 .map(|s| s.to_string())
@@ -243,7 +283,8 @@ pub fn extract_tmdb_metadata(tmdb_details: &Value, release_type: &str) -> std::c
         }
 
         if let Some(crew) = credits["crew"].as_array() {
-            let directors: Vec<String> = crew.iter()
+            let directors: Vec<String> = crew
+                .iter()
                 .filter(|c| c["job"].as_str() == Some("Director"))
                 .filter_map(|c| c["name"].as_str())
                 .map(|s| s.to_string())
@@ -251,8 +292,9 @@ pub fn extract_tmdb_metadata(tmdb_details: &Value, release_type: &str) -> std::c
             if !directors.is_empty() {
                 metadata.insert("tmdb_directors".to_string(), directors.join(", "));
             }
-            
-            let writers: Vec<String> = crew.iter()
+
+            let writers: Vec<String> = crew
+                .iter()
                 .filter(|c| c["department"].as_str() == Some("Writing"))
                 .filter_map(|c| c["name"].as_str())
                 .map(|s| s.to_string())
@@ -265,8 +307,11 @@ pub fn extract_tmdb_metadata(tmdb_details: &Value, release_type: &str) -> std::c
 
     // Videos (trailers)
     if let Some(videos) = tmdb_details["videos"]["results"].as_array() {
-        let trailers: Vec<String> = videos.iter()
-            .filter(|v| v["type"].as_str() == Some("Trailer") && v["site"].as_str() == Some("YouTube"))
+        let trailers: Vec<String> = videos
+            .iter()
+            .filter(|v| {
+                v["type"].as_str() == Some("Trailer") && v["site"].as_str() == Some("YouTube")
+            })
             .filter_map(|v| v["key"].as_str())
             .map(|key| format!("https://www.youtube.com/watch?v={}", key))
             .collect();
@@ -277,19 +322,28 @@ pub fn extract_tmdb_metadata(tmdb_details: &Value, release_type: &str) -> std::c
 
     // Production companies
     if let Some(companies) = tmdb_details["production_companies"].as_array() {
-        let company_names: Vec<String> = companies.iter()
+        let company_names: Vec<String> = companies
+            .iter()
             .filter_map(|c| c["name"].as_str())
             .map(|s| s.to_string())
             .collect();
         if !company_names.is_empty() {
-            metadata.insert("tmdb_production_companies".to_string(), company_names.join(", "));
+            metadata.insert(
+                "tmdb_production_companies".to_string(),
+                company_names.join(", "),
+            );
         }
     }
 
     // Keywords
-    let keywords_key = if release_type == "tv" || release_type == "TvShow" { "results" } else { "keywords" };
+    let keywords_key = if release_type == "tv" || release_type == "TvShow" {
+        "results"
+    } else {
+        "keywords"
+    };
     if let Some(keywords) = tmdb_details["keywords"][keywords_key].as_array() {
-        let keyword_names: Vec<String> = keywords.iter()
+        let keyword_names: Vec<String> = keywords
+            .iter()
             .filter_map(|k| k["name"].as_str())
             .map(|s| s.to_string())
             .collect();
@@ -302,7 +356,11 @@ pub fn extract_tmdb_metadata(tmdb_details: &Value, release_type: &str) -> std::c
 }
 
 /// Fetch YouTube trailer URL
-pub fn fetch_youtube_trailer(title: &str, year: Option<&str>, youtube_api_key: &str) -> Result<String> {
+pub fn fetch_youtube_trailer(
+    title: &str,
+    year: Option<&str>,
+    youtube_api_key: &str,
+) -> Result<String> {
     let client = Client::new();
 
     // Construct the search query

@@ -1,21 +1,34 @@
+use clap::{CommandFactory, Parser};
+use log::{debug, error, info, LevelFilter};
+use simplelog::{CombinedLogger, Config as SimpleLogConfig, WriteLogger};
+use std::fs::OpenOptions;
 use std::{
+    error::Error,
     fs,
     path::{Path, PathBuf},
     sync::Arc,
-    error::Error,
 };
-use log::{info, error, debug, LevelFilter};
-use simplelog::{Config as SimpleLogConfig, CombinedLogger, WriteLogger};
-use clap::{Parser, CommandFactory};
-use std::fs::OpenOptions;
 
-use seedbrr::core::{Config, types::{SeedpoolConfig, TorrentLeechConfig}};
-use seedbrr::processing::naming::generate_release_name;
-use seedbrr::utils::{validate_file_path, load_tracker_config, binary_manager::setup_binaries_if_needed};
-use seedbrr::trackers::{TorrentInfo, seedpool::{SeedpoolTorrentInfo, parse_seedpool_category_type, print_seedpool_categories_and_types}};
 use seedbrr::clients::sync;
+use seedbrr::core::{
+    types::{SeedpoolConfig, TorrentLeechConfig},
+    Config,
+};
+use seedbrr::processing::naming::generate_release_name;
+use seedbrr::processing::{
+    preflight::{preflight_check, print_preflight_results},
+    process_builder,
+};
+use seedbrr::trackers::{
+    seedpool::{
+        parse_seedpool_category_type, print_seedpool_categories_and_types, SeedpoolTorrentInfo,
+    },
+    TorrentInfo,
+};
 use seedbrr::ui::tui::launch_ui;
-use seedbrr::processing::{process_builder, preflight::{preflight_check, print_preflight_results}};
+use seedbrr::utils::{
+    binary_manager::setup_binaries_if_needed, load_tracker_config, validate_file_path,
+};
 
 fn load_yaml_config<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, String> {
     let content = fs::read_to_string(path)
@@ -34,16 +47,17 @@ fn print_available_categories_and_types() {
 
 fn extract_binary_paths(config_path: &str) -> Result<(PathBuf, PathBuf, PathBuf, PathBuf), String> {
     let config: serde_yaml::Value = serde_yaml::from_str(
-        &fs::read_to_string(config_path).map_err(|e| format!("Failed to read config file: {}", e))?,
+        &fs::read_to_string(config_path)
+            .map_err(|e| format!("Failed to read config file: {}", e))?,
     )
     .map_err(|e| format!("Failed to parse config file: {}", e))?;
     let paths = config["paths"]
         .as_mapping()
         .ok_or("Missing or invalid 'paths' field in config")?;
-    
+
     let required_binaries = ["ffmpeg", "ffprobe", "mkbrr", "mediainfo"];
     let mut binary_paths = Vec::new();
-    
+
     for binary in &required_binaries {
         if !paths.contains_key(binary) {
             return Err(format!("Missing '{}' in 'paths' field of config", binary));
@@ -52,14 +66,17 @@ fn extract_binary_paths(config_path: &str) -> Result<(PathBuf, PathBuf, PathBuf,
             .as_str()
             .ok_or(format!("Invalid path for '{}'", binary))?;
         if !Path::new(binary_path).exists() {
-            return Err(format!("Binary '{}' not found at '{}'", binary, binary_path));
+            return Err(format!(
+                "Binary '{}' not found at '{}'",
+                binary, binary_path
+            ));
         }
         binary_paths.push(PathBuf::from(binary_path));
     }
-    
+
     Ok((
         binary_paths[0].clone(), // ffmpeg
-        binary_paths[1].clone(), // ffprobe  
+        binary_paths[1].clone(), // ffprobe
         binary_paths[2].clone(), // mkbrr
         binary_paths[3].clone(), // mediainfo
     ))
@@ -86,7 +103,10 @@ struct Cli {
     #[arg(long, conflicts_with_all = ["sync", "sp", "tl", "custom_cat_type"], requires = "input_path")]
     pre: bool, // Add the `pre` argument
 
-    #[arg(long, help = "Enable dry-run mode - simulate uploads without actually uploading")]
+    #[arg(
+        long,
+        help = "Enable dry-run mode - simulate uploads without actually uploading"
+    )]
     dry_run: bool,
 
     #[command(subcommand)]
@@ -141,7 +161,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     info!("Parsing arguments...");
     let cli = Cli::parse();
     debug!("Parsed arguments: {:?}", cli);
-    
+
     // Log dry-run mode if enabled
     if cli.dry_run {
         info!("🚫 DRY RUN MODE ENABLED - No actual uploads or downloads will occur");
@@ -163,43 +183,60 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // --- Load Configurations ---
     info!("Loading configurations...");
-    let main_config_path_str = main_config_path.to_str()
-        .ok_or_else(|| format!("Invalid non-UTF8 path for main config: {:?}", main_config_path))?;
-    let (ffmpeg_path, ffprobe_path, mkbrr_path, mediainfo_path) = extract_binary_paths(main_config_path_str).map_err(|e| {
-        error!("Failed to extract binary paths using config {:?}: {}", main_config_path, e);
-        format!("Failed to extract binary paths: {}", e)
+    let main_config_path_str = main_config_path.to_str().ok_or_else(|| {
+        format!(
+            "Invalid non-UTF8 path for main config: {:?}",
+            main_config_path
+        )
     })?;
+    let (ffmpeg_path, ffprobe_path, mkbrr_path, mediainfo_path) =
+        extract_binary_paths(main_config_path_str).map_err(|e| {
+            error!(
+                "Failed to extract binary paths using config {:?}: {}",
+                main_config_path, e
+            );
+            format!("Failed to extract binary paths: {}", e)
+        })?;
     debug!(
         "Binary paths: ffmpeg={:?}, ffprobe={:?}, mkbrr={:?}, mediainfo={:?}",
         ffmpeg_path, ffprobe_path, mkbrr_path, mediainfo_path
     );
 
-    let seedpool_config_path_str = seedpool_config_path.to_str()
-        .ok_or_else(|| format!("Invalid non-UTF8 path for seedpool config: {:?}", seedpool_config_path))?;
-    let torrentleech_config_path_str = torrentleech_config_path.to_str()
-        .ok_or_else(|| format!("Invalid non-UTF8 path for torrentleech config: {:?}", torrentleech_config_path))?;
+    let seedpool_config_path_str = seedpool_config_path.to_str().ok_or_else(|| {
+        format!(
+            "Invalid non-UTF8 path for seedpool config: {:?}",
+            seedpool_config_path
+        )
+    })?;
+    let torrentleech_config_path_str = torrentleech_config_path.to_str().ok_or_else(|| {
+        format!(
+            "Invalid non-UTF8 path for torrentleech config: {:?}",
+            torrentleech_config_path
+        )
+    })?;
 
     let main_config: Config = load_yaml_config::<Config>(main_config_path_str)
         .map_err(|e| format!("Failed to load main config: {}", e))?;
     let seedpool_config: SeedpoolConfig = load_yaml_config(seedpool_config_path_str)
         .map_err(|e| format!("Failed to load seedpool config: {}", e))?;
-    let _torrentleech_config: TorrentLeechConfig = load_yaml_config(torrentleech_config_path_str)
-        .map_err(|e| format!("Failed to load torrentleech config: {}", e))?;
+    let _torrentleech_config: TorrentLeechConfig =
+        load_yaml_config(torrentleech_config_path_str)
+            .map_err(|e| format!("Failed to load torrentleech config: {}", e))?;
     info!("Configurations loaded.");
 
     if cli.pre {
         info!("Running preflight check mode...");
-        
+
         // Require input path for preflight check
         if cli.input_path.is_none() {
             error!("Input path is required for preflight check.");
             println!("Error: Please provide an input path for the preflight check.");
             return Ok(());
         }
-        
+
         let input_path = cli.input_path.unwrap();
         let input_path_str = input_path.to_str().ok_or("Invalid input path string")?;
-        
+
         // Run the preflight check
         match preflight_check(input_path_str, &main_config, cli.dry_run) {
             Ok(result) => {
@@ -218,7 +255,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // --- Handle Sync Mode ---
     if cli.sync {
         info!("Running in --sync mode.");
-        if let Err(e) = sync::sync_qbittorrent(&main_config.qbittorrent, &seedpool_config.general.api_key) {
+        if let Err(e) =
+            sync::sync_qbittorrent(&main_config.qbittorrent, &seedpool_config.general.api_key)
+        {
             error!("Error syncing qBittorrent: {}", e);
         } else {
             info!("Sync operation completed.");
@@ -238,7 +277,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     .map_err(|e| format!("Input path validation failed: {}", e))?;
 
                 // Use the process builder for duplicate checking
-                match process_builder::duplicate_check_builder(input_path_str, Arc::new(main_config.clone())).build() {
+                match process_builder::duplicate_check_builder(
+                    input_path_str,
+                    Arc::new(main_config.clone()),
+                )
+                .build()
+                {
                     Ok(result) => {
                         // Check if we found duplicates
                         if let Some(preflight_data) = result.preflight_data {
@@ -252,7 +296,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 std::process::exit(0);
                             }
                         } else {
-                            println!("⚠️  Could not perform duplicate check for '{}'", result.title);
+                            println!(
+                                "⚠️  Could not perform duplicate check for '{}'",
+                                result.title
+                            );
                             std::process::exit(2);
                         }
                     }
@@ -269,11 +316,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // --- Handle Input Path Dependent Modes ---
     if let Some(input_path) = cli.input_path {
         let input_path_str = input_path.to_str().ok_or("Invalid input path string")?;
-        
+
         // Validate input path
         validate_file_path(input_path_str)
             .map_err(|e| format!("Input path validation failed: {}", e))?;
-        
+
         info!("Processing input path: {}", input_path_str);
 
         // Generate release name
@@ -295,8 +342,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         // --- Process Upload with New Media Detection System ---
         if let Some(category_type_arg) = cli.custom_cat_type {
             // User provided a 4-digit code with -c flag
-            info!("Processing with provided category/type code: {}", category_type_arg);
-            
+            info!(
+                "Processing with provided category/type code: {}",
+                category_type_arg
+            );
+
             // Parse the 4-digit code (for now, we'll use Seedpool's parser since it's the most complete)
             let torrent_info = match parse_category_type_argument(&category_type_arg) {
                 Ok(info) => {
@@ -310,21 +360,32 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     return Ok(());
                 }
             };
-            
+
             // Process with the explicit torrent info using process builder
             match process_builder::upload_builder(input_path_str, Arc::new(main_config.clone()))
-                .force_category(format!("{}Category::{}", 
-                    if torrent_info.is_video_category() { "Video" }
-                    else if torrent_info.is_audio_category() { "Audio" }
-                    else if torrent_info.is_ebook_category() { "Ebook" }
-                    else if torrent_info.is_game_category() { "Game" }
-                    else { "Hobby" },
+                .force_category(format!(
+                    "{}Category::{}",
+                    if torrent_info.is_video_category() {
+                        "Video"
+                    } else if torrent_info.is_audio_category() {
+                        "Audio"
+                    } else if torrent_info.is_ebook_category() {
+                        "Ebook"
+                    } else if torrent_info.is_game_category() {
+                        "Game"
+                    } else {
+                        "Hobby"
+                    },
                     torrent_info.category_name()
                 ))
                 .dry_run(cli.dry_run)
-                .build() {
+                .build()
+            {
                 Ok(result) => {
-                    info!("Upload processing completed successfully for: {}", result.title);
+                    info!(
+                        "Upload processing completed successfully for: {}",
+                        result.title
+                    );
                 }
                 Err(e) => {
                     error!("Error processing upload: {}", e);
@@ -333,13 +394,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         } else {
             // No -c flag provided, use auto-detection with process builder
-            info!("No category/type code provided, using auto-detection for: {}", input_path_str);
-            
+            info!(
+                "No category/type code provided, using auto-detection for: {}",
+                input_path_str
+            );
+
             match process_builder::upload_builder(input_path_str, Arc::new(main_config.clone()))
                 .dry_run(cli.dry_run)
-                .build() {
+                .build()
+            {
                 Ok(result) => {
-                    info!("Upload processing completed successfully for: {}", result.title);
+                    info!(
+                        "Upload processing completed successfully for: {}",
+                        result.title
+                    );
                 }
                 Err(e) => {
                     error!("Error processing upload: {}", e);
@@ -347,7 +415,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
         }
-        
+
         info!("Upload processing completed successfully.");
     } else {
         error!("Usage error: An input path is required unless using --sync.");

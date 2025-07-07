@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(
-    author, 
-    version, 
+    author,
+    version,
     about = "Automated tool for processing and uploading releases to trackers.",
     long_about = None
 )]
@@ -36,7 +36,10 @@ pub struct Cli {
     pub pre: bool,
 
     /// Enable dry-run mode - simulate uploads without actually uploading
-    #[arg(long, help = "Enable dry-run mode - simulate uploads without actually uploading")]
+    #[arg(
+        long,
+        help = "Enable dry-run mode - simulate uploads without actually uploading"
+    )]
     pub dry_run: bool,
 
     /// Subcommands
@@ -56,26 +59,26 @@ pub enum Commands {
         #[arg(index = 1)]
         input_path: PathBuf,
     },
-    
+
     /// Upload to trackers
     Upload {
         /// Path to the media file or directory
         #[arg(index = 1)]
         input_path: PathBuf,
-        
+
         /// Tracker to upload to
         #[arg(short = 't', long)]
         tracker: String,
-        
+
         /// Category/type code
         #[arg(short = 'c', long)]
         code: Option<String>,
-        
+
         /// Dry run mode
         #[arg(long)]
         dry_run: bool,
     },
-    
+
     /// List available categories and types
     Categories {
         /// Tracker name

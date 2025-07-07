@@ -1,21 +1,21 @@
 // Common API traits and structures for all trackers
 
-use async_trait::async_trait;
-use serde::{Serialize, Deserialize};
 use crate::core::error::Result;
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 /// Common trait for tracker APIs
 #[async_trait]
 pub trait TrackerApi {
     /// Upload a torrent to the tracker
     async fn upload(&self, upload_data: &UploadData) -> Result<UploadResponse>;
-    
+
     /// Check for duplicates
     async fn check_duplicate(&self, title: &str) -> Result<bool>;
-    
+
     /// Get tracker name
     fn name(&self) -> &'static str;
-    
+
     /// Get tracker configuration
     fn config(&self) -> &TrackerConfig;
 }

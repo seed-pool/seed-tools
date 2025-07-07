@@ -1,15 +1,17 @@
 // Logging configuration utilities
 
+use crate::core::error::Result;
 use log::LevelFilter;
-use simplelog::{Config as SimpleLogConfig, CombinedLogger, WriteLogger, TermLogger, TerminalMode, ColorChoice};
+use simplelog::{
+    ColorChoice, CombinedLogger, Config as SimpleLogConfig, TermLogger, TerminalMode, WriteLogger,
+};
 use std::fs::OpenOptions;
 use std::path::Path;
-use crate::core::error::Result;
 
 /// Setup logging with file and optional console output
 pub fn setup_logging(log_file: &str, console_output: bool, log_level: LevelFilter) -> Result<()> {
     let mut loggers: Vec<Box<dyn simplelog::SharedLogger>> = vec![];
-    
+
     // File logger
     let log_path = Path::new(log_file);
     let file_logger = WriteLogger::new(
@@ -21,7 +23,7 @@ pub fn setup_logging(log_file: &str, console_output: bool, log_level: LevelFilte
             .open(&log_path)?,
     );
     loggers.push(file_logger);
-    
+
     // Console logger if requested
     if console_output {
         // Try to create terminal logger, fallback if it fails
@@ -33,10 +35,9 @@ pub fn setup_logging(log_file: &str, console_output: bool, log_level: LevelFilte
         );
         loggers.push(term_logger);
     }
-    
-    CombinedLogger::init(loggers)
-        .map_err(|e| format!("Failed to initialize logging: {}", e))?;
-    
+
+    CombinedLogger::init(loggers).map_err(|e| format!("Failed to initialize logging: {}", e))?;
+
     log::info!("Logging initialized at level: {:?}", log_level);
     Ok(())
 }

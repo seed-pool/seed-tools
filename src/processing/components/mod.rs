@@ -1,16 +1,16 @@
 // Upload components - modular pieces for building uploads
 
-pub mod title;
-pub mod mediainfo;
-pub mod screenshots;
 pub mod description;
-pub mod sample;
+pub mod mediainfo;
 pub mod nfo;
+pub mod sample;
+pub mod screenshots;
+pub mod title;
 
 // Utility modules for components
-pub mod screenshot_utils;
-pub mod mediainfo_utils;
 pub mod cover_art_utils;
+pub mod mediainfo_utils;
+pub mod screenshot_utils;
 
 use crate::core::error::Result;
 
@@ -18,10 +18,10 @@ use crate::core::error::Result;
 pub trait UploadComponent {
     /// Component name
     fn name(&self) -> &'static str;
-    
+
     /// Process the component
     fn process(&self) -> Result<ComponentResult>;
-    
+
     /// Is this component required?
     fn required(&self) -> bool {
         false

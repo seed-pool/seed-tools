@@ -22,8 +22,12 @@ pub struct ClassificationResult {
 /// Trait that each media module implements for classification
 pub trait MediaClassifier {
     /// Classify the media and return category and optional source type
-    fn classify(&self, input_path: &str, metadata: &JsonValue) -> Result<(Option<String>, Option<String>, JsonValue), String>;
-    
+    fn classify(
+        &self,
+        input_path: &str,
+        metadata: &JsonValue,
+    ) -> Result<(Option<String>, Option<String>, JsonValue), String>;
+
     /// Get the media type this classifier handles
     fn media_type(&self) -> &'static str;
 }
@@ -38,85 +42,99 @@ impl MediaClassification {
             force_type: None,
         }
     }
-    
+
     pub fn with_media_type(mut self, media_type: MediaType) -> Self {
         self.media_type = Some(media_type);
         self
     }
-    
+
     pub fn with_metadata(mut self, metadata: JsonValue) -> Self {
         self.metadata = Some(metadata);
         self
     }
-    
+
     pub fn with_input_path(mut self, path: impl Into<String>) -> Self {
         self.input_path = Some(path.into());
         self
     }
-    
+
     pub fn with_category(mut self, category: impl Into<String>) -> Self {
         self.force_category = Some(category.into());
         self
     }
-    
+
     pub fn with_type(mut self, type_code: impl Into<String>) -> Self {
         self.force_type = Some(type_code.into());
         self
     }
-    
+
     /// Perform the classification
     pub fn classify(self) -> Result<ClassificationResult, String> {
-        use log::{info, debug};
-        
+        use log::{debug, info};
+
         let media_type = self.media_type.ok_or("Media type not set")?;
         let input_path = self.input_path.ok_or("Input path not set")?;
-        let metadata = self.metadata.unwrap_or(JsonValue::Object(serde_json::Map::new()));
+        let metadata = self
+            .metadata
+            .unwrap_or(JsonValue::Object(serde_json::Map::new()));
         let force_category = self.force_category.clone();
         let force_type = self.force_type.clone();
-        
-        info!("🔍 Starting classification for media type: {:?}", media_type);
+
+        info!(
+            "🔍 Starting classification for media type: {:?}",
+            media_type
+        );
         info!("📁 Input path: {}", input_path);
-        debug!("📊 Input metadata: {}", serde_json::to_string_pretty(&metadata).unwrap_or_else(|_| "Invalid JSON".to_string()));
-        
+        debug!(
+            "📊 Input metadata: {}",
+            serde_json::to_string_pretty(&metadata).unwrap_or_else(|_| "Invalid JSON".to_string())
+        );
+
         if let Some(ref cat) = force_category {
             info!("🎯 Forced category: {}", cat);
         }
         if let Some(ref typ) = force_type {
             info!("🎯 Forced type: {}", typ);
         }
-        
+
         // Determine category and type
-        let (category, source_type, media_metadata) = if let (Some(cat), Some(typ)) = (force_category.clone(), force_type.clone()) {
-            // Use forced values
-            info!("✅ Using forced category and type");
-            (Some(cat), Some(typ), metadata)
-        } else if let Some(cat) = force_category {
-            // Only category forced, determine type from media module
-            info!("⚡ Category forced, auto-detecting type from media module");
-            let (_, source_type, media_metadata) = Self::classify_with_media_module_static(&media_type, &input_path, &metadata)?;
-            (Some(cat), source_type, media_metadata)
-        } else {
-            // Auto-classify using media module
-            info!("🤖 Auto-classifying using media module");
-            Self::classify_with_media_module_static(&media_type, &input_path, &metadata)?
-        };
-        
+        let (category, source_type, media_metadata) =
+            if let (Some(cat), Some(typ)) = (force_category.clone(), force_type.clone()) {
+                // Use forced values
+                info!("✅ Using forced category and type");
+                (Some(cat), Some(typ), metadata)
+            } else if let Some(cat) = force_category {
+                // Only category forced, determine type from media module
+                info!("⚡ Category forced, auto-detecting type from media module");
+                let (_, source_type, media_metadata) =
+                    Self::classify_with_media_module_static(&media_type, &input_path, &metadata)?;
+                (Some(cat), source_type, media_metadata)
+            } else {
+                // Auto-classify using media module
+                info!("🤖 Auto-classifying using media module");
+                Self::classify_with_media_module_static(&media_type, &input_path, &metadata)?
+            };
+
         if let Some(ref cat) = category {
             info!("📂 Determined category: {}", cat);
         }
         if let Some(ref src) = source_type {
             info!("🏷️  Determined source type: {}", src);
         }
-        
+
         // Generate tracker mappings
         info!("🎪 Generating tracker mappings...");
-        let tracker_mappings = Self::generate_tracker_mappings(&category, &source_type, &media_metadata)?;
-        
-        info!("✅ Classification complete! Found {} tracker mappings:", tracker_mappings.len());
+        let tracker_mappings =
+            Self::generate_tracker_mappings(&category, &source_type, &media_metadata)?;
+
+        info!(
+            "✅ Classification complete! Found {} tracker mappings:",
+            tracker_mappings.len()
+        );
         for (tracker, mapping) in &tracker_mappings {
             info!("  📍 {}: {}", tracker, mapping);
         }
-        
+
         Ok(ClassificationResult {
             category,
             source_type,
@@ -124,7 +142,7 @@ impl MediaClassification {
             tracker_mappings,
         })
     }
-    
+
     /// Classify using the appropriate media module
     fn classify_with_media_module_static(
         media_type: &MediaType,
@@ -132,35 +150,48 @@ impl MediaClassification {
         metadata: &JsonValue,
     ) -> Result<(Option<String>, Option<String>, JsonValue), String> {
         use log::debug;
-        
+
         // First try to use centralized classification rules
         use crate::classification::rules;
-        
+
         // Create enriched metadata with input path info
         let mut enriched_metadata = metadata.clone();
         if let Some(obj) = enriched_metadata.as_object_mut() {
             // Ensure we have input_path
             if !obj.contains_key("input_path") {
-                obj.insert("input_path".to_string(), JsonValue::String(input_path.to_string()));
+                obj.insert(
+                    "input_path".to_string(),
+                    JsonValue::String(input_path.to_string()),
+                );
             }
-            
+
             // Extract filename from path if not already present
             if !obj.contains_key("filename") {
                 if let Some(filename) = std::path::Path::new(input_path).file_name() {
-                    obj.insert("filename".to_string(), JsonValue::String(filename.to_string_lossy().to_string()));
+                    obj.insert(
+                        "filename".to_string(),
+                        JsonValue::String(filename.to_string_lossy().to_string()),
+                    );
                 }
             }
-            
+
             // Extract extension if not already present
             if !obj.contains_key("extension") {
                 if let Some(ext) = std::path::Path::new(input_path).extension() {
-                    obj.insert("extension".to_string(), JsonValue::String(ext.to_string_lossy().to_string()));
+                    obj.insert(
+                        "extension".to_string(),
+                        JsonValue::String(ext.to_string_lossy().to_string()),
+                    );
                 }
             }
         }
-        
-        debug!("Enriched metadata for classification: {}", serde_json::to_string_pretty(&enriched_metadata).unwrap_or_else(|_| "Invalid JSON".to_string()));
-        
+
+        debug!(
+            "Enriched metadata for classification: {}",
+            serde_json::to_string_pretty(&enriched_metadata)
+                .unwrap_or_else(|_| "Invalid JSON".to_string())
+        );
+
         // Use centralized rules for classification
         let (category, source_type) = match media_type {
             MediaType::Video(_) => {
@@ -186,7 +217,7 @@ impl MediaClassification {
                 (cat, None) // Hobby files don't have source types
             }
         };
-        
+
         // If centralized rules succeeded, use them
         if category.is_some() {
             Ok((category, source_type, enriched_metadata))
@@ -202,16 +233,14 @@ impl MediaClassification {
                 MediaType::Ebook(_) => {
                     crate::media::ebook::classify_for_upload(input_path, metadata)
                 }
-                MediaType::Game(_) => {
-                    crate::media::game::classify_for_upload(input_path, metadata)
-                }
+                MediaType::Game(_) => crate::media::game::classify_for_upload(input_path, metadata),
                 MediaType::Hobby(_) => {
                     crate::media::hobby::classify_for_upload(input_path, metadata)
                 }
             }
         }
     }
-    
+
     /// Generate tracker-specific mappings
     fn generate_tracker_mappings(
         category: &Option<String>,
@@ -219,52 +248,50 @@ impl MediaClassification {
         metadata: &JsonValue,
     ) -> Result<Vec<(String, String)>, String> {
         let mut mappings = Vec::new();
-        
+
         // Generate Seedpool mapping
         if let Some(cat) = category {
             use crate::trackers::seedpool::create_torrent_info_from_media_strings;
-            
-            if let Ok(torrent_info) = create_torrent_info_from_media_strings(
-                Some(cat),
-                source_type.as_deref()
-            ) {
+
+            if let Ok(torrent_info) =
+                create_torrent_info_from_media_strings(Some(cat), source_type.as_deref())
+            {
                 mappings.push((
                     "Seedpool".to_string(),
-                    format!("{} ({}) → {} ({})", 
-                        torrent_info.category.name(), 
+                    format!(
+                        "{} ({}) → {} ({})",
+                        torrent_info.category.name(),
                         torrent_info.category_code(),
                         torrent_info.torrent_type.name(),
                         torrent_info.type_code()
-                    )
+                    ),
                 ));
             }
         }
-        
+
         // Generate TorrentLeech mapping for video
         if let Some(cat) = category {
             if cat.contains("VideoCategory") {
                 if cat.contains("TvShow") {
-                    mappings.push((
-                        "TorrentLeech".to_string(),
-                        "TV Shows".to_string()
-                    ));
+                    mappings.push(("TorrentLeech".to_string(), "TV Shows".to_string()));
                 } else if cat.contains("Movie") {
                     // Check resolution from metadata
-                    let resolution = metadata.get("resolution")
+                    let resolution = metadata
+                        .get("resolution")
                         .and_then(|r| r.as_str())
                         .unwrap_or("");
                     let is_4k = resolution.contains("2160") || resolution.contains("4K");
-                    
+
                     mappings.push((
                         "TorrentLeech".to_string(),
-                        if is_4k { "Movies/4K" } else { "Movies/HD" }.to_string()
+                        if is_4k { "Movies/4K" } else { "Movies/HD" }.to_string(),
                     ));
                 }
             }
         }
-        
+
         // TODO: Add other tracker mappings as needed
-        
+
         Ok(mappings)
     }
 }

@@ -1,7 +1,7 @@
 // Deluge client implementation
 
-use crate::core::DelugeConfig;
 use super::{TorrentClient, TorrentInfo};
+use crate::core::DelugeConfig;
 use reqwest::blocking::Client;
 
 pub struct DelugeClient {
@@ -21,7 +21,7 @@ impl DelugeClient {
         deluge_client.login()?;
         Ok(deluge_client)
     }
-    
+
     fn login(&mut self) -> Result<(), String> {
         // TODO: Implement Deluge login
         // Extract from torrent.rs add_torrent_to_deluge
@@ -34,17 +34,17 @@ impl TorrentClient for DelugeClient {
         // TODO: Implement add torrent
         unimplemented!("Add torrent to Deluge")
     }
-    
+
     fn get_torrent_info(&self, hash: &str) -> Result<TorrentInfo, String> {
         // TODO: Implement get torrent info
         unimplemented!("Get torrent info from Deluge")
     }
-    
+
     fn remove_torrent(&self, hash: &str, delete_files: bool) -> Result<(), String> {
         // TODO: Implement remove torrent
         unimplemented!("Remove torrent from Deluge")
     }
-    
+
     fn list_torrents(&self) -> Result<Vec<TorrentInfo>, String> {
         // TODO: Implement list torrents
         unimplemented!("List torrents from Deluge")

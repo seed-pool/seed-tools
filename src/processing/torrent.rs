@@ -1,14 +1,14 @@
+use log::{error, info};
+use reqwest::blocking::ClientBuilder;
+use reqwest::blocking::{multipart::Form, Client};
+use reqwest::cookie::Jar;
+use serde_json::json;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
-use log::{info, error};
-use reqwest::blocking::{multipart::Form, Client};
-use reqwest::blocking::ClientBuilder;
-use reqwest::cookie::Jar;
-use serde_json::json;
 
-use crate::core::{QbittorrentConfig, DelugeConfig, PathsConfig};
+use crate::core::{DelugeConfig, PathsConfig, QbittorrentConfig};
 use crate::processing::naming::generate_release_name;
 
 /// Create a torrent file using mkbrr
@@ -19,8 +19,12 @@ pub fn create_torrent(
     mkbrr_path: &str,
     stripshit_from_videos: bool,
 ) -> Result<String, String> {
-    fs::create_dir_all(torrent_dir)
-        .map_err(|e| format!("Failed to create torrent directory '{}': {}", torrent_dir, e))?;
+    fs::create_dir_all(torrent_dir).map_err(|e| {
+        format!(
+            "Failed to create torrent directory '{}': {}",
+            torrent_dir, e
+        )
+    })?;
 
     let base_name = Path::new(input_path)
         .file_name()
@@ -38,9 +42,12 @@ pub fn create_torrent(
     let mut command = Command::new(mkbrr_path);
     command.args(&[
         "create",
-        "-t", announce_url,
-        "-o", &torrent_file,
-        "--source", "seedpool.org",
+        "-t",
+        announce_url,
+        "-o",
+        &torrent_file,
+        "--source",
+        "seedpool.org",
         input_path,
     ]);
 
@@ -53,7 +60,9 @@ pub fn create_torrent(
     }
 
     // Execute the mkbrr command
-    let output = command.output().map_err(|e| format!("Failed to run mkbrr: {}", e))?;
+    let output = command
+        .output()
+        .map_err(|e| format!("Failed to run mkbrr: {}", e))?;
 
     if !output.stdout.is_empty() {
         info!("mkbrr stdout:\n{}", String::from_utf8_lossy(&output.stdout));
@@ -99,7 +108,9 @@ pub fn add_torrent_to_qbittorrent(
         .map_err(|e| format!("Failed to send login request to qBittorrent: {}", e))?;
 
     let login_status = login_response.status();
-    let login_body = login_response.text().map_err(|e| format!("Failed to read login response body: {}", e))?;
+    let login_body = login_response
+        .text()
+        .map_err(|e| format!("Failed to read login response body: {}", e))?;
 
     if !login_status.is_success() {
         return Err(format!(
@@ -140,7 +151,9 @@ pub fn add_torrent_to_qbittorrent(
         .map_err(|e| format!("Failed to send add torrent request to qBittorrent: {}", e))?;
 
     let status = upload_response.status();
-    let response_body = upload_response.text().unwrap_or_else(|_| "Failed to read response body".to_string());
+    let response_body = upload_response
+        .text()
+        .unwrap_or_else(|_| "Failed to read response body".to_string());
     info!("qBittorrent API Response [add]: {}", response_body);
 
     if !status.is_success() || response_body.to_lowercase().contains("fail") {
@@ -161,10 +174,17 @@ pub fn add_torrent_to_deluge(
     _is_folder: bool,
     _paths_config: &PathsConfig,
 ) -> Result<(), String> {
-    info!("Adding torrent '{}' to Deluge at '{}'", torrent_file, config.webui_url);
+    info!(
+        "Adding torrent '{}' to Deluge at '{}'",
+        torrent_file, config.webui_url
+    );
 
-    let absolute_torrent_file = fs::canonicalize(torrent_file)
-        .map_err(|e| format!("Failed to resolve absolute path for torrent file '{}': {}", torrent_file, e))?;
+    let absolute_torrent_file = fs::canonicalize(torrent_file).map_err(|e| {
+        format!(
+            "Failed to resolve absolute path for torrent file '{}': {}",
+            torrent_file, e
+        )
+    })?;
 
     let cookie_jar = Arc::new(Jar::default());
     let client = ClientBuilder::new()

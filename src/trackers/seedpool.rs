@@ -311,15 +311,50 @@ impl SeedpoolType {
 
     pub fn all_types() -> Vec<(u8, &'static str)> {
         vec![
-            (1, "Full Disc"), (2, "Remux"), (3, "Encode"), (4, "WEB-DL"), (5, "WEBRip"),
-            (6, "HDTV"), (7, "UHD.BluRay"), (8, "BluRay"), (9, "E-Book"), (10, "WEB"),
-            (11, "FLAC"), (12, "Foreign"), (13, "MP3"), (14, "Windows"), (15, "NSW Game"),
-            (16, "PC Game"), (17, "Other"), (19, "Sports"), (20, "E-Pub"), (21, "Audiobook"),
-            (22, "Movie"), (23, "4K Movie"), (24, "TV Show"), (25, "Linux Game"), (26, "BoxSet"),
-            (27, "Anime"), (28, "PS4"), (29, "Music Pack"), (30, "FLAC Pack"), (31, "MP3 Pack"),
-            (32, "Education"), (33, "Linux"), (34, "macOS"), (35, "Xbox"), (36, "Upscale"),
-            (37, "Dubbed"), (38, "3D Print"), (39, "JPTV"), (40, "Comic"), (41, "Magazine"),
-            (42, "Newspaper"), (43, "Karaoke"), (44, "Wii"), (45, "NES"),
+            (1, "Full Disc"),
+            (2, "Remux"),
+            (3, "Encode"),
+            (4, "WEB-DL"),
+            (5, "WEBRip"),
+            (6, "HDTV"),
+            (7, "UHD.BluRay"),
+            (8, "BluRay"),
+            (9, "E-Book"),
+            (10, "WEB"),
+            (11, "FLAC"),
+            (12, "Foreign"),
+            (13, "MP3"),
+            (14, "Windows"),
+            (15, "NSW Game"),
+            (16, "PC Game"),
+            (17, "Other"),
+            (19, "Sports"),
+            (20, "E-Pub"),
+            (21, "Audiobook"),
+            (22, "Movie"),
+            (23, "4K Movie"),
+            (24, "TV Show"),
+            (25, "Linux Game"),
+            (26, "BoxSet"),
+            (27, "Anime"),
+            (28, "PS4"),
+            (29, "Music Pack"),
+            (30, "FLAC Pack"),
+            (31, "MP3 Pack"),
+            (32, "Education"),
+            (33, "Linux"),
+            (34, "macOS"),
+            (35, "Xbox"),
+            (36, "Upscale"),
+            (37, "Dubbed"),
+            (38, "3D Print"),
+            (39, "JPTV"),
+            (40, "Comic"),
+            (41, "Magazine"),
+            (42, "Newspaper"),
+            (43, "Karaoke"),
+            (44, "Wii"),
+            (45, "NES"),
         ]
     }
 }
@@ -333,7 +368,10 @@ pub struct SeedpoolTorrentInfo {
 
 impl SeedpoolTorrentInfo {
     pub fn new(category: SeedpoolCategory, torrent_type: SeedpoolType) -> Self {
-        Self { category, torrent_type }
+        Self {
+            category,
+            torrent_type,
+        }
     }
 
     pub fn category_code(&self) -> u8 {
@@ -358,9 +396,11 @@ pub fn parse_seedpool_category_type(arg: &str) -> Result<SeedpoolTorrentInfo, St
         ));
     }
 
-    let category_code: u8 = arg[0..2].parse()
+    let category_code: u8 = arg[0..2]
+        .parse()
         .map_err(|_| format!("Invalid category code in argument: {}", &arg[0..2]))?;
-    let type_code: u8 = arg[2..4].parse()
+    let type_code: u8 = arg[2..4]
+        .parse()
         .map_err(|_| format!("Invalid type code in argument: {}", &arg[2..4]))?;
 
     let category = SeedpoolCategory::from_code(category_code)
@@ -377,17 +417,18 @@ pub fn print_seedpool_categories_and_types() {
     for (code, name) in SeedpoolCategory::all_categories() {
         println!("  {:02} = {}", code, name);
     }
-    
+
     println!("\nAvailable Seedpool Types:");
     let types = SeedpoolType::all_types();
     for chunk in types.chunks(5) {
-        let line = chunk.iter()
+        let line = chunk
+            .iter()
             .map(|(code, name)| format!("{:02} = {}", code, name))
             .collect::<Vec<_>>()
             .join(", ");
         println!("  {}", line);
     }
-    
+
     println!("\nExamples:");
     println!("  -c 0740 = E-Book (07) + Comic (40)");
     println!("  -c 1416 = Games (14) + PC Game (16)");
@@ -399,78 +440,88 @@ impl super::TorrentInfo for SeedpoolTorrentInfo {
     fn category_code(&self) -> u8 {
         self.category.to_code()
     }
-    
+
     fn type_code(&self) -> u8 {
         self.torrent_type.to_code()
     }
-    
+
     fn description(&self) -> String {
         format!("{} - {}", self.category.name(), self.torrent_type.name())
     }
-    
+
     fn category_name(&self) -> &'static str {
         self.category.name()
     }
-    
+
     fn type_name(&self) -> &'static str {
         self.torrent_type.name()
     }
-    
+
     fn is_ebook_category(&self) -> bool {
         matches!(self.category, SeedpoolCategory::Ebook)
     }
-    
+
     fn is_game_category(&self) -> bool {
-        matches!(self.category, SeedpoolCategory::Games | SeedpoolCategory::Retro)
+        matches!(
+            self.category,
+            SeedpoolCategory::Games | SeedpoolCategory::Retro
+        )
     }
-    
+
     fn is_audio_category(&self) -> bool {
         matches!(self.category, SeedpoolCategory::Music)
     }
-    
+
     fn is_video_category(&self) -> bool {
-        matches!(self.category, 
-            SeedpoolCategory::Movie | 
-            SeedpoolCategory::TvShow | 
-            SeedpoolCategory::Movie4K | 
-            SeedpoolCategory::Anime | 
-            SeedpoolCategory::JPTV
+        matches!(
+            self.category,
+            SeedpoolCategory::Movie
+                | SeedpoolCategory::TvShow
+                | SeedpoolCategory::Movie4K
+                | SeedpoolCategory::Anime
+                | SeedpoolCategory::JPTV
         )
     }
-    
+
     fn is_audiobook_category(&self) -> bool {
         matches!(self.category, SeedpoolCategory::Audiobook)
     }
-    
+
     fn is_hobby_category(&self) -> bool {
-        matches!(self.category, SeedpoolCategory::Hobby | SeedpoolCategory::Education)
+        matches!(
+            self.category,
+            SeedpoolCategory::Hobby | SeedpoolCategory::Education
+        )
     }
-    
+
     fn is_sports_category(&self) -> bool {
         matches!(self.category, SeedpoolCategory::Sports)
     }
-    
+
     fn is_application_category(&self) -> bool {
-        matches!(self.category, 
-            SeedpoolCategory::WindowsApps | 
-            SeedpoolCategory::LinuxApps | 
-            SeedpoolCategory::MacApps
+        matches!(
+            self.category,
+            SeedpoolCategory::WindowsApps | SeedpoolCategory::LinuxApps | SeedpoolCategory::MacApps
         )
     }
-    
+
     fn is_other_category(&self) -> bool {
         matches!(self.category, SeedpoolCategory::Other)
     }
 }
 
-use reqwest::blocking::Client;
-use log::info;
 use crate::processing::naming::generate_release_name;
+use crate::trackers::common::{
+    TrackerApi, TrackerConfig, UploadData as TrackerUploadData, UploadResponse,
+};
+use async_trait::async_trait;
+use log::info;
+use reqwest::blocking::Client;
 
 /// Create field mappings for Seedpool upload forms
 pub fn create_seedpool_field_mapping() -> crate::processing::upload::TrackerFieldMapping {
     let mut mapping = crate::processing::upload::TrackerFieldMapping::new();
-    
+
     // Field mappings (internal name -> Seedpool form field name)
     mapping
         .add_mapping("name", "name")
@@ -487,14 +538,14 @@ pub fn create_seedpool_field_mapping() -> crate::processing::upload::TrackerFiel
         .add_mapping("season", "season_number")
         .add_mapping("episode", "episode_number")
         .add_mapping("resolution", "resolution_id");
-    
+
     // Required fields for Seedpool
     mapping
         .add_required("name")
         .add_required("category_id")
         .add_required("type_id")
         .add_required("torrent");
-    
+
     // Optional fields
     mapping
         .add_optional("description")
@@ -507,31 +558,36 @@ pub fn create_seedpool_field_mapping() -> crate::processing::upload::TrackerFiel
         .add_optional("season_number")
         .add_optional("episode_number")
         .add_optional("resolution_id");
-    
+
     mapping
 }
 
 /// Check for duplicates on Seedpool tracker
-/// 
+///
 /// # Arguments
 /// * `name` - The release name to check
 /// * `seedpool_api_key` - The Seedpool API key
-/// 
+///
 /// # Returns
 /// * `Ok(Some(download_link))` - If a duplicate is found
 /// * `Ok(None)` - If no duplicate is found
 /// * `Err(String)` - If an error occurs
-pub fn check_seedpool_dupes(
-    name: &str,
-    seedpool_api_key: &str,
-) -> Result<Option<String>, String> {
+pub fn check_seedpool_dupes(name: &str, seedpool_api_key: &str) -> Result<Option<String>, String> {
     let client = Client::new();
 
-    info!("Checking Seedpool for existing torrent with name: '{}'", name);
+    info!(
+        "Checking Seedpool for existing torrent with name: '{}'",
+        name
+    );
 
     // Load the seedpool config to check for domain override
-    let domain = if let Ok(config) = crate::utils::load_tracker_config::<crate::core::SeedpoolConfig>("seedpool") {
-        config.settings.domain_override.unwrap_or_else(|| "seedpool.org".to_string())
+    let domain = if let Ok(config) =
+        crate::utils::load_tracker_config::<crate::core::SeedpoolConfig>("seedpool")
+    {
+        config
+            .settings
+            .domain_override
+            .unwrap_or_else(|| "seedpool.org".to_string())
     } else {
         "seedpool.org".to_string()
     };
@@ -562,7 +618,9 @@ pub fn check_seedpool_dupes(
         ));
     }
 
-    let raw_response = search_response.text().unwrap_or_else(|_| "Failed to read response body".to_string());
+    let raw_response = search_response
+        .text()
+        .unwrap_or_else(|_| "Failed to read response body".to_string());
     info!("Seedpool API Response: {}", raw_response);
 
     let search_results: serde_json::Value = serde_json::from_str(&raw_response)
@@ -578,8 +636,13 @@ pub fn check_seedpool_dupes(
 
                 // Check for an exact match with the search term
                 if result_title == search_term {
-                    if let Some(download_link) = attributes.get("download_link").and_then(|d| d.as_str()) {
-                        info!("Duplicate found for '{}'. Download link: {}", name, download_link);
+                    if let Some(download_link) =
+                        attributes.get("download_link").and_then(|d| d.as_str())
+                    {
+                        info!(
+                            "Duplicate found for '{}'. Download link: {}",
+                            name, download_link
+                        );
                         return Ok(Some(download_link.to_string()));
                     }
                 } else {
@@ -608,10 +671,10 @@ pub fn create_torrent_info_from_media_strings(
                 "Anime" => SeedpoolCategory::Anime,
                 "Sports" => SeedpoolCategory::Sports,
                 "Documentary" => SeedpoolCategory::Movie, // Map to Movie
-                "Concert" => SeedpoolCategory::Music,      // Map to Music
+                "Concert" => SeedpoolCategory::Music,     // Map to Music
                 _ => SeedpoolCategory::Other,
             };
-            
+
             let seedpool_type = if let Some(type_str) = media_source_type {
                 if let Some(type_name) = type_str.strip_prefix("VideoSourceType::") {
                     match (cat_name, type_name) {
@@ -641,7 +704,7 @@ pub fn create_torrent_info_from_media_strings(
                     _ => SeedpoolType::Other,
                 }
             };
-            
+
             (seedpool_cat, seedpool_type)
         }
         Some(cat_str) if cat_str.starts_with("AudioCategory::") => {
@@ -654,7 +717,9 @@ pub fn create_torrent_info_from_media_strings(
         Some(cat_str) if cat_str.starts_with("EbookCategory::") => {
             let cat_name = cat_str.strip_prefix("EbookCategory::").unwrap();
             match cat_name {
-                "Technical" | "Educational" | "Science" => (SeedpoolCategory::Education, SeedpoolType::Education),
+                "Technical" | "Educational" | "Science" => {
+                    (SeedpoolCategory::Education, SeedpoolType::Education)
+                }
                 "Cookbook" | "Travel" => (SeedpoolCategory::Hobby, SeedpoolType::Other),
                 "Comic" => (SeedpoolCategory::Ebook, SeedpoolType::EBook),
                 _ => (SeedpoolCategory::Ebook, SeedpoolType::EPub), // Default to EPub
@@ -692,6 +757,190 @@ pub fn create_torrent_info_from_media_strings(
         }
         _ => (SeedpoolCategory::Other, SeedpoolType::Other),
     };
-    
+
     Ok(SeedpoolTorrentInfo::new(category, torrent_type))
+}
+
+/// Seedpool API implementation
+pub struct SeedpoolApi {
+    config: TrackerConfig,
+    client: reqwest::Client,
+}
+
+impl SeedpoolApi {
+    /// Create a new SeedpoolApi instance
+    pub fn new(config: TrackerConfig) -> Self {
+        Self {
+            config,
+            client: reqwest::Client::new(),
+        }
+    }
+
+    /// Create SeedpoolApi from SeedpoolConfig
+    pub fn from_seedpool_config(seedpool_config: &crate::core::SeedpoolConfig) -> Self {
+        let config = TrackerConfig {
+            name: "seedpool".to_string(),
+            enabled: seedpool_config.general.enabled,
+            api_url: seedpool_config.settings.upload_url.clone(),
+            announce_url: seedpool_config.settings.announce_url.clone(),
+            api_key: seedpool_config.general.api_key.clone(),
+            username: seedpool_config.general.username.clone(),
+            passkey: seedpool_config.general.passkey.clone(),
+        };
+
+        Self::new(config)
+    }
+}
+
+#[async_trait]
+impl TrackerApi for SeedpoolApi {
+    async fn upload(
+        &self,
+        upload_data: &TrackerUploadData,
+    ) -> crate::core::error::Result<UploadResponse> {
+        use crate::utils::http::extract_torrent_id;
+        use reqwest::multipart::Form;
+
+        info!("Uploading torrent to Seedpool: {}", upload_data.title);
+
+        // Build multipart form
+        let mut form = Form::new()
+            .text("name", upload_data.title.clone())
+            .text("category_id", upload_data.category.clone())
+            .text("description", upload_data.description.clone())
+            .text("anonymous", if upload_data.anonymous { "1" } else { "0" })
+            .text(
+                "tmdb",
+                upload_data
+                    .tmdb_id
+                    .map(|id| id.to_string())
+                    .unwrap_or("0".to_string()),
+            )
+            .text(
+                "imdb",
+                upload_data.imdb_id.clone().unwrap_or("0".to_string()),
+            )
+            .text(
+                "tvdb",
+                upload_data
+                    .tvdb_id
+                    .map(|id| id.to_string())
+                    .unwrap_or("0".to_string()),
+            )
+            .text("mal", "0")
+            .text("igdb", "0")
+            .text("stream", "0")
+            .text("sd", "0");
+
+        // Add type_id if present
+        if let Some(type_id) = &upload_data.type_id {
+            form = form.text("type_id", type_id.clone());
+        }
+
+        // Add torrent file
+        form = form.part(
+            "torrent",
+            reqwest::multipart::Part::bytes(upload_data.torrent_file.clone())
+                .file_name("upload.torrent")
+                .mime_str("application/x-bittorrent")?,
+        );
+
+        // Add mediainfo if present
+        if let Some(mediainfo) = &upload_data.mediainfo {
+            form = form.text("mediainfo", mediainfo.clone());
+        }
+
+        // Add NFO if present
+        if let Some(nfo) = &upload_data.nfo {
+            form = form.part(
+                "nfo",
+                reqwest::multipart::Part::text(nfo.clone()).file_name("release.nfo"),
+            );
+        }
+
+        // Generate keywords from title
+        let keywords = upload_data
+            .title
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|s| !s.is_empty() && s.len() > 2)
+            .map(|s| s.to_lowercase())
+            .collect::<Vec<_>>()
+            .join(" ");
+        form = form.text("keywords", keywords);
+
+        // Send the upload request
+        let response = self
+            .client
+            .post(&self.config.api_url)
+            .header("Authorization", format!("Bearer {}", self.config.api_key))
+            .multipart(form)
+            .send()
+            .await?;
+
+        let status = response.status();
+        let response_text = response.text().await?;
+
+        if !status.is_success() {
+            return Ok(UploadResponse {
+                success: false,
+                torrent_id: None,
+                torrent_url: None,
+                error_message: Some(format!(
+                    "Upload failed with status {}: {}",
+                    status, response_text
+                )),
+            });
+        }
+
+        // Extract torrent ID from response
+        match extract_torrent_id(&response_text) {
+            Ok(torrent_id_str) => {
+                let torrent_id: u32 = torrent_id_str.parse().map_err(|e| {
+                    crate::core::error::SeedError::Parse(format!("Invalid torrent ID: {}", e))
+                })?;
+
+                info!(
+                    "Successfully uploaded to Seedpool. Torrent ID: {}",
+                    torrent_id
+                );
+
+                Ok(UploadResponse {
+                    success: true,
+                    torrent_id: Some(torrent_id),
+                    torrent_url: Some(format!("https://seedpool.org/torrents/{}", torrent_id)),
+                    error_message: None,
+                })
+            }
+            Err(e) => {
+                log::warn!("Upload succeeded but failed to extract torrent ID: {}", e);
+                Ok(UploadResponse {
+                    success: true,
+                    torrent_id: None,
+                    torrent_url: None,
+                    error_message: Some(
+                        "Upload successful but couldn't extract torrent ID".to_string(),
+                    ),
+                })
+            }
+        }
+    }
+
+    async fn check_duplicate(&self, title: &str) -> crate::core::error::Result<bool> {
+        info!("Checking Seedpool for duplicates of: {}", title);
+
+        // Use the existing duplicate checking function
+        match check_seedpool_dupes(title, &self.config.api_key) {
+            Ok(Some(_download_link)) => Ok(true),
+            Ok(None) => Ok(false),
+            Err(e) => Err(crate::core::error::SeedError::Other(e)),
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        "seedpool"
+    }
+
+    fn config(&self) -> &TrackerConfig {
+        &self.config
+    }
 }

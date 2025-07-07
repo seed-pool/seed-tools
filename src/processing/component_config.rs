@@ -38,9 +38,7 @@ pub struct MediaInfoConfig {
 
 impl Default for MediaInfoConfig {
     fn default() -> Self {
-        Self {
-            enabled: true,
-        }
+        Self { enabled: true }
     }
 }
 
@@ -52,9 +50,7 @@ pub struct NfoConfig {
 
 impl Default for NfoConfig {
     fn default() -> Self {
-        Self {
-            enabled: true,
-        }
+        Self { enabled: true }
     }
 }
 
@@ -62,7 +58,7 @@ impl Default for NfoConfig {
 #[derive(Debug, Clone)]
 pub struct SampleConfig {
     pub enabled: bool,
-    pub duration: u32, // Duration in seconds
+    pub duration: u32,           // Duration in seconds
     pub start_time: Option<u32>, // Start time in seconds (None = auto)
 }
 
@@ -84,9 +80,7 @@ pub struct CoverArtConfig {
 
 impl Default for CoverArtConfig {
     fn default() -> Self {
-        Self {
-            enabled: true,
-        }
+        Self { enabled: true }
     }
 }
 

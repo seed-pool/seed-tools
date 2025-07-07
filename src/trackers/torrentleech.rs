@@ -93,12 +93,10 @@ impl TorrentLeechCategory {
     }
 }
 
-
-
 /// Create field mappings for TorrentLeech upload forms
 pub fn create_torrentleech_field_mapping() -> crate::processing::upload::TrackerFieldMapping {
     let mut mapping = crate::processing::upload::TrackerFieldMapping::new();
-    
+
     // Field mappings (internal name -> TorrentLeech form field name)
     mapping
         .add_mapping("name", "name")
@@ -108,20 +106,20 @@ pub fn create_torrentleech_field_mapping() -> crate::processing::upload::Tracker
         .add_mapping("nfo", "nfo")
         .add_mapping("imdb", "imdbID")
         .add_mapping("anonymous", "anonymous");
-    
+
     // Required fields for TorrentLeech
     mapping
         .add_required("name")
         .add_required("categoryID")
         .add_required("torrent");
-    
+
     // Optional fields
     mapping
         .add_optional("descr")
         .add_optional("nfo")
         .add_optional("imdbID")
         .add_optional("anonymous");
-    
+
     mapping
 }
 
@@ -136,18 +134,18 @@ pub fn get_category_from_media_strings(
             let source_name = media_source_type
                 .and_then(|s| s.strip_prefix("VideoSourceType::"))
                 .unwrap_or("");
-            
+
             match (cat_name, source_name) {
-                ("Movie", "UHDBluRay") => Ok(47),          // Movies 4K
+                ("Movie", "UHDBluRay") => Ok(47),                   // Movies 4K
                 ("Movie", "BluRay") | ("Movie", "Remux") => Ok(13), // Movies BluRay
-                ("Movie", "DVD") => Ok(12),                // Movies DVDRip
+                ("Movie", "DVD") => Ok(12),                         // Movies DVDRip
                 ("Movie", "WebDL") | ("Movie", "WebRip") => Ok(37), // Movies Web-DL
-                ("Movie", _) => Ok(14),                    // Movies HD
-                ("TvShow", _) | ("Documentary", _) => Ok(32), // TV Shows
-                ("Sports", _) => Ok(30),                   // TV Sports
-                ("Anime", _) => Ok(34),                    // TV Animation
-                ("Concert", _) => Ok(17),                  // Music
-                _ => Ok(0),                                // Other
+                ("Movie", _) => Ok(14),                             // Movies HD
+                ("TvShow", _) | ("Documentary", _) => Ok(32),       // TV Shows
+                ("Sports", _) => Ok(30),                            // TV Sports
+                ("Anime", _) => Ok(34),                             // TV Animation
+                ("Concert", _) => Ok(17),                           // Music
+                _ => Ok(0),                                         // Other
             }
         }
         Some(cat_str) if cat_str.starts_with("AudioCategory::") => {
@@ -163,18 +161,18 @@ pub fn get_category_from_media_strings(
         Some(cat_str) if cat_str.starts_with("GameCategory::") => {
             let cat_name = cat_str.strip_prefix("GameCategory::").unwrap();
             match cat_name {
-                "PS4Game" | "PS5Game" => Ok(40),   // Games PS
-                "XboxGame" => Ok(41),              // Games Xbox
-                "NintendoSwitch" => Ok(39),        // Games Nintendo
-                "Mobile" => Ok(46),                // Mobile
-                _ => Ok(42),                       // Games (PC)
+                "PS4Game" | "PS5Game" => Ok(40), // Games PS
+                "XboxGame" => Ok(41),            // Games Xbox
+                "NintendoSwitch" => Ok(39),      // Games Nintendo
+                "Mobile" => Ok(46),              // Mobile
+                _ => Ok(42),                     // Games (PC)
             }
         }
         Some(cat_str) if cat_str.starts_with("HobbyCategory::") => {
             let cat_name = cat_str.strip_prefix("HobbyCategory::").unwrap();
             match cat_name {
                 "Documents" | "Tutorial" => Ok(45), // E-Books
-                _ => Ok(0),                        // Other
+                _ => Ok(0),                         // Other
             }
         }
         _ => Ok(0), // Other

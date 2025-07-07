@@ -34,9 +34,11 @@ impl VideoType {
             _ => None,
         }
     }
-    
+
     pub fn all_extensions() -> Vec<&'static str> {
-        vec!["mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "ts", "mpg", "mpeg"]
+        vec![
+            "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "ts", "mpg", "mpeg",
+        ]
     }
 }
 
@@ -61,24 +63,24 @@ pub enum VideoSourceType {
     DVD,
     Remux,
     FullDisc,
-    
+
     // Web sources
     WebDL,
     WebRip,
-    
+
     // TV sources
     HDTV,
     PDTV,
     SDTV,
-    
+
     // Other sources
     Encode,
     Upscale,
-    
+
     // Collection types
     BoxSet,
     SeasonPack,
-    
+
     Unknown,
 }
 
@@ -115,47 +117,52 @@ impl AudioType {
     }
 
     pub fn is_lossless(&self) -> bool {
-        matches!(self, AudioType::Flac | AudioType::Wav | AudioType::Aiff | AudioType::Ape)
+        matches!(
+            self,
+            AudioType::Flac | AudioType::Wav | AudioType::Aiff | AudioType::Ape
+        )
     }
-    
+
     pub fn all_extensions() -> Vec<&'static str> {
-        vec!["mp3", "flac", "wav", "aac", "ogg", "m4a", "wma", "aiff", "ape", "opus"]
+        vec![
+            "mp3", "flac", "wav", "aac", "ogg", "m4a", "wma", "aiff", "ape", "opus",
+        ]
     }
 }
 
 /// Audio content categories
 #[derive(Debug, Clone, PartialEq)]
 pub enum AudioCategory {
-    Album,           // Standard music album
-    Single,          // Single track release
-    EP,              // Extended Play
-    Compilation,     // Various artists compilation
-    Soundtrack,      // Movie/TV/Game soundtrack
-    Live,            // Live performance/concert
-    Bootleg,         // Unofficial recording
-    Podcast,         // Podcast episode(s)
-    Audiobook,       // Audiobook content
-    Mix,             // DJ mix/mixtape
-    Demo,            // Demo recording
-    Remix,           // Remix album/collection
-    Classical,       // Classical music
+    Album,       // Standard music album
+    Single,      // Single track release
+    EP,          // Extended Play
+    Compilation, // Various artists compilation
+    Soundtrack,  // Movie/TV/Game soundtrack
+    Live,        // Live performance/concert
+    Bootleg,     // Unofficial recording
+    Podcast,     // Podcast episode(s)
+    Audiobook,   // Audiobook content
+    Mix,         // DJ mix/mixtape
+    Demo,        // Demo recording
+    Remix,       // Remix album/collection
+    Classical,   // Classical music
     Unknown,
 }
 
 /// Audio source/quality types
 #[derive(Debug, Clone, PartialEq)]
 pub enum AudioSourceType {
-    CD,              // CD rip
-    Vinyl,           // Vinyl rip
-    Web,             // Web download (iTunes, Amazon, etc.)
-    FM,              // FM radio recording
-    DAB,             // Digital radio
-    Cassette,        // Cassette tape
-    Stream,          // Stream rip
-    SBD,             // Soundboard recording
-    AUD,             // Audience recording
-    Studio,          // Studio recording
-    Remaster,        // Remastered version
+    CD,       // CD rip
+    Vinyl,    // Vinyl rip
+    Web,      // Web download (iTunes, Amazon, etc.)
+    FM,       // FM radio recording
+    DAB,      // Digital radio
+    Cassette, // Cassette tape
+    Stream,   // Stream rip
+    SBD,      // Soundboard recording
+    AUD,      // Audience recording
+    Studio,   // Studio recording
+    Remaster, // Remastered version
     Unknown,
 }
 
@@ -215,9 +222,11 @@ impl EbookType {
     pub fn needs_renaming(&self) -> bool {
         matches!(self, EbookType::Epub)
     }
-    
+
     pub fn all_extensions() -> Vec<&'static str> {
-        vec!["epub", "pdf", "cbz", "cbr", "mobi", "azw", "azw3", "lit", "pdb"]
+        vec![
+            "epub", "pdf", "cbz", "cbr", "mobi", "azw", "azw3", "lit", "pdb",
+        ]
     }
 }
 
@@ -244,7 +253,7 @@ pub enum GameType {
     SevenZ,
     Tar,
     TarGz,
-    
+
     // Executable formats
     Exe,
     Msi,
@@ -253,14 +262,14 @@ pub enum GameType {
     Deb,
     Rpm,
     AppImage,
-    
+
     // Console ROMs
     Iso,
     Cso,
     Nsp,
     Xci,
     Cia,
-    
+
     // Platform specific
     Directory, // For games extracted to folders
 }
@@ -290,19 +299,29 @@ impl GameType {
     }
 
     pub fn is_archive(&self) -> bool {
-        matches!(self, GameType::Zip | GameType::Rar | GameType::SevenZ | GameType::Tar | GameType::TarGz)
+        matches!(
+            self,
+            GameType::Zip | GameType::Rar | GameType::SevenZ | GameType::Tar | GameType::TarGz
+        )
     }
 
     pub fn is_executable(&self) -> bool {
-        matches!(self, GameType::Exe | GameType::Msi | GameType::Dmg | GameType::Pkg | 
-                GameType::Deb | GameType::Rpm | GameType::AppImage)
+        matches!(
+            self,
+            GameType::Exe
+                | GameType::Msi
+                | GameType::Dmg
+                | GameType::Pkg
+                | GameType::Deb
+                | GameType::Rpm
+                | GameType::AppImage
+        )
     }
-    
+
     pub fn all_extensions() -> Vec<&'static str> {
         vec![
-            "zip", "rar", "7z", "tar", "tar.gz", "tgz",
-            "exe", "msi", "dmg", "pkg", "deb", "rpm", "appimage",
-            "iso", "cso", "nsp", "xci", "cia"
+            "zip", "rar", "7z", "tar", "tar.gz", "tgz", "exe", "msi", "dmg", "pkg", "deb", "rpm",
+            "appimage", "iso", "cso", "nsp", "xci", "cia",
         ]
     }
 }
@@ -315,7 +334,7 @@ pub enum HobbyType {
     Docx,
     Txt,
     Rtf,
-    
+
     // Images
     Jpg,
     Png,
@@ -323,30 +342,30 @@ pub enum HobbyType {
     Bmp,
     Tiff,
     Svg,
-    
+
     // CAD/3D files
     Dwg,
     Dxf,
     Stl,
     Obj,
     Ply,
-    
+
     // Archives
     Zip,
     Rar,
     SevenZ,
-    
+
     // Data files
     Csv,
     Json,
     Xml,
     Sql,
-    
+
     // Fonts
     Ttf,
     Otf,
     Woff,
-    
+
     Directory, // For collections in folders
 }
 
@@ -383,22 +402,29 @@ impl HobbyType {
     }
 
     pub fn is_image(&self) -> bool {
-        matches!(self, HobbyType::Jpg | HobbyType::Png | HobbyType::Gif | 
-                HobbyType::Bmp | HobbyType::Tiff | HobbyType::Svg)
+        matches!(
+            self,
+            HobbyType::Jpg
+                | HobbyType::Png
+                | HobbyType::Gif
+                | HobbyType::Bmp
+                | HobbyType::Tiff
+                | HobbyType::Svg
+        )
     }
 
     pub fn is_document(&self) -> bool {
-        matches!(self, HobbyType::Doc | HobbyType::Docx | HobbyType::Txt | HobbyType::Rtf)
+        matches!(
+            self,
+            HobbyType::Doc | HobbyType::Docx | HobbyType::Txt | HobbyType::Rtf
+        )
     }
-    
+
     pub fn all_extensions() -> Vec<&'static str> {
         vec![
-            "doc", "docx", "txt", "rtf",
-            "jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "svg",
-            "dwg", "dxf", "stl", "obj", "ply",
-            "zip", "rar", "7z",
-            "csv", "json", "xml", "sql",
-            "ttf", "otf", "woff"
+            "doc", "docx", "txt", "rtf", "jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "svg",
+            "dwg", "dxf", "stl", "obj", "ply", "zip", "rar", "7z", "csv", "json", "xml", "sql",
+            "ttf", "otf", "woff",
         ]
     }
 }
@@ -429,7 +455,6 @@ pub enum MediaType {
     Hobby(HobbyType),
 }
 
-
 impl MediaType {
     pub fn from_extension(ext: &str) -> Option<Self> {
         if let Some(video_type) = VideoType::from_extension(ext) {
@@ -450,7 +475,7 @@ impl MediaType {
     pub fn category(&self) -> &'static str {
         match self {
             MediaType::Video(_) => "video",
-            MediaType::Audio(_) => "audio", 
+            MediaType::Audio(_) => "audio",
             MediaType::Ebook(_) => "ebook",
             MediaType::Game(_) => "game",
             MediaType::Hobby(_) => "hobby",
@@ -479,7 +504,7 @@ pub struct AudioFile {
     pub audio_type: AudioType,
 }
 
-/// Video file representation  
+/// Video file representation
 #[derive(Debug, Clone)]
 pub struct VideoFile {
     pub path: PathBuf,
@@ -710,7 +735,14 @@ pub struct Config {
 impl Config {
     /// Get binary paths from a config instance
     /// Returns (ffmpeg, ffprobe, mkbrr, mediainfo)
-    pub fn get_binary_paths(config: &Config) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+    pub fn get_binary_paths(
+        config: &Config,
+    ) -> (
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
         (
             std::path::PathBuf::from(&config.paths.ffmpeg),
             std::path::PathBuf::from(&config.paths.ffprobe),
@@ -758,7 +790,6 @@ pub struct ImgBBConfig {
     pub imgbb_api_key: String,
 }
 
-
 /// Archive types supported by the extraction system
 #[derive(Debug, Clone, PartialEq)]
 pub enum ArchiveType {
@@ -777,10 +808,10 @@ pub enum ArchiveType {
 /// Layout options for images in descriptions
 #[derive(Debug, Clone, PartialEq)]
 pub enum ImageLayout {
-    Grid2x2,     // For video screenshots (2x2 grid)
-    TwoColumn,   // For ebooks/comics (2 column layout)
+    Grid2x2,      // For video screenshots (2x2 grid)
+    TwoColumn,    // For ebooks/comics (2 column layout)
     SingleColumn, // Single column of images
-    Gallery,     // Gallery style layout
+    Gallery,      // Gallery style layout
 }
 
 /// Format options for custom sections
@@ -795,65 +826,71 @@ pub enum SectionFormat {
 /// Components that can be added to a description
 #[derive(Debug, Clone)]
 pub enum DescriptionComponent {
-    Title { 
-        text: String, 
-        size: u8, 
-        color: String 
+    Title {
+        text: String,
+        size: u8,
+        color: String,
     },
-    Author { 
-        name: String, 
-        color: String 
+    Author {
+        name: String,
+        color: String,
     },
-    Images { 
-        urls: Vec<String>, 
-        layout: ImageLayout, 
-        width: u32 
+    Images {
+        urls: Vec<String>,
+        layout: ImageLayout,
+        width: u32,
     },
-    Synopsis { 
-        text: String 
+    Synopsis {
+        text: String,
     },
-    Sample { 
-        url: String, 
-        filename: String 
+    Sample {
+        url: String,
+        filename: String,
     },
-    Trailer { 
-        url: String, 
-        platform: String 
+    Trailer {
+        url: String,
+        platform: String,
     },
-    CustomSection { 
-        title: String, 
-        content: String, 
-        format: SectionFormat 
+    CustomSection {
+        title: String,
+        content: String,
+        format: SectionFormat,
     },
-    Table { 
-        rows: Vec<Vec<String>> 
+    Table {
+        rows: Vec<Vec<String>>,
     },
-    Quote { 
-        content: String 
+    Quote {
+        content: String,
     },
-    Spoiler { 
-        title: String, 
-        content: String 
+    Spoiler {
+        title: String,
+        content: String,
     },
-    Raw { 
-        content: String 
+    Raw {
+        content: String,
     },
 }
 
 /// Components that can be added to an upload
 #[derive(Debug, Clone)]
 pub enum UploadComponent {
-    NfoData { path: String, content: Vec<u8> },
+    NfoData {
+        path: String,
+        content: Vec<u8>,
+    },
     Mediainfo(String),
     Screenshots(Vec<String>),
     Thumbnails(Vec<String>),
-    Sample { url: String, filename: String },
+    Sample {
+        url: String,
+        filename: String,
+    },
     TorrentPath(String),
     ReleaseName(String),
     Description(String),
     CoverImage(String),
     DuplicateCheckResults(Vec<(String, String)>), // [(tracker, download_link)]
-    TmdbData { 
+    TmdbData {
         tmdb_id: u32,
         imdb_id: Option<String>,
         tvdb_id: Option<u32>,
@@ -861,7 +898,10 @@ pub enum UploadComponent {
         year: Option<String>,
     },
     Metadata(HashMap<String, String>), // Flexible metadata storage
-    Trailer { url: String, platform: String }, // YouTube/Vimeo trailer URL
+    Trailer {
+        url: String,
+        platform: String,
+    }, // YouTube/Vimeo trailer URL
 }
 
 impl ArchiveType {
@@ -875,13 +915,13 @@ impl ArchiveType {
             "gz" => {
                 // Check if it's tar.gz
                 Some(ArchiveType::Gz)
-            },
+            }
             "bz2" => Some(ArchiveType::Bz2),
             "xz" => Some(ArchiveType::Xz),
             _ => None,
         }
     }
-    
+
     /// Check if path is tar.gz, tar.bz2, or tar.xz
     pub fn from_path(path: &Path) -> Option<ArchiveType> {
         let filename = path.file_name()?.to_str()?.to_lowercase();
@@ -892,10 +932,12 @@ impl ArchiveType {
         } else if filename.ends_with(".tar.xz") || filename.ends_with(".txz") {
             Some(ArchiveType::TarXz)
         } else {
-            path.extension()?.to_str().and_then(ArchiveType::from_extension)
+            path.extension()?
+                .to_str()
+                .and_then(ArchiveType::from_extension)
         }
     }
-    
+
     pub fn as_str(&self) -> &'static str {
         match self {
             ArchiveType::Zip => "ZIP",
@@ -936,27 +978,27 @@ pub enum ContentType {
     MovieWeb,
     TvShow,
     Anime,
-    
+
     // Audio types
     MusicFlac,
     MusicMp3,
     Audiobook,
-    
+
     // E-book types
     Ebook,
     Comic,
     Magazine,
-    
+
     // Game types
     PCGame,
     NSWGame,
     PS4Game,
-    
+
     // Application types
     WindowsApp,
     LinuxApp,
     MacApp,
-    
+
     // Other types
     Sports,
     Educational,
@@ -979,4 +1021,3 @@ impl VideoSettings for TorrentLeechSettings {
         self.stripshit_from_videos
     }
 }
-

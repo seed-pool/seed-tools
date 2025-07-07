@@ -1,16 +1,16 @@
 // Common metadata types and traits
 
-use serde::{Deserialize, Serialize};
 use crate::core::error::Result;
+use serde::{Deserialize, Serialize};
 
 /// Trait for metadata providers
 pub trait MetadataProvider {
     /// Search for metadata
     fn search(&self, query: &str) -> Result<Vec<MetadataResult>>;
-    
+
     /// Get detailed metadata by ID
     fn get_details(&self, id: &str) -> Result<MetadataResult>;
-    
+
     /// Provider name
     fn name(&self) -> &'static str;
 }
