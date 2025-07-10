@@ -1,7 +1,6 @@
 use epub::doc::EpubDoc;
-use log::{debug, info, warn};
+use log::{info, warn};
 use regex::Regex;
-use reqwest::blocking::multipart::Form;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -11,7 +10,6 @@ use crate::core::{Config, SeedpoolConfig};
 use crate::core::{EbookCategory, EbookFile, EbookType, MediaFile, MediaType};
 use crate::processing::extraction::process_and_extract_archives;
 use crate::processing::naming::generate_release_name;
-use crate::processing::torrent::create_torrent;
 use urlencoding;
 
 /// Metadata extracted from ebook filename and content
@@ -738,7 +736,6 @@ pub fn process_ebook_upload(
     category_arg: Option<&str>,
     dry_run: bool,
 ) -> Result<(), String> {
-    use crate::processing::torrent::add_torrent_to_all_qbittorrent_instances;
     use reqwest::blocking::Client;
     use std::fs;
 
@@ -1138,9 +1135,9 @@ pub fn process_ebook_upload(
         } else {
             "comic".to_string()
         };
-        (desc, keywords, None)
+        (desc, keywords, None::<u64>)
     } else {
-        (String::new(), String::new(), None)
+        (String::new(), String::new(), None::<u64>)
     };
 
     // Store original CBR/CBZ files in memory buffers, then remove from disk for torrent creation
@@ -1220,30 +1217,104 @@ pub fn process_ebook_upload(
         archive_backup_buffers: backup_extracted_archive_buffers.clone(),
     };
 
-    let torrent_input = &actual_content_path;
-    let torrent_file = create_torrent(
-        torrent_input,
-        &config.paths.torrent_dir,
-        &seedpool_config.settings.announce_url,
-        &config.paths.mkbrr,
-        false, // Don't exclude image files for ebook/comic processing
-    )?;
+    // Use UploadBuilder for consistent torrent creation and upload processing
+    use crate::core::{ImageLayout, UploadComponent};
+    use crate::processing::description::DescriptionConfig;
+    use crate::processing::upload::{UploadBuilder, UploadProcessor};
+    use std::collections::HashMap;
+    use std::sync::Arc;
 
-    let nfo_file = fs::read_dir(&working_dir).ok().and_then(|mut entries| {
-        entries.find_map(|entry| {
-            let entry = entry.ok()?;
-            let path = entry.path();
-            if path
-                .extension()
-                .map(|ext| ext.eq_ignore_ascii_case("nfo"))
-                .unwrap_or(false)
-            {
-                Some(path.to_string_lossy().to_string())
-            } else {
-                None
-            }
-        })
-    });
+    // Configure description layout based on ebook category
+    let mut desc_config = DescriptionConfig::default();
+    match main_ebook_file.ebook_type {
+        EbookType::Cbr | EbookType::Cbz => {
+            desc_config.image_layout = ImageLayout::TwoColumn;
+            desc_config.max_images = 10;
+            desc_config.image_width = 350;
+        }
+        EbookType::Pdf => {
+            desc_config.image_layout = ImageLayout::TwoColumn;
+            desc_config.max_images = 6;
+            desc_config.image_width = 400;
+        }
+        _ => {
+            desc_config.image_layout = ImageLayout::SingleColumn;
+            desc_config.max_images = 2;
+            desc_config.image_width = 500;
+        }
+    }
+
+    // Build upload data using UploadBuilder
+    let mut builder = UploadBuilder::new(
+        &actual_content_path,
+        MediaType::Ebook(main_ebook_file.ebook_type.clone()),
+        Arc::new(config.clone()),
+    )
+    .with_extensions(EbookType::all_extensions())
+    .with_description_config(desc_config)
+    .dry_run(dry_run);
+
+    // Add title info (using enhanced metadata from Open Library if available)
+    builder = builder.with_title_info(&title, None::<String>);
+
+    // Add ebook-specific metadata
+    let mut ebook_metadata = HashMap::new();
+    ebook_metadata.insert("author".to_string(), author.clone());
+    ebook_metadata.insert("description".to_string(), description.clone());
+    ebook_metadata.insert("keywords".to_string(), keywords.clone());
+    // Note: publisher, isbn, language would be extracted from ebook metadata if available
+    // Store cover_id for post-upload processing
+    if let Some(cid) = cover_id {
+        ebook_metadata.insert("cover_id".to_string(), cid.to_string());
+    }
+    // Note: PDF cover extraction would be handled by component system
+
+    builder = builder
+        .with_nfo()
+        .with_mediainfo()
+        .with_duplicate_check()
+        .with_custom_component(
+            "ebook_metadata".to_string(),
+            UploadComponent::Metadata(ebook_metadata),
+        );
+
+    // Add screenshots for comics/magazines (extract preview pages)
+    if matches!(
+        main_ebook_file.ebook_type,
+        EbookType::Cbr | EbookType::Cbz | EbookType::Pdf
+    ) {
+        builder = builder.with_screenshots(6);
+    }
+
+    let upload_data = builder.build()?;
+
+    // Create the upload processor
+    let mut processor =
+        UploadProcessor::new(upload_data, Arc::new(config.clone())).dry_run(dry_run);
+
+    // Add classification for tracker mapping
+    let category_str = if let Some(cat_arg) = category_arg {
+        cat_arg.to_string()
+    } else {
+        format!("07{}", type_id)
+    };
+    processor = processor.with_media_classification(Some(category_str), None);
+
+    // Process the upload
+    let upload_result = processor.process()?;
+
+    if !upload_result.success {
+        return Err(format!("Upload failed: {}", upload_result.message));
+    }
+
+    info!("Upload completed successfully to {}", upload_result.tracker);
+    let torrent_id = upload_result
+        .torrent_id
+        .ok_or("No torrent ID returned from upload")?;
+    info!("Torrent ID: {}", torrent_id);
+
+    // --- POST-UPLOAD COVER HANDLING ---
+    // This preserves the existing Open Library and PDF cover upload logic
 
     // --- SKIP OPEN LIBRARY FOR COMICS & MAGAZINES ---
     if !main_ebook_file.ebook_type.is_comic()
@@ -1365,70 +1436,6 @@ pub fn process_ebook_upload(
         pdf_cover_image_path = Some(cover_path);
     }
 
-    let mut form = Form::new()
-        .file("torrent", &torrent_file)
-        .map_err(|e| format!("Failed to attach torrent file: {}", e))?
-        .text("name", base_name.clone())
-        .text("category_id", "7") // eBooks category
-        .text("type_id", type_id)
-        .text("tmdb", "0")
-        .text("imdb", "0")
-        .text("tvdb", "0")
-        .text("anonymous", "0")
-        .text("description", description)
-        .text("keywords", keywords)
-        .text("mal", "0")
-        .text("igdb", "0")
-        .text("stream", "0")
-        .text("sd", "0");
-
-    if let Some(nfo) = nfo_file {
-        form = form
-            .file("nfo", nfo)
-            .map_err(|e| format!("Failed to attach NFO file: {}", e))?;
-    }
-
-    // Send the upload request
-    let client = Client::new();
-
-    if dry_run {
-        info!(
-            "[DRY RUN] Would upload eBook to Seedpool: {}",
-            seedpool_config.settings.upload_url
-        );
-        info!("[DRY RUN] Form data would include: torrent file, description, category, type, etc.");
-        return Ok(());
-    }
-
-    let response = client
-        .post(&seedpool_config.settings.upload_url)
-        .header(
-            "Authorization",
-            format!("Bearer {}", seedpool_config.general.api_key),
-        )
-        .multipart(form)
-        .send()
-        .map_err(|e| format!("Failed to send request to Seedpool: {}", e))?;
-
-    let status = response.status();
-    let response_text = response
-        .text()
-        .unwrap_or_else(|_| "Failed to read response body".to_string());
-    info!("Seedpool API Response: {}", response_text);
-
-    if !status.is_success() {
-        return Err(format!(
-            "Failed to upload to Seedpool. HTTP Status: {}. Response: {}",
-            status, response_text
-        ));
-    }
-
-    // Extract the torrent ID from the response
-    let torrent_id =
-        crate::utils::extract_torrent_id(&response_text).map_err(|e| format!("{:?}", e))?;
-
-    // --- COVER HANDLING ---
-
     // For EPUBs: Fetch the cover image using the cover ID from Open Library (existing logic)
     if !matches!(main_ebook_file.ebook_type, EbookType::Pdf) {
         let mut cover_handled = false;
@@ -1436,6 +1443,7 @@ pub fn process_ebook_upload(
             let cover_url = format!("https://covers.openlibrary.org/b/id/{}-L.jpg", cover_id);
             info!("Fetching cover image from: {}", cover_url);
 
+            let client = Client::new();
             let cover_response = client
                 .get(&cover_url)
                 .send()
@@ -1639,14 +1647,7 @@ pub fn process_ebook_upload(
         }
     }
 
-    // Add torrent to all qBittorrent instances
-    add_torrent_to_all_qbittorrent_instances(
-        &[torrent_file.clone()],
-        &config.qbittorrent,
-        &config.deluge,
-        new_ebook_path.to_str().unwrap(),
-        &config.paths,
-    )?;
+    // qBittorrent integration is handled by UploadProcessor
 
     // Files will be automatically restored by the RestoreGuard when function exits
 
@@ -1972,7 +1973,7 @@ pub fn classify_ebook_content(filename: &str, extension: &str) -> EbookMetadata 
     // Series patterns
     let series_regex = Regex::new(r"(?i)\b(?:book|part|series)\s*(\d+)\b").unwrap();
 
-    debug!("Classifying ebook content for: {}", filename);
+    info!("Classifying ebook content for: {}", filename);
 
     // Clean filename for processing
     let clean_name = filename.trim().trim_end_matches(&format!(".{}", extension));
@@ -2080,7 +2081,7 @@ pub fn classify_ebook_content(filename: &str, extension: &str) -> EbookMetadata 
         metadata.category = EbookCategory::Novel;
     }
 
-    debug!("Ebook classification result: {:?}", metadata);
+    info!("Ebook classification result: {:?}", metadata);
     metadata
 }
 

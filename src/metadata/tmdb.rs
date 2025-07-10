@@ -38,7 +38,7 @@ pub fn fetch_tmdb_id(
     );
     let encoded_title = urlencoding::encode(&sanitized_title);
 
-    let url = if release_type == "tv" {
+    let url = if release_type.to_lowercase() == "tv" || release_type == "TvShow" {
         format!(
             "https://api.themoviedb.org/3/search/tv?query={}&first_air_date_year={}&api_key={}",
             encoded_title,
@@ -199,6 +199,15 @@ pub fn extract_tmdb_metadata(
     tmdb_details: &Value,
     release_type: &str,
 ) -> std::collections::HashMap<String, String> {
+    info!(
+        "🎬 Extracting TMDB metadata for release type: {}",
+        release_type
+    );
+    info!(
+        "📊 TMDB details received: {}",
+        serde_json::to_string_pretty(tmdb_details).unwrap_or_else(|_| "Invalid JSON".to_string())
+    );
+
     let mut metadata = std::collections::HashMap::new();
 
     // Basic info
@@ -208,10 +217,38 @@ pub fn extract_tmdb_metadata(
 
     if let Some(rating) = tmdb_details["vote_average"].as_f64() {
         metadata.insert("tmdb_rating".to_string(), format!("{:.1}", rating));
+        metadata.insert("tmdb_vote_average".to_string(), format!("{:.1}", rating));
     }
 
     if let Some(vote_count) = tmdb_details["vote_count"].as_u64() {
         metadata.insert("tmdb_vote_count".to_string(), vote_count.to_string());
+    }
+
+    // Title and year
+    if let Some(title) = tmdb_details
+        .get("title")
+        .or(tmdb_details.get("name"))
+        .and_then(|v| v.as_str())
+    {
+        metadata.insert("tmdb_title".to_string(), title.to_string());
+    }
+
+    // Release date
+    if let Some(release_date) = tmdb_details
+        .get("release_date")
+        .or(tmdb_details.get("first_air_date"))
+        .and_then(|v| v.as_str())
+    {
+        metadata.insert("tmdb_release_date".to_string(), release_date.to_string());
+        // Extract year from date
+        if let Some(year) = release_date.split('-').next() {
+            metadata.insert("tmdb_year".to_string(), year.to_string());
+        }
+    }
+
+    // Original language
+    if let Some(lang) = tmdb_details["original_language"].as_str() {
+        metadata.insert("tmdb_original_language".to_string(), lang.to_uppercase());
     }
 
     // Genres
@@ -350,6 +387,11 @@ pub fn extract_tmdb_metadata(
         if !keyword_names.is_empty() {
             metadata.insert("tmdb_keywords".to_string(), keyword_names.join(", "));
         }
+    }
+
+    info!("✅ Extracted {} TMDB metadata fields:", metadata.len());
+    for (key, value) in &metadata {
+        info!("  📌 {}: {}", key, value);
     }
 
     metadata

@@ -656,10 +656,36 @@ pub fn check_seedpool_dupes(name: &str, seedpool_api_key: &str) -> Result<Option
     Ok(None)
 }
 
+/// Map resolution string to Seedpool resolution ID
+pub fn map_resolution_to_id(resolution: &str) -> Option<String> {
+    match resolution.to_uppercase().as_str() {
+        "4320P" | "8K" => Some("1".to_string()),
+        "2160P" | "4K" => Some("2".to_string()),
+        "1080P" => Some("3".to_string()),
+        "1080I" => Some("4".to_string()),
+        "720P" => Some("5".to_string()),
+        "576P" => Some("6".to_string()),
+        "576I" => Some("7".to_string()),
+        "480P" => Some("8".to_string()),
+        "480I" => Some("9".to_string()),
+        "OTHER" => Some("10".to_string()),
+        _ => Some("11".to_string()), // Unknown
+    }
+}
+
 /// Create a SeedpoolTorrentInfo from media classification strings
 pub fn create_torrent_info_from_media_strings(
     media_category: Option<&str>,
     media_source_type: Option<&str>,
+) -> Result<SeedpoolTorrentInfo, String> {
+    create_torrent_info_from_media_strings_with_metadata(media_category, media_source_type, None)
+}
+
+/// Create a SeedpoolTorrentInfo from media classification strings with optional metadata
+pub fn create_torrent_info_from_media_strings_with_metadata(
+    media_category: Option<&str>,
+    media_source_type: Option<&str>,
+    metadata: Option<&serde_json::Value>,
 ) -> Result<SeedpoolTorrentInfo, String> {
     // Parse category and type from strings like "VideoCategory::Movie" and "VideoSourceType::BluRay"
     let (category, torrent_type) = match media_category {
@@ -711,7 +737,66 @@ pub fn create_torrent_info_from_media_strings(
             let cat_name = cat_str.strip_prefix("AudioCategory::").unwrap();
             match cat_name {
                 "Audiobook" | "Podcast" => (SeedpoolCategory::Audiobook, SeedpoolType::Audiobook),
-                _ => (SeedpoolCategory::Music, SeedpoolType::Flac), // Default music to Flac
+                _ => {
+                    // Determine format from metadata, source type, or media type
+                    let format_type = if let Some(meta) = metadata {
+                        // Check audio_format field (from mediainfo)
+                        if let Some(format) = meta.get("audio_format").and_then(|f| f.as_str()) {
+                            if format.to_lowercase().contains("flac") {
+                                SeedpoolType::Flac
+                            } else if format.to_lowercase().contains("mp3")
+                                || format.to_lowercase().contains("mpeg")
+                            {
+                                SeedpoolType::Mp3
+                            } else {
+                                SeedpoolType::Flac // Default to FLAC for other lossless formats
+                            }
+                        } else if let Some(format) = meta.get("format").and_then(|f| f.as_str()) {
+                            // Check format field (from AudioType enum)
+                            if format.contains("Mp3") {
+                                SeedpoolType::Mp3
+                            } else if format.contains("Flac") {
+                                SeedpoolType::Flac
+                            } else {
+                                SeedpoolType::Flac // Default to FLAC
+                            }
+                        } else {
+                            // Try to infer from file extension in the path
+                            if let Some(path) = meta.get("input_path").and_then(|p| p.as_str()) {
+                                // Check files in the directory for format
+                                if let Ok(entries) = std::fs::read_dir(path) {
+                                    let mut has_mp3 = false;
+                                    let mut has_flac = false;
+
+                                    for entry in entries.flatten() {
+                                        if let Some(ext) =
+                                            entry.path().extension().and_then(|e| e.to_str())
+                                        {
+                                            match ext.to_lowercase().as_str() {
+                                                "mp3" => has_mp3 = true,
+                                                "flac" => has_flac = true,
+                                                _ => {}
+                                            }
+                                        }
+                                    }
+
+                                    if has_mp3 && !has_flac {
+                                        SeedpoolType::Mp3
+                                    } else {
+                                        SeedpoolType::Flac // Default to FLAC
+                                    }
+                                } else {
+                                    SeedpoolType::Flac // Default if can't read directory
+                                }
+                            } else {
+                                SeedpoolType::Flac // Default if no path info
+                            }
+                        }
+                    } else {
+                        SeedpoolType::Flac // Default if no metadata
+                    };
+                    (SeedpoolCategory::Music, format_type)
+                }
             }
         }
         Some(cat_str) if cat_str.starts_with("EbookCategory::") => {
@@ -835,6 +920,21 @@ impl TrackerApi for SeedpoolApi {
         // Add type_id if present
         if let Some(type_id) = &upload_data.type_id {
             form = form.text("type_id", type_id.clone());
+        }
+
+        // Add resolution_id for TV shows
+        if let Some(resolution_id) = &upload_data.resolution_id {
+            form = form.text("resolution_id", resolution_id.clone());
+        }
+
+        // Add season_number for TV shows
+        if let Some(season_number) = &upload_data.season_number {
+            form = form.text("season_number", season_number.to_string());
+        }
+
+        // Add episode_number for TV shows
+        if let Some(episode_number) = &upload_data.episode_number {
+            form = form.text("episode_number", episode_number.to_string());
         }
 
         // Add torrent file

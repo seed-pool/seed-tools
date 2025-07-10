@@ -6,9 +6,9 @@ use crate::{
         component_config::ComponentConfig, description::DescriptionConfig, upload::UploadBuilder,
     },
 };
-use log::{debug, error, info};
+use log::{error, info};
 use serde_json::Value as JsonValue;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 /// Builder for creating custom media processing pipelines
 pub struct ProcessBuilder {
@@ -35,10 +35,15 @@ pub struct ProcessBuilder {
     // Classification overrides
     force_category: Option<String>,
     force_type: Option<String>,
+
+    // Preflight data reuse
+    cached_preflight_data: Option<PreflightCheckResult>,
+    cached_classification: Option<ClassificationResult>,
+    cached_metadata: Option<JsonValue>,
 }
 
 /// Result of the process pipeline
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ProcessResult {
     pub media_type: MediaType,
     pub title: String,
@@ -68,6 +73,9 @@ impl ProcessBuilder {
             dry_run: false,
             force_category: None,
             force_type: None,
+            cached_preflight_data: None,
+            cached_classification: None,
+            cached_metadata: None,
         }
     }
 
@@ -147,6 +155,24 @@ impl ProcessBuilder {
         self
     }
 
+    /// Set cached preflight data to avoid recomputation
+    pub fn with_cached_preflight_data(mut self, preflight_data: PreflightCheckResult) -> Self {
+        self.cached_preflight_data = Some(preflight_data);
+        self
+    }
+
+    /// Set cached classification result to avoid recomputation
+    pub fn with_cached_classification(mut self, classification: ClassificationResult) -> Self {
+        self.cached_classification = Some(classification);
+        self
+    }
+
+    /// Set cached metadata to avoid recomputation
+    pub fn with_cached_metadata(mut self, metadata: JsonValue) -> Self {
+        self.cached_metadata = Some(metadata);
+        self
+    }
+
     /// Set component configuration
     pub fn with_component_config(mut self, config: ComponentConfig) -> Self {
         self.component_config = Some(config);
@@ -155,9 +181,7 @@ impl ProcessBuilder {
 
     /// Build and execute the processing pipeline
     pub fn build(self) -> Result<ProcessResult, String> {
-        use log::debug;
-
-        debug!(
+        info!(
             "ProcessBuilder: Starting build for path: {}",
             self.input_path
         );
@@ -181,14 +205,17 @@ impl ProcessBuilder {
             return Err("No media type specified and auto-detect is disabled".to_string());
         };
 
-        debug!("ProcessBuilder: Detected media type: {:?}", media_type);
+        info!("ProcessBuilder: Detected media type: {:?}", media_type);
 
         // Step 2: Extract media-specific metadata if enabled
         let mut metadata = raw_metadata;
-        if self.include_metadata_extraction {
-            debug!("ProcessBuilder: Extracting metadata");
+        if let Some(cached_metadata) = self.cached_metadata.clone() {
+            info!("ProcessBuilder: Using cached metadata");
+            metadata = cached_metadata;
+        } else if self.include_metadata_extraction {
+            info!("ProcessBuilder: Extracting metadata");
             metadata = self.extract_metadata(&media_type, metadata)?;
-            debug!(
+            info!(
                 "ProcessBuilder: Extracted metadata: {}",
                 serde_json::to_string_pretty(&metadata)
                     .unwrap_or_else(|_| "Failed to serialize".to_string())
@@ -196,8 +223,12 @@ impl ProcessBuilder {
         }
 
         // Step 3: Run classification if enabled
-        let classification = if self.include_classification {
-            debug!("ProcessBuilder: Running classification");
+        let classification = if let Some(cached_classification) = self.cached_classification.clone()
+        {
+            info!("ProcessBuilder: Using cached classification");
+            Some(cached_classification)
+        } else if self.include_classification {
+            info!("ProcessBuilder: Running classification");
             Some(self.classify_media(&media_type, &metadata)?)
         } else {
             None
@@ -205,14 +236,22 @@ impl ProcessBuilder {
 
         // Step 4: Build upload data if enabled
         let upload_data = if self.include_upload_builder {
-            Some(self.build_upload_data(&media_type, &metadata, &classification)?)
+            info!("ProcessBuilder: Building upload data - Starting UploadBuilder");
+            let result = self.build_upload_data(&media_type, &metadata, &classification)?;
+            info!("ProcessBuilder: Building upload data - UploadBuilder completed successfully");
+            Some(result)
         } else {
+            info!("ProcessBuilder: Skipping upload data build (upload_builder disabled)");
             None
         };
 
         // Step 5: Generate preflight data if enabled
-        let preflight_data = if self.include_preflight_data {
-            debug!("ProcessBuilder: Generating preflight data");
+        let preflight_data = if let Some(cached_preflight_data) = self.cached_preflight_data.clone()
+        {
+            info!("ProcessBuilder: Using cached preflight data");
+            Some(cached_preflight_data)
+        } else if self.include_preflight_data {
+            info!("ProcessBuilder: Generating preflight data");
             Some(self.generate_preflight_data(&media_type, &metadata, &classification)?)
         } else {
             None
@@ -221,7 +260,7 @@ impl ProcessBuilder {
         // Step 6: Process upload if enabled
         let upload_result = if self.include_upload_processing {
             if let Some(upload_data) = &upload_data {
-                debug!("ProcessBuilder: Processing upload");
+                info!("ProcessBuilder: Processing upload");
                 Some(self.process_upload(upload_data, &classification)?)
             } else {
                 return Err("Upload processing enabled but no upload data available".to_string());
@@ -284,13 +323,17 @@ impl ProcessBuilder {
                     // Use video classification to extract metadata
                     let video_metadata =
                         crate::media::video::classify_video_content(&self.input_path);
-                    debug!("Video metadata extracted: title='{}', year={:?}, season={:?}, category={:?}",
+                    info!("Video metadata extracted: title='{}', year={:?}, season={:?}, category={:?}",
                         video_metadata.title, video_metadata.year, video_metadata.season, video_metadata.category);
 
                     // Add video-specific metadata
                     obj.insert(
                         "title".to_string(),
                         serde_json::Value::String(video_metadata.title.clone()),
+                    );
+                    obj.insert(
+                        "release_name".to_string(),
+                        serde_json::Value::String(video_metadata.release_name.clone()),
                     );
                     if let Some(year) = video_metadata.year {
                         obj.insert(
@@ -335,9 +378,475 @@ impl ProcessBuilder {
                     if let Some(codec) = video_metadata.codec {
                         obj.insert("codec".to_string(), serde_json::Value::String(codec));
                     }
+
+                    // Fetch TMDB data if available
+                    if !self.config.general.tmdb_api_key.is_empty() {
+                        let category = format!("{:?}", video_metadata.category);
+                        let is_movie_or_tv =
+                            category.contains("Movie") || category.contains("TvShow");
+
+                        if is_movie_or_tv {
+                            let release_type = if category.contains("Movie") {
+                                "movie"
+                            } else {
+                                "tv"
+                            };
+
+                            info!(
+                                "🎬 Fetching TMDB data during metadata extraction for: {}",
+                                video_metadata.title
+                            );
+
+                            match crate::metadata::tmdb::fetch_tmdb_id(
+                                &video_metadata.title,
+                                video_metadata.year.map(|y| y.to_string()),
+                                &self.config.general.tmdb_api_key,
+                                release_type,
+                            ) {
+                                Ok(tmdb_id) if tmdb_id > 0 => {
+                                    info!("✅ Found TMDB ID: {}", tmdb_id);
+                                    obj.insert(
+                                        "tmdb_id".to_string(),
+                                        serde_json::Value::Number(serde_json::Number::from(
+                                            tmdb_id,
+                                        )),
+                                    );
+
+                                    // Fetch full TMDB details
+                                    match crate::metadata::tmdb::fetch_tmdb_details(
+                                        tmdb_id,
+                                        release_type,
+                                        &self.config.general.tmdb_api_key,
+                                    ) {
+                                        Ok(tmdb_details) => {
+                                            info!("✅ Successfully fetched TMDB details");
+
+                                            // Extract and add all TMDB metadata
+                                            let tmdb_metadata =
+                                                crate::metadata::tmdb::extract_tmdb_metadata(
+                                                    &tmdb_details,
+                                                    release_type,
+                                                );
+
+                                            info!(
+                                                "📊 Adding {} TMDB fields to metadata",
+                                                tmdb_metadata.len()
+                                            );
+                                            for (key, value) in tmdb_metadata {
+                                                obj.insert(key, serde_json::Value::String(value));
+                                            }
+
+                                            // Also fetch external IDs
+                                            if let Ok((imdb_id, tvdb_id)) =
+                                                crate::metadata::tmdb::fetch_external_ids(
+                                                    tmdb_id,
+                                                    release_type,
+                                                    &self.config.general.tmdb_api_key,
+                                                )
+                                            {
+                                                if let Some(imdb) = imdb_id {
+                                                    obj.insert(
+                                                        "imdb_id".to_string(),
+                                                        serde_json::Value::String(imdb),
+                                                    );
+                                                }
+                                                if let Some(tvdb) = tvdb_id {
+                                                    obj.insert(
+                                                        "tvdb_id".to_string(),
+                                                        serde_json::Value::Number(
+                                                            serde_json::Number::from(tvdb),
+                                                        ),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            info!("❌ Failed to fetch TMDB details: {}", e);
+                                        }
+                                    }
+                                }
+                                Ok(_) => {
+                                    info!("⚠️ TMDB ID is 0, skipping TMDB enrichment");
+                                }
+                                Err(e) => {
+                                    info!("❌ Failed to fetch TMDB ID: {}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+                MediaType::Audio(_) => {
+                    // For audio files, extract metadata from tags and MusicBrainz
+                    info!("🎵 Processing audio metadata extraction");
+
+                    // Variables to hold extracted metadata
+                    let mut artist = None;
+                    let mut album = None;
+                    let mut year = None;
+                    let mut genre = None;
+
+                    // First, let's try to get basic metadata from the first audio file
+                    if let Ok(files) = crate::utils::filter_files_by_extension(
+                        &self.input_path,
+                        &crate::core::AudioType::all_extensions(),
+                    ) {
+                        if let Some(first_file) = files.first() {
+                            if let Some(file_path) = first_file.to_str() {
+                                // Use mediainfo to extract metadata
+                                match crate::processing::components::mediainfo_utils::generate_mediainfo(file_path, &self.config) {
+                                    Ok(mediainfo_output) => {
+                                        // Parse mediainfo output for audio metadata
+                                        for line in mediainfo_output.lines() {
+                                            let line = line.trim();
+                                            // Use more specific parsing to handle spaces better
+                                            if line.starts_with("Album") && line.contains(":") && !line.starts_with("Album/") {
+                                                let parts: Vec<&str> = line.splitn(2, ':').collect();
+                                                if parts.len() == 2 {
+                                                    album = Some(parts[1].trim().to_string());
+                                                }
+                                            } else if line.starts_with("Performer") && line.contains(":") {
+                                                let parts: Vec<&str> = line.splitn(2, ':').collect();
+                                                if parts.len() == 2 {
+                                                    artist = Some(parts[1].trim().to_string());
+                                                }
+                                            } else if line.starts_with("Recorded date") && line.contains(":") {
+                                                let parts: Vec<&str> = line.splitn(2, ':').collect();
+                                                if parts.len() == 2 {
+                                                    if let Some(date) = parts[1].trim().split('-').next() {
+                                                        year = Some(date.to_string());
+                                                    }
+                                                }
+                                            } else if line.starts_with("Genre") && line.contains(":") {
+                                                let parts: Vec<&str> = line.splitn(2, ':').collect();
+                                                if parts.len() == 2 {
+                                                    genre = Some(parts[1].trim().to_string());
+                                                }
+                                            }
+                                        }
+
+                                        info!("🎵 Extracted from mediainfo - Artist: {:?}, Album: {:?}, Year: {:?}, Genre: {:?}", 
+                                              artist, album, year, genre);
+
+                                        // Store extracted metadata
+                                        if let Some(ref artist_name) = artist {
+                                            obj.insert("artist".to_string(), serde_json::Value::String(artist_name.clone()));
+                                            // Don't set title to artist name, let it use the filename fallback
+                                        }
+                                        if let Some(ref album_name) = album {
+                                            obj.insert("album".to_string(), serde_json::Value::String(album_name.clone()));
+                                        }
+                                        if let Some(ref year_str) = year {
+                                            obj.insert("year".to_string(), serde_json::Value::String(year_str.clone()));
+                                        }
+                                        if let Some(ref genre_name) = genre {
+                                            obj.insert("genre".to_string(), serde_json::Value::String(genre_name.clone()));
+                                        }
+
+                                        // Now try MusicBrainz lookup if we have artist and album
+                                        if let (Some(artist_name), Some(album_name)) = (artist.clone(), album.clone()) {
+                                            info!("🎵 Searching MusicBrainz for: {} - {}", artist_name, album_name);
+
+                                            match crate::metadata::musicbrainz::search_musicbrainz_release_with_year(
+                                                &artist_name,
+                                                &album_name,
+                                                year.as_deref()
+                                            ) {
+                                                Ok(releases) if !releases.is_empty() => {
+                                                    // Use the first release
+                                                    if let Some(release_id) = releases[0]["id"].as_str() {
+                                                        info!("✅ Found MusicBrainz release ID: {}", release_id);
+
+                                                        // Fetch full details
+                                                        match crate::metadata::musicbrainz::get_musicbrainz_release_details(release_id) {
+                                                            Ok(mb_details) => {
+                                                                info!("✅ Successfully fetched MusicBrainz details");
+
+                                                                // Extract metadata
+                                                                let mb_metadata = crate::metadata::musicbrainz::extract_musicbrainz_metadata(&mb_details);
+
+                                                                info!("📊 Adding {} MusicBrainz fields to metadata", mb_metadata.len());
+                                                                for (key, value) in mb_metadata {
+                                                                    obj.insert(key, serde_json::Value::String(value));
+                                                                }
+                                                            }
+                                                            Err(e) => {
+                                                                info!("❌ Failed to fetch MusicBrainz details: {}", e);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                Ok(_) => {
+                                                    info!("⚠️ No MusicBrainz releases found for: {} - {}", artist_name, album_name);
+                                                }
+                                                Err(e) => {
+                                                    info!("❌ Failed to search MusicBrainz: {}", e);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        info!("Failed to generate mediainfo for audio metadata: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Generate detailed tracklist by scanning all audio files
+                    let audio_files = crate::utils::filter_files_by_extension(
+                        &self.input_path,
+                        &crate::core::AudioType::all_extensions(),
+                    )
+                    .unwrap_or_default();
+
+                    if !audio_files.is_empty() {
+                        let mut tracklist_rows = Vec::new();
+                        let mut sorted_files = audio_files.clone();
+                        sorted_files.sort();
+
+                        for (idx, file) in sorted_files.iter().enumerate() {
+                            if let Some(file_path) = file.to_str() {
+                                if let Some(file_name) = file.file_name().and_then(|n| n.to_str()) {
+                                    // Extract track info from filename (common pattern: 01-artist-title.mp3)
+                                    let mut track_title = file_name.to_string();
+                                    let mut track_artist =
+                                        artist.as_ref().unwrap_or(&"Unknown".to_string()).clone();
+
+                                    // Try to parse track number and title from filename
+                                    if let Some(name_without_ext) = file_name.split('.').next() {
+                                        let parts: Vec<&str> =
+                                            name_without_ext.split('-').collect();
+                                        if parts.len() >= 3 {
+                                            // Format: 01-artist-title
+                                            if parts[1].to_lowercase()
+                                                == track_artist.to_lowercase()
+                                            {
+                                                track_title =
+                                                    parts[2..].join("-").replace('_', " ");
+                                                // Capitalize words
+                                                track_title = track_title
+                                                    .split_whitespace()
+                                                    .map(|word| {
+                                                        let mut chars = word.chars();
+                                                        match chars.next() {
+                                                            None => String::new(),
+                                                            Some(first) => {
+                                                                first
+                                                                    .to_uppercase()
+                                                                    .collect::<String>()
+                                                                    + chars.as_str()
+                                                            }
+                                                        }
+                                                    })
+                                                    .collect::<Vec<String>>()
+                                                    .join(" ");
+                                            }
+                                        }
+                                    }
+
+                                    // Get file size
+                                    let file_size = file
+                                        .metadata()
+                                        .ok()
+                                        .map(|m| format!("{:.2} MB", m.len() as f64 / 1_048_576.0))
+                                        .unwrap_or_else(|| "Unknown".to_string());
+
+                                    // Get audio format info from mediainfo for this specific track
+                                    let (format, bitrate, duration) = match crate::processing::components::mediainfo_utils::generate_mediainfo(file_path, &self.config) {
+                                        Ok(track_mediainfo) => {
+                                            let mut track_format = file_name.split('.').last().unwrap_or("mp3").to_uppercase();
+                                            let mut track_bitrate = "Unknown".to_string();
+                                            let mut track_duration = "Unknown".to_string();
+
+                                            // Parse mediainfo output for this track
+                                            let mut in_audio_section = false;
+                                            let mut format_found = false;
+
+                                            for line in track_mediainfo.lines() {
+                                                let line = line.trim();
+
+                                                // Check for section headers
+                                                if line == "Audio" {
+                                                    in_audio_section = true;
+                                                    continue;
+                                                } else if line == "Image" || line == "Video" || line == "General" {
+                                                    in_audio_section = false;
+                                                    continue;
+                                                }
+
+                                                if line.contains(':') {
+                                                    let parts: Vec<&str> = line.splitn(2, ':').collect();
+                                                    if parts.len() == 2 {
+                                                        let key = parts[0].trim();
+                                                        let value = parts[1].trim();
+
+                                                        match key {
+                                                            "Format" => {
+                                                                if in_audio_section && !line.starts_with("Format profile") && !line.starts_with("Format settings") && !format_found {
+                                                                    track_format = value.to_string();
+                                                                    format_found = true;
+                                                                }
+                                                            }
+                                                            "Bit rate" => {
+                                                                if in_audio_section {
+                                                                    track_bitrate = value.to_string();
+                                                                }
+                                                            }
+                                                            "Overall bit rate" => {
+                                                                if !in_audio_section && track_bitrate == "Unknown" {
+                                                                    track_bitrate = value.to_string();
+                                                                }
+                                                            }
+                                                            "Duration" => {
+                                                                // Convert duration format (e.g., "3 min 45 s" or "00:03:45")
+                                                                if value.contains("min") || value.contains("mn") {
+                                                                    track_duration = value.to_string();
+                                                                } else if value.contains(':') {
+                                                                    // Convert HH:MM:SS to min:sec format
+                                                                    let time_parts: Vec<&str> = value.split(':').collect();
+                                                                    if time_parts.len() >= 2 {
+                                                                        if let (Ok(hours), Ok(mins), Ok(secs)) = (
+                                                                            time_parts.get(0).unwrap_or(&"0").parse::<u32>(),
+                                                                            time_parts.get(1).unwrap_or(&"0").parse::<u32>(),
+                                                                            time_parts.get(2).unwrap_or(&"0").split('.').next().unwrap_or("0").parse::<u32>()
+                                                                        ) {
+                                                                            let total_mins = hours * 60 + mins;
+                                                                            track_duration = format!("{}:{:02} min", total_mins, secs);
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            (track_format, track_bitrate, track_duration)
+                                        }
+                                        Err(e) => {
+                                            info!("Failed to get mediainfo for track {}: {}", file_name, e);
+                                            (
+                                                file_name.split('.').last().unwrap_or("mp3").to_uppercase(),
+                                                "Unknown".to_string(),
+                                                "Unknown".to_string()
+                                            )
+                                        }
+                                    };
+
+                                    let row = format!(
+                                        "[tr][td]{}[/td][td]{}[/td][td]{}[/td][td]{}[/td][td]{}[/td][td]{}[/td][td]{}[/td][/tr]",
+                                        idx + 1,
+                                        track_artist,
+                                        track_title,
+                                        duration,
+                                        file_size,
+                                        format,
+                                        bitrate
+                                    );
+                                    tracklist_rows.push(row);
+                                }
+                            }
+                        }
+
+                        if !tracklist_rows.is_empty() {
+                            obj.insert(
+                                "tracklist_rows".to_string(),
+                                serde_json::Value::String(tracklist_rows.join("\n")),
+                            );
+                        }
+                    }
+
+                    // Add audio format information from the first track's mediainfo if not already set
+                    if !obj.contains_key("audio_format") && !audio_files.is_empty() {
+                        let mut sorted_for_format = audio_files.clone();
+                        sorted_for_format.sort();
+                        if let Some(first_file) = sorted_for_format.first() {
+                            if let Some(file_path) = first_file.to_str() {
+                                match crate::processing::components::mediainfo_utils::generate_mediainfo(file_path, &self.config) {
+                                    Ok(mediainfo_output) => {
+                                        // Extract overall audio format info
+                                        // We need to track which section we're in to avoid getting format from Image section
+                                        let mut in_audio_section = false;
+                                        let mut audio_format_found = false;
+
+                                        for line in mediainfo_output.lines() {
+                                            let line = line.trim();
+
+                                            // Check for section headers
+                                            if line == "Audio" {
+                                                in_audio_section = true;
+                                                continue;
+                                            } else if line == "Image" || line == "Video" || line == "General" {
+                                                in_audio_section = false;
+                                                continue;
+                                            }
+
+                                            // Only process lines in the Audio section for format
+                                            if in_audio_section && line.contains(':') {
+                                                let parts: Vec<&str> = line.splitn(2, ':').collect();
+                                                if parts.len() == 2 {
+                                                    let key = parts[0].trim();
+                                                    let value = parts[1].trim();
+
+                                                    match key {
+                                                        "Format" => {
+                                                            if !line.starts_with("Format profile") && 
+                                                               !line.starts_with("Format settings") && 
+                                                               !audio_format_found {
+                                                                obj.insert("audio_format".to_string(), 
+                                                                          serde_json::Value::String(value.to_string()));
+                                                                audio_format_found = true;
+                                                            }
+                                                        }
+                                                        "Bit rate" => {
+                                                            if !obj.contains_key("audio_bitrate") {
+                                                                obj.insert("audio_bitrate".to_string(), 
+                                                                          serde_json::Value::String(value.to_string()));
+                                                            }
+                                                        }
+                                                        "Sampling rate" => {
+                                                            obj.insert("audio_sample_rate".to_string(), 
+                                                                      serde_json::Value::String(value.to_string()));
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                }
+                                            } else if !in_audio_section && line.contains(':') {
+                                                // Handle Overall bit rate which appears in General section
+                                                let parts: Vec<&str> = line.splitn(2, ':').collect();
+                                                if parts.len() == 2 {
+                                                    let key = parts[0].trim();
+                                                    let value = parts[1].trim();
+
+                                                    if key == "Overall bit rate" && !obj.contains_key("audio_bitrate") {
+                                                        obj.insert("audio_bitrate".to_string(), 
+                                                                  serde_json::Value::String(value.to_string()));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(_) => {
+                                        // Fallback values
+                                        obj.insert("audio_format".to_string(), 
+                                                  serde_json::Value::String("Audio".to_string()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Fallback to filename if no title extracted
+                    if !obj.contains_key("title") {
+                        obj.insert(
+                            "title".to_string(),
+                            serde_json::Value::String(filename.to_string()),
+                        );
+                    }
                 }
                 _ => {
-                    // For non-video media, just use filename as title for now
+                    // For other media types, just use filename as title for now
                     obj.insert(
                         "title".to_string(),
                         serde_json::Value::String(filename.to_string()),
@@ -379,25 +888,82 @@ impl ProcessBuilder {
         metadata: &JsonValue,
         _classification: &Option<ClassificationResult>,
     ) -> Result<UploadData, String> {
+        info!("ProcessBuilder: build_upload_data - Creating UploadBuilder");
         let mut builder =
             UploadBuilder::new(&self.input_path, media_type.clone(), self.config.clone());
+        info!("ProcessBuilder: build_upload_data - UploadBuilder created successfully");
 
         // Apply description config if provided
         if let Some(desc_config) = &self.description_config {
+            info!("ProcessBuilder: build_upload_data - Applying description config");
             builder = builder.with_description_config(desc_config.clone());
         }
 
+        info!(
+            "ProcessBuilder: build_upload_data - Processing media type: {:?}",
+            media_type
+        );
         // Add metadata based on media type
         match media_type {
             MediaType::Video(_) => {
+                info!("ProcessBuilder: build_upload_data - Processing video metadata");
                 // Extract video metadata and pass to builder
                 if let (Some(title), Some(category), Some(source_type)) = (
                     metadata.get("title").and_then(|t| t.as_str()),
                     metadata.get("category").and_then(|c| c.as_str()),
                     metadata.get("source_type").and_then(|s| s.as_str()),
                 ) {
+                    info!(
+                        "ProcessBuilder: build_upload_data - Creating video metadata for: {}",
+                        title
+                    );
                     let mut video_metadata = crate::media::video::VideoMetadata::default();
                     video_metadata.title = title.to_string();
+
+                    // Set release_name - try to get from metadata first
+                    if let Some(release_name) =
+                        metadata.get("release_name").and_then(|r| r.as_str())
+                    {
+                        video_metadata.release_name = release_name.to_string();
+                        info!(
+                            "ProcessBuilder: Using cached release_name: {}",
+                            video_metadata.release_name
+                        );
+                    } else if let Some(filename) = metadata.get("filename").and_then(|f| f.as_str())
+                    {
+                        video_metadata.release_name =
+                            crate::processing::naming::generate_release_name(filename);
+                        info!(
+                            "ProcessBuilder: Set release_name from filename: {}",
+                            video_metadata.release_name
+                        );
+                    } else if let Some(input_path) =
+                        metadata.get("input_path").and_then(|p| p.as_str())
+                    {
+                        let path = std::path::Path::new(input_path);
+                        let name = if path.is_dir() {
+                            path.file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("unknown")
+                        } else {
+                            path.file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("unknown")
+                        };
+                        video_metadata.release_name =
+                            crate::processing::naming::generate_release_name(name);
+                        info!(
+                            "ProcessBuilder: Set release_name from input_path: {}",
+                            video_metadata.release_name
+                        );
+                    } else {
+                        // Last resort - use the title
+                        video_metadata.release_name = title.to_string();
+                        info!(
+                            "ProcessBuilder: Using title as release_name: {}",
+                            video_metadata.release_name
+                        );
+                    }
 
                     // Parse category
                     video_metadata.category = match category {
@@ -454,7 +1020,11 @@ impl ProcessBuilder {
                         video_metadata.codec = Some(codec.to_string());
                     }
 
+                    info!("ProcessBuilder: build_upload_data - Adding video metadata to builder");
                     builder = builder.with_video_metadata(video_metadata);
+                    info!("ProcessBuilder: build_upload_data - Video metadata added successfully");
+                } else {
+                    info!("ProcessBuilder: build_upload_data - Video metadata extraction failed - missing required fields");
                 }
             }
             MediaType::Audio(_)
@@ -472,6 +1042,69 @@ impl ProcessBuilder {
             }
         }
 
+        // Pass enriched metadata from preflight (TMDB and MusicBrainz fields are in the main metadata object)
+        let mut enriched_map = HashMap::new();
+        if let Some(metadata_obj) = metadata.as_object() {
+            info!(
+                "📊 ProcessBuilder: Checking metadata for enriched fields. Total fields: {}",
+                metadata_obj.len()
+            );
+
+            // Extract all TMDB and MusicBrainz related fields
+            for (key, value) in metadata_obj {
+                if key.starts_with("tmdb_") || key.starts_with("musicbrainz_") {
+                    if let Some(str_value) = value.as_str() {
+                        info!("  📌 Found enriched field: {} = {}", key, str_value);
+                        enriched_map.insert(key.clone(), str_value.to_string());
+                    } else if let Some(num_value) = value.as_f64() {
+                        info!("  📌 Found enriched field: {} = {}", key, num_value);
+                        enriched_map.insert(key.clone(), num_value.to_string());
+                    } else if let Some(bool_value) = value.as_bool() {
+                        info!("  📌 Found enriched field: {} = {}", key, bool_value);
+                        enriched_map.insert(key.clone(), bool_value.to_string());
+                    }
+                }
+            }
+
+            // Also pass through basic audio metadata fields for templates
+            for field in [
+                "artist",
+                "album",
+                "year",
+                "genre",
+                "format",
+                "category",
+                "source_type",
+                "tracklist_rows",
+                "audio_format",
+                "audio_bitrate",
+                "audio_sample_rate",
+                "filename",
+                "cover_url",
+                "cover_images",
+            ] {
+                if let Some(value) = metadata_obj.get(field) {
+                    if let Some(str_value) = value.as_str() {
+                        info!("  📌 Found audio field: {} = {}", field, str_value);
+                        enriched_map.insert(field.to_string(), str_value.to_string());
+                    } else if field == "cover_images" && value.is_array() {
+                        // Handle cover_images array specially - the template processor will handle it
+                        info!(
+                            "  📌 Found cover_images array with {} items",
+                            value.as_array().map(|a| a.len()).unwrap_or(0)
+                        );
+                    }
+                }
+            }
+
+            if !enriched_map.is_empty() {
+                info!("✅ ProcessBuilder: build_upload_data - Passing {} enriched metadata fields to UploadBuilder", enriched_map.len());
+                builder = builder.with_enriched_metadata(enriched_map);
+            } else {
+                info!("⚠️ ProcessBuilder: build_upload_data - No enriched metadata fields found in metadata");
+            }
+        }
+
         // Add common components
         if self.include_duplicate_check {
             builder = builder.with_duplicate_check();
@@ -479,10 +1112,83 @@ impl ProcessBuilder {
 
         builder = builder.dry_run(self.dry_run);
 
+        // Inject cached preflight data if available
+        if let Some(ref preflight_data) = self.cached_preflight_data {
+            use crate::core::types::UploadComponent;
+
+            // Add TMDB data if available
+            if preflight_data.tmdb_id > 0 {
+                let tmdb_component = UploadComponent::TmdbData {
+                    tmdb_id: preflight_data.tmdb_id,
+                    imdb_id: preflight_data.imdb_id.clone(),
+                    tvdb_id: preflight_data.tvdb_id,
+                    title: preflight_data.release_name.clone(),
+                    year: None,
+                };
+                builder = builder.with_custom_component("tmdb", tmdb_component);
+            }
+
+            // Add IGDB data for games if available
+            if let Some(igdb_id) = preflight_data.igdb_id {
+                let mut igdb_metadata = HashMap::new();
+                igdb_metadata.insert("igdb_id".to_string(), igdb_id.to_string());
+                igdb_metadata.insert("title".to_string(), preflight_data.release_name.clone());
+                if let Some(ref dev) = preflight_data.igdb_developer {
+                    igdb_metadata.insert("developer".to_string(), dev.clone());
+                }
+                if let Some(ref pub_name) = preflight_data.igdb_publisher {
+                    igdb_metadata.insert("publisher".to_string(), pub_name.clone());
+                }
+                if let Some(ref genres) = preflight_data.igdb_genres {
+                    igdb_metadata.insert("genres".to_string(), genres.clone());
+                }
+                if let Some(rating) = preflight_data.igdb_rating {
+                    igdb_metadata.insert("rating".to_string(), rating.to_string());
+                }
+                if let Some(ref summary) = preflight_data.igdb_summary {
+                    igdb_metadata.insert("summary".to_string(), summary.clone());
+                }
+                if let Some(ref platforms) = preflight_data.igdb_platforms {
+                    igdb_metadata.insert("platforms".to_string(), platforms.join(","));
+                }
+                builder =
+                    builder.with_custom_component("igdb", UploadComponent::Metadata(igdb_metadata));
+            }
+
+            // Add audio language data if available
+            if !preflight_data.audio_languages.is_empty() {
+                let mut audio_metadata = HashMap::new();
+                audio_metadata.insert(
+                    "audio_languages".to_string(),
+                    preflight_data.audio_languages.join(","),
+                );
+                builder = builder
+                    .with_custom_component("audio_data", UploadComponent::Metadata(audio_metadata));
+            }
+
+            // Add release name data
+            let release_name_component =
+                UploadComponent::ReleaseName(preflight_data.generated_release_name.clone());
+            builder = builder.with_custom_component("release_name", release_name_component);
+
+            // Skip duplicate check since it was already done in preflight
+            if !preflight_data.dupe_check.is_empty() {
+                info!(
+                    "Skipping duplicate check - already completed in preflight: {}",
+                    preflight_data.dupe_check
+                );
+            }
+        }
+
         // Apply component configuration
+        info!("ProcessBuilder: build_upload_data - Applying component configuration");
         if let Some(component_config) = &self.component_config {
             // Screenshots
             if component_config.screenshot.enabled {
+                info!(
+                    "ProcessBuilder: build_upload_data - Enabling screenshots: {}",
+                    component_config.screenshot.count
+                );
                 builder = builder.with_screenshots(component_config.screenshot.count);
                 // TODO: Pass screenshot layout to UploadBuilder
             }
@@ -507,27 +1213,46 @@ impl ProcessBuilder {
                 builder = builder.with_cover_art();
             }
         } else {
+            info!("ProcessBuilder: build_upload_data - Using default media-specific components");
             // Use default media-specific components
             match media_type {
                 MediaType::Video(_) => {
+                    info!("ProcessBuilder: build_upload_data - Video: enabling screenshots(4), mediainfo, nfo");
                     builder = builder.with_screenshots(4).with_mediainfo().with_nfo();
                 }
                 MediaType::Audio(_) => {
+                    info!(
+                        "ProcessBuilder: build_upload_data - Audio: enabling mediainfo, cover_art"
+                    );
                     builder = builder.with_mediainfo().with_cover_art();
                 }
                 MediaType::Ebook(_) => {
+                    info!("ProcessBuilder: build_upload_data - Ebook: enabling cover_art, nfo");
                     builder = builder.with_cover_art().with_nfo();
                 }
                 MediaType::Game(_) => {
+                    info!("ProcessBuilder: build_upload_data - Game: enabling screenshots(4), nfo");
                     builder = builder.with_screenshots(4).with_nfo();
                 }
                 MediaType::Hobby(_) => {
+                    info!("ProcessBuilder: build_upload_data - Hobby: enabling nfo");
                     builder = builder.with_nfo();
                 }
             }
         }
 
-        builder.build()
+        info!("ProcessBuilder: build_upload_data - Calling UploadBuilder.build()");
+        let result = builder.build();
+        match &result {
+            Ok(_) => info!(
+                "ProcessBuilder: build_upload_data - UploadBuilder.build() completed: SUCCESS"
+            ),
+            Err(e) => error!(
+                "ProcessBuilder: build_upload_data - UploadBuilder.build() FAILED with error: {}",
+                e
+            ),
+        }
+        result
     }
 
     /// Process the upload using UploadProcessor
@@ -565,18 +1290,17 @@ impl ProcessBuilder {
         use crate::processing::components::mediainfo_utils::generate_mediainfo;
         use crate::processing::naming::generate_release_name;
         use crate::utils::filter_files_by_extension;
-        use log::debug;
         use std::path::Path;
 
         // Use metadata from classification if available, otherwise fall back to passed metadata
         let effective_metadata = if let Some(classification) = classification {
-            debug!(
+            info!(
                 "Using classification metadata: {}",
                 serde_json::to_string_pretty(&classification.media_metadata).unwrap_or_default()
             );
             &classification.media_metadata
         } else {
-            debug!(
+            info!(
                 "No classification metadata, using default: {}",
                 serde_json::to_string_pretty(metadata).unwrap_or_default()
             );
@@ -588,7 +1312,7 @@ impl ProcessBuilder {
             .and_then(|t| t.as_str())
             .unwrap_or("Unknown")
             .to_string();
-        debug!("Extracted title for preflight: '{}'", title);
+        info!("Extracted title for preflight: '{}'", title);
 
         // Generate release name
         let base_name = Path::new(&self.input_path)
@@ -677,42 +1401,58 @@ impl ProcessBuilder {
                 let category = effective_metadata["category"].as_str().unwrap_or("");
                 let is_movie_or_tv = category.contains("Movie") || category.contains("TvShow");
 
-                if is_movie_or_tv && !self.config.general.tmdb_api_key.is_empty() {
-                    let year = effective_metadata["year"].as_u64().map(|y| y.to_string());
-                    let release_type = if category.contains("Movie") {
-                        "movie"
-                    } else {
-                        "tv"
-                    };
+                if is_movie_or_tv {
+                    // Check if TMDB data is already in metadata (from extract_metadata)
+                    if let Some(tmdb_id) = effective_metadata["tmdb_id"].as_u64() {
+                        info!("📊 Using TMDB ID from metadata: {}", tmdb_id);
+                        result.tmdb_id = tmdb_id as u32;
 
-                    match fetch_tmdb_id(
-                        &title,
-                        year,
-                        &self.config.general.tmdb_api_key,
-                        release_type,
-                    ) {
-                        Ok(tmdb_id) => {
-                            result.tmdb_id = tmdb_id;
+                        // Get other IDs from metadata if available
+                        if let Some(imdb_id) = effective_metadata["imdb_id"].as_str() {
+                            result.imdb_id = Some(imdb_id.to_string());
+                        }
+                        if let Some(tvdb_id) = effective_metadata["tvdb_id"].as_u64() {
+                            result.tvdb_id = Some(tvdb_id as u32);
+                        }
+                    } else if !self.config.general.tmdb_api_key.is_empty() {
+                        // Fallback: fetch TMDB data if not in metadata
+                        info!("⚠️ TMDB data not found in metadata, fetching during preflight");
+                        let year = effective_metadata["year"].as_u64().map(|y| y.to_string());
+                        let release_type = if category.contains("Movie") {
+                            "movie"
+                        } else {
+                            "tv"
+                        };
 
-                            // Fetch external IDs (IMDb, TVDB) from TMDB
-                            if tmdb_id > 0 {
-                                match fetch_external_ids(
-                                    tmdb_id,
-                                    release_type,
-                                    &self.config.general.tmdb_api_key,
-                                ) {
-                                    Ok((imdb_id, tvdb_id)) => {
-                                        result.imdb_id = imdb_id;
-                                        result.tvdb_id = tvdb_id;
-                                    }
-                                    Err(e) => {
-                                        debug!("Failed to fetch external IDs: {}", e);
+                        match fetch_tmdb_id(
+                            &title,
+                            year,
+                            &self.config.general.tmdb_api_key,
+                            release_type,
+                        ) {
+                            Ok(tmdb_id) => {
+                                result.tmdb_id = tmdb_id;
+
+                                // Fetch external IDs (IMDb, TVDB) from TMDB
+                                if tmdb_id > 0 {
+                                    match fetch_external_ids(
+                                        tmdb_id,
+                                        release_type,
+                                        &self.config.general.tmdb_api_key,
+                                    ) {
+                                        Ok((imdb_id, tvdb_id)) => {
+                                            result.imdb_id = imdb_id;
+                                            result.tvdb_id = tvdb_id;
+                                        }
+                                        Err(e) => {
+                                            info!("Failed to fetch external IDs: {}", e);
+                                        }
                                     }
                                 }
                             }
-                        }
-                        Err(e) => {
-                            debug!("Failed to fetch TMDB ID: {}", e);
+                            Err(e) => {
+                                info!("Failed to fetch TMDB ID: {}", e);
+                            }
                         }
                     }
                 }
@@ -726,13 +1466,13 @@ impl ProcessBuilder {
                                 Ok(mediainfo_output) => {
                                     result.audio_languages =
                                         Self::extract_audio_languages(&mediainfo_output);
-                                    debug!(
+                                    info!(
                                         "Extracted {} audio language(s) from mediainfo",
                                         result.audio_languages.len()
                                     );
                                 }
                                 Err(e) => {
-                                    debug!("Failed to generate mediainfo: {}", e);
+                                    info!("Failed to generate mediainfo: {}", e);
                                 }
                             }
                         }
@@ -868,7 +1608,7 @@ impl ProcessBuilder {
                                                   result.igdb_genres, result.igdb_developer, result.igdb_publisher);
                                         }
                                         Err(e) => {
-                                            debug!("Failed to fetch IGDB game details: {}", e);
+                                            info!("Failed to fetch IGDB game details: {}", e);
                                         }
                                     }
                                 }
@@ -882,7 +1622,7 @@ impl ProcessBuilder {
                         }
                     }
                 } else {
-                    debug!("IGDB credentials not configured, skipping game lookup");
+                    info!("IGDB credentials not configured, skipping game lookup");
                 }
 
                 // Fallback: Check for local cover image
@@ -1026,13 +1766,44 @@ pub fn preflight_builder(input_path: &str, config: Arc<Config>) -> ProcessBuilde
 /// Create a process builder configured for full upload
 pub fn upload_builder(input_path: &str, config: Arc<Config>) -> ProcessBuilder {
     ProcessBuilder::new(input_path, config)
-        .with_classification(true)
+        .with_classification(false) // Disabled by default - enable only when needed
         .with_upload_builder(true)
         .with_upload_processing(true)
         .with_duplicate_check(true)
         .with_metadata_extraction(true)
         .with_preflight_data(false)
         .dry_run(false)
+}
+
+/// Create a process builder configured for upload with preflight data reuse
+pub fn upload_builder_with_preflight(
+    input_path: &str,
+    config: Arc<Config>,
+    preflight_result: &ProcessResult,
+) -> ProcessBuilder {
+    let mut builder = ProcessBuilder::new(input_path, config)
+        .with_classification(false) // Skip classification - use cached data
+        .with_upload_builder(true)
+        .with_upload_processing(true)
+        .with_duplicate_check(false) // Skip duplicate check - already done in preflight
+        .with_metadata_extraction(false) // Skip metadata extraction - use cached data
+        .with_preflight_data(false) // Skip preflight generation - use cached data
+        .dry_run(false);
+
+    // Set cached data from preflight result
+    if let Some(ref metadata) = preflight_result.metadata.as_object() {
+        builder = builder.with_cached_metadata(preflight_result.metadata.clone());
+    }
+
+    if let Some(ref classification) = preflight_result.classification {
+        builder = builder.with_cached_classification(classification.clone());
+    }
+
+    if let Some(ref preflight_data) = preflight_result.preflight_data {
+        builder = builder.with_cached_preflight_data(preflight_data.clone());
+    }
+
+    builder
 }
 
 /// Create a process builder configured for sync operations

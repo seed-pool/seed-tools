@@ -1,4 +1,4 @@
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use regex::Regex;
 use std::fs;
 use std::path::Path;
@@ -13,7 +13,8 @@ use crate::processing::naming::generate_release_name;
 /// Metadata extracted from video filename
 #[derive(Debug, Clone)]
 pub struct VideoMetadata {
-    pub title: String,
+    pub title: String,        // Cleaned title for metadata lookups
+    pub release_name: String, // Original filename with dots preserved
     pub year: Option<u32>,
     pub season: Option<u32>,
     pub episode: Option<u32>,
@@ -29,6 +30,7 @@ impl Default for VideoMetadata {
     fn default() -> Self {
         Self {
             title: String::new(),
+            release_name: String::new(),
             year: None,
             season: None,
             episode: None,
@@ -58,6 +60,10 @@ pub struct UploadData {
     pub imdb_id: Option<String>,
     pub tvdb_id: Option<u32>,
     pub cover_url: Option<String>,
+    // TV show specific fields
+    pub season: Option<u32>,
+    pub episode: Option<u32>,
+    pub resolution: Option<String>,
 }
 
 impl UploadData {
@@ -75,6 +81,9 @@ impl UploadData {
             imdb_id: None,
             tvdb_id: None,
             cover_url: None,
+            season: None,
+            episode: None,
+            resolution: None,
         }
     }
 }
@@ -86,15 +95,33 @@ pub fn generate_description_with_template(
     template_name: Option<&str>,
 ) -> Result<String, String> {
     use crate::templates::TemplateProcessor;
+    use log::info;
+
+    info!("🎬 Video: generate_description_with_template called");
+    info!("  Template name: {:?}", template_name);
+
+    if let Some(enriched) = enriched_metadata {
+        info!("  📊 Enriched metadata passed: {} fields", enriched.len());
+        for (key, value) in enriched.iter() {
+            if key.starts_with("tmdb_") {
+                info!("    📌 {} = {}", key, value);
+            }
+        }
+    } else {
+        info!("  ⚠️ No enriched metadata passed");
+    }
 
     let template_processor = TemplateProcessor::with_defaults()
         .map_err(|e| format!("Failed to initialize template processor: {}", e))?;
 
     let template_to_use = template_name.unwrap_or("default");
+    info!("  Using template: {}", template_to_use);
 
     if let Some(template) = template_processor.get_template("video", template_to_use) {
+        info!("  ✅ Template found, applying...");
         template_processor.apply_template(template, metadata, enriched_metadata)
     } else {
+        info!("  ⚠️ Template not found, using fallback");
         // Fallback to traditional description generation
         let screenshots = metadata
             .get("screenshots")
@@ -159,7 +186,7 @@ where
                 )?;
             }
         } else {
-            debug!("Processing file: {}", file_path.display());
+            info!("Processing file: {}", file_path.display());
             process_file(
                 file_path,
                 video_files,
@@ -281,17 +308,24 @@ pub fn generate_sample(
         info!("Sample file uploaded to CDN.");
     } else {
         info!(
-            "[DRY RUN] Would upload sample to CDN: {} {}",
+            "[DRY RUN] Would upload sample to CDN: {}{}",
             &format!("{}/previews/", remote_path.trim_end_matches('/')),
             sanitized_input_name
         );
     }
 
     // Return the public-facing URL for the sample
-    Ok(format!(
-        "{}/{}.sample.mkv",
-        image_path, sanitized_input_name
-    ))
+    // If image_path is empty, just return the filename
+    if image_path.is_empty() {
+        Ok(format!("{}.sample.mkv", sanitized_input_name))
+    } else {
+        // The CDN serves files from the root, not from subdirectories
+        Ok(format!(
+            "{}/{}.sample.mkv",
+            image_path.trim_end_matches('/'),
+            sanitized_input_name
+        ))
+    }
 }
 
 pub fn get_video_duration(video_file: &str, ffprobe_path: &str) -> Result<f64, String> {
@@ -765,6 +799,9 @@ pub fn classify_video_content(path: &str) -> VideoMetadata {
     };
     let filename = filename_str.as_str();
 
+    // Store the original release name with dots preserved
+    metadata.release_name = generate_release_name(filename);
+
     // Initialize regex patterns (enhanced from seedpool.rs)
     let season_episode_regex = Regex::new(r"(?i)S(\d{1,2})E(\d{1,3})").unwrap();
     let season_only_regex = Regex::new(r"(?i)S(\d{1,2})").unwrap();
@@ -810,37 +847,37 @@ pub fn classify_video_content(path: &str) -> VideoMetadata {
     // Codec patterns
     let codec_regex = Regex::new(r"\b(x264|x265|h264|h265|hevc|avc|xvid|divx|av1)\b").unwrap();
 
-    debug!("Classifying video content for: {}", filename);
+    info!("Classifying video content for: {}", filename);
 
     // 1. First check for TV show patterns (S##E## takes priority)
     if let Some(captures) = season_episode_regex.captures(filename) {
-        debug!("Matched SxxEyy pattern: {:?}", captures);
+        info!("Matched SxxEyy pattern: {:?}", captures);
         metadata.category = VideoCategory::TvShow;
         metadata.season = captures.get(1).and_then(|m| m.as_str().parse::<u32>().ok());
         metadata.episode = captures.get(2).and_then(|m| m.as_str().parse::<u32>().ok());
         metadata.title = extract_title_before_pattern(filename, &season_episode_regex);
     } else if let Some(captures) = episode_only_regex.captures(filename) {
-        debug!("Matched Eyy pattern: {:?}", captures);
+        info!("Matched Eyy pattern: {:?}", captures);
         metadata.category = VideoCategory::TvShow;
         metadata.season = Some(1);
         metadata.episode = captures.get(1).and_then(|m| m.as_str().parse::<u32>().ok());
         metadata.title = extract_title_before_pattern(filename, &episode_only_regex);
     } else if let Some(captures) = season_only_regex.captures(filename) {
-        debug!("Matched Sxx pattern: {:?}", captures);
+        info!("Matched Sxx pattern: {:?}", captures);
         metadata.category = VideoCategory::TvShow;
         metadata.season = captures.get(1).and_then(|m| m.as_str().parse::<u32>().ok());
         metadata.episode = Some(0); // Season pack has no specific episode
         metadata.is_boxset = true; // Season-only pattern indicates a boxset/season pack
         metadata.title = extract_title_before_pattern(filename, &season_only_regex);
     } else if boxset_regex.is_match(filename) {
-        debug!("Matched boxset keywords in filename: {}", filename);
+        info!("Matched boxset keywords in filename: {}", filename);
         metadata.category = VideoCategory::TvShow;
         metadata.is_boxset = true;
         metadata.season = Some(1);
         metadata.episode = Some(0);
         metadata.title = extract_title_before_pattern(filename, &boxset_regex);
     } else if let Some(date_caps) = full_date_regex.captures(filename) {
-        debug!("Matched full date pattern in filename: {}", filename);
+        info!("Matched full date pattern in filename: {}", filename);
         metadata.category = VideoCategory::TvShow;
         metadata.is_dated_tv = true;
         // Use the full year (group 1)
@@ -853,7 +890,7 @@ pub fn classify_video_content(path: &str) -> VideoMetadata {
         }
         metadata.title = extract_title_before_pattern(filename, &full_date_regex);
     } else if year_regex.is_match(filename) {
-        debug!("Matched year pattern in filename: {}", filename);
+        info!("Matched year pattern in filename: {}", filename);
         metadata.category = VideoCategory::Movie;
 
         // Find all year matches and pick the most likely release year
@@ -895,16 +932,16 @@ pub fn classify_video_content(path: &str) -> VideoMetadata {
     // 2. Refine category based on content-specific patterns
     // Check anime first as it often has episode patterns
     if anime_regex.is_match(filename) {
-        debug!("Detected anime patterns in filename");
+        info!("Detected anime patterns in filename");
         metadata.category = VideoCategory::Anime;
     } else if documentary_regex.is_match(filename) {
-        debug!("Detected documentary patterns in filename");
+        info!("Detected documentary patterns in filename");
         metadata.category = VideoCategory::Documentary;
     } else if concert_regex.is_match(filename) {
-        debug!("Detected concert patterns in filename");
+        info!("Detected concert patterns in filename");
         metadata.category = VideoCategory::Concert;
     } else if sports_regex.is_match(filename) {
-        debug!("Detected sports patterns in filename");
+        info!("Detected sports patterns in filename");
         metadata.category = VideoCategory::Sports;
     }
 
@@ -992,7 +1029,7 @@ pub fn classify_video_content(path: &str) -> VideoMetadata {
         }
     }
 
-    debug!("Video classification result: {:?}", metadata);
+    info!("Video classification result: {:?}", metadata);
     metadata
 }
 

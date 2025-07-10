@@ -1,6 +1,6 @@
 // Cover art extraction utilities for audio files
 
-use log::{debug, info, warn};
+use log::{info, warn};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -71,7 +71,9 @@ pub fn extract_cover_art(
             }
         } else {
             info!("Dry run: Would upload cover art from {}", path.display());
-            return Ok(Some(format!("file://{}", path.display())));
+            // Generate the CDN URL that would be used
+            let cdn_url = generate_cdn_url(&path, config)?;
+            return Ok(Some(cdn_url));
         }
     }
 
@@ -125,7 +127,7 @@ fn extract_embedded_artwork(
         }
     }
 
-    debug!("No embedded artwork found in audio file");
+    info!("No embedded artwork found in audio file");
     Ok(None)
 }
 
@@ -158,11 +160,11 @@ fn fetch_from_musicbrainz(
                 return Ok(Some(cover_path));
             }
             Err(e) => {
-                debug!("Failed to fetch cover art from MusicBrainz: {}", e);
+                info!("Failed to fetch cover art from MusicBrainz: {}", e);
             }
         }
     } else {
-        debug!("No MusicBrainz release ID available for cover art lookup");
+        info!("No MusicBrainz release ID available for cover art lookup");
     }
 
     Ok(None)
@@ -196,15 +198,14 @@ fn upload_cover(cover_path: &Path, config: &Config, dry_run: bool) -> Result<Str
                 Err(e)
             }
         }
-    } else if let Some(cdn_paths) = &config.paths.cdnpaths {
-        let cdn_path = cdn_paths
-            .remote_path
-            .as_ref()
-            .ok_or_else(|| SeedError::Other("CDN remote path not configured".to_string()))?;
+    } else if let Some(cdn_paths) = &config.paths.screenshots {
+        let cdn_path = cdn_paths.remote_path.as_ref().ok_or_else(|| {
+            SeedError::Other("Screenshots remote path not configured".to_string())
+        })?;
 
         // Upload to CDN via SCP
         info!("Uploading cover art to CDN...");
-        let remote_path = format!("{}/covers/", cdn_path.trim_end_matches('/'));
+        let remote_path = format!("{}/", cdn_path.trim_end_matches('/'));
         let filename = cover_path
             .file_name()
             .and_then(|n| n.to_str())
@@ -223,7 +224,7 @@ fn upload_cover(cover_path: &Path, config: &Config, dry_run: bool) -> Result<Str
                 .image_path
                 .as_ref()
                 .ok_or_else(|| SeedError::Other("CDN image path not configured".to_string()))?;
-            let url = format!("{}/covers/{}", image_path.trim_end_matches('/'), filename);
+            let url = format!("{}/{}", image_path.trim_end_matches('/'), filename);
             info!("✅ Cover art uploaded to CDN: {}", url);
             Ok(url)
         } else {
@@ -238,4 +239,60 @@ fn upload_cover(cover_path: &Path, config: &Config, dry_run: bool) -> Result<Str
             "No upload destination configured".to_string(),
         ))
     }
+}
+
+/// Generate the CDN URL that would be used for the cover art
+fn generate_cdn_url(cover_path: &Path, config: &Config) -> Result<String> {
+    let filename = cover_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| SeedError::Other("Invalid cover filename".to_string()))?;
+
+    // Check which CDN to use (ImgBB or tracker CDN)
+    if let Some(imgbb_config) = &config.imgbb {
+        if !imgbb_config.imgbb_api_key.is_empty() {
+            // For ImgBB, we would generate a URL but we can't know the exact URL without uploading
+            // So we'll use a placeholder format that indicates it would be uploaded to ImgBB
+            return Ok(format!("https://i.ibb.co/PLACEHOLDER/{}", filename));
+        }
+    }
+
+    // Try to get tracker CDN paths from screenshots config
+    if let Some(cdn_paths) = &config.paths.screenshots {
+        if let Some(ref image_path) = cdn_paths.image_path {
+            let url = format!("{}/{}", image_path.trim_end_matches('/'), filename);
+            return Ok(url);
+        }
+    }
+
+    // Try to load tracker-specific configs to check their CDN settings
+    // Check Seedpool config
+    if let Ok(seedpool_content) = std::fs::read_to_string("config/trackers/seedpool.yaml") {
+        if let Ok(seedpool_config) =
+            serde_yaml::from_str::<crate::core::types::SeedpoolConfig>(&seedpool_content)
+        {
+            if seedpool_config.general.enabled {
+                let url = format!(
+                    "{}/{}",
+                    seedpool_config.screenshots.image_path.trim_end_matches('/'),
+                    filename
+                );
+                return Ok(url);
+            }
+        }
+    }
+
+    // Check TorrentLeech config
+    if let Ok(tl_content) = std::fs::read_to_string("config/trackers/torrentleech.yaml") {
+        if let Ok(_tl_config) =
+            serde_yaml::from_str::<crate::core::types::TorrentLeechConfig>(&tl_content)
+        {
+            // TorrentLeech might have different CDN setup (keeping /covers for TL as it might be different)
+            return Ok(format!("https://cdn.torrentleech.org/covers/{}", filename));
+        }
+    }
+
+    Err(SeedError::Other(
+        "No CDN configuration available".to_string(),
+    ))
 }

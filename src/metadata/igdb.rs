@@ -4,7 +4,7 @@ use crate::core::{
     error::{Result, SeedError},
     Config,
 };
-use log::{debug, error, info};
+use log::{error, info};
 use regex::Regex;
 use reqwest::blocking::Client;
 use serde_json::Value;
@@ -203,7 +203,7 @@ pub fn search_igdb_game(
             info!("  ... and {} more results", games.len() - 3);
         }
     } else {
-        debug!("IGDB raw response: {}", response_text);
+        info!("IGDB raw response: {}", response_text);
     }
     Ok(games)
 }

@@ -160,7 +160,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Parse CLI arguments
     info!("Parsing arguments...");
     let cli = Cli::parse();
-    debug!("Parsed arguments: {:?}", cli);
+    info!("Parsed arguments: {:?}", cli);
 
     // Log dry-run mode if enabled
     if cli.dry_run {
@@ -197,7 +197,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             );
             format!("Failed to extract binary paths: {}", e)
         })?;
-    debug!(
+    info!(
         "Binary paths: ffmpeg={:?}, ffprobe={:?}, mkbrr={:?}, mediainfo={:?}",
         ffmpeg_path, ffprobe_path, mkbrr_path, mediainfo_path
     );
@@ -239,9 +239,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         // Run the preflight check
         match preflight_check(input_path_str, &main_config, cli.dry_run) {
-            Ok(result) => {
-                // Print the results
-                print_preflight_results(&result);
+            Ok(process_result) => {
+                // Extract preflight data and print the results
+                if let Some(preflight_data) = process_result.preflight_data {
+                    print_preflight_results(&preflight_data);
+                } else {
+                    println!("❌ No preflight data generated");
+                }
                 return Ok(());
             }
             Err(e) => {

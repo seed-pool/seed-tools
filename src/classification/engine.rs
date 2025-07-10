@@ -1,4 +1,5 @@
 use crate::core::MediaType;
+use log::info;
 use serde_json::Value as JsonValue;
 
 /// Media classification system that coordinates classification from media modules
@@ -70,8 +71,6 @@ impl MediaClassification {
 
     /// Perform the classification
     pub fn classify(self) -> Result<ClassificationResult, String> {
-        use log::{debug, info};
-
         let media_type = self.media_type.ok_or("Media type not set")?;
         let input_path = self.input_path.ok_or("Input path not set")?;
         let metadata = self
@@ -85,7 +84,7 @@ impl MediaClassification {
             media_type
         );
         info!("📁 Input path: {}", input_path);
-        debug!(
+        info!(
             "📊 Input metadata: {}",
             serde_json::to_string_pretty(&metadata).unwrap_or_else(|_| "Invalid JSON".to_string())
         );
@@ -149,8 +148,6 @@ impl MediaClassification {
         input_path: &str,
         metadata: &JsonValue,
     ) -> Result<(Option<String>, Option<String>, JsonValue), String> {
-        use log::debug;
-
         // First try to use centralized classification rules
         use crate::classification::rules;
 
@@ -186,7 +183,7 @@ impl MediaClassification {
             }
         }
 
-        debug!(
+        info!(
             "Enriched metadata for classification: {}",
             serde_json::to_string_pretty(&enriched_metadata)
                 .unwrap_or_else(|_| "Invalid JSON".to_string())
@@ -251,11 +248,13 @@ impl MediaClassification {
 
         // Generate Seedpool mapping
         if let Some(cat) = category {
-            use crate::trackers::seedpool::create_torrent_info_from_media_strings;
+            use crate::trackers::seedpool::create_torrent_info_from_media_strings_with_metadata;
 
-            if let Ok(torrent_info) =
-                create_torrent_info_from_media_strings(Some(cat), source_type.as_deref())
-            {
+            if let Ok(torrent_info) = create_torrent_info_from_media_strings_with_metadata(
+                Some(cat),
+                source_type.as_deref(),
+                Some(metadata),
+            ) {
                 mappings.push((
                     "Seedpool".to_string(),
                     format!(

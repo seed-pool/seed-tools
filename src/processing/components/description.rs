@@ -72,8 +72,83 @@ impl UploadComponent for DescriptionComponent {
     }
 
     fn process(&self) -> Result<ComponentResult> {
+        use log::info;
+
+        info!("📝 DescriptionComponent: Starting description generation");
+        info!("  Media type: {:?}", self.media_type);
+        info!("  Template: {:?}", self.template_name);
+
+        if let Some(ref enriched) = self.enriched_metadata {
+            info!(
+                "  📊 Enriched metadata available: {} fields",
+                enriched.len()
+            );
+            for (key, value) in enriched.iter() {
+                if key.starts_with("tmdb_")
+                    || key.starts_with("musicbrainz_")
+                    || key == "tracklist_rows"
+                {
+                    let preview = if value.len() > 100 {
+                        format!("{}...", &value[..100])
+                    } else {
+                        value.clone()
+                    };
+                    info!("    📌 {} = {}", key, preview);
+                }
+            }
+        } else {
+            info!("  ⚠️ No enriched metadata available");
+        }
+
         // Prepare metadata for template processing
         let mut metadata = self.metadata.clone();
+
+        // Extract additional metadata from mediainfo if available for audio
+        if matches!(self.media_type, MediaType::Audio(_)) && self.mediainfo.is_some() {
+            if let Some(mediainfo_text) = &self.mediainfo {
+                // Try to extract metadata from mediainfo that might not be in enriched data
+                let mut extracted_from_mediainfo = std::collections::HashMap::new();
+
+                for line in mediainfo_text.lines() {
+                    let line = line.trim();
+                    if line.contains(':') {
+                        let parts: Vec<&str> = line.splitn(2, ':').collect();
+                        if parts.len() == 2 {
+                            let key = parts[0].trim();
+                            let value = parts[1].trim();
+
+                            // Map mediainfo fields to template fields
+                            match key {
+                                "Album" if !line.starts_with("Album/") => {
+                                    extracted_from_mediainfo
+                                        .insert("mediainfo_album".to_string(), value.to_string());
+                                }
+                                "Performer" => {
+                                    extracted_from_mediainfo
+                                        .insert("mediainfo_artist".to_string(), value.to_string());
+                                }
+                                "Genre" => {
+                                    extracted_from_mediainfo
+                                        .insert("mediainfo_genre".to_string(), value.to_string());
+                                }
+                                "Recorded date" => {
+                                    if let Some(year) = value.split('-').next() {
+                                        extracted_from_mediainfo
+                                            .insert("mediainfo_year".to_string(), year.to_string());
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+
+                // Add extracted mediainfo fields to metadata (they can be used as fallbacks in templates)
+                for (key, value) in extracted_from_mediainfo {
+                    metadata[key] = serde_json::json!(value);
+                }
+            }
+        }
 
         // Add screenshots and mediainfo to metadata if available
         if !self.screenshots.is_empty() {

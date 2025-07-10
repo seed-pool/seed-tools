@@ -30,6 +30,7 @@ use crate::{
     media::detector::detect_media_type,
     processing::{
         components::screenshots::ScreenshotLayout, preflight::preflight_check, process_builder,
+        process_builder::ProcessResult,
     },
     trackers::{seedpool::parse_seedpool_category_type, TorrentInfo},
 };
@@ -88,13 +89,13 @@ struct AppState {
     category_code: Option<String>,
     log_output: Arc<Mutex<Vec<String>>>,
     log_scroll_offset: usize,
-    preflight_result: Option<PreflightCheckResult>,
+    preflight_result: Option<ProcessResult>,
     upload_running: bool,
     preflight_running: bool,
     input_buffer: String,
     show_help: bool,
     dry_run: bool,
-    preflight_receiver: Option<std::sync::mpsc::Receiver<PreflightCheckResult>>,
+    preflight_receiver: Option<std::sync::mpsc::Receiver<ProcessResult>>,
     file_filter: String,
     filter_active: bool,
     last_click_time: std::time::Instant,
@@ -127,6 +128,10 @@ struct AppState {
     // Mouse tracking for hover effects
     mouse_position: Option<(u16, u16)>,
 
+    // Log refresh mechanism
+    last_log_refresh: std::time::Instant,
+    last_log_count: usize,
+
     // Description preview
     description_preview: Option<String>,
     preview_scroll_offset: usize,
@@ -138,6 +143,15 @@ impl AppState {
         let file_list = get_files_in_dir(&current_dir);
         let filtered_file_list = file_list.clone();
         let file_list_lowercase = file_list.iter().map(|s| s.to_lowercase()).collect();
+
+        // Initialize log count
+        let mut initial_log_count = 0;
+        if let Ok(log_content) = std::fs::read_to_string("seedbrr.log") {
+            initial_log_count = log_content
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .count();
+        }
 
         Ok(Self {
             current_state: UIState::Main,
@@ -185,6 +199,9 @@ impl AppState {
             upload_progress_receiver: None,
             // Mouse tracking
             mouse_position: None,
+            // Log refresh mechanism
+            last_log_refresh: std::time::Instant::now(),
+            last_log_count: initial_log_count,
             // Description preview
             description_preview: None,
             preview_scroll_offset: 0,
@@ -285,6 +302,20 @@ impl AppState {
         self.log_output.lock().unwrap().clear();
     }
 
+    fn get_total_log_count(&self) -> usize {
+        let mut total_logs = self.log_output.lock().unwrap().len();
+
+        // Add file log count
+        if let Ok(log_content) = std::fs::read_to_string("seedbrr.log") {
+            total_logs += log_content
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .count();
+        }
+
+        total_logs
+    }
+
     fn get_action_availability(&self, action: &str) -> ActionAvailability {
         match action {
             "preflight" => {
@@ -382,6 +413,35 @@ pub fn launch_ui() -> Result<(), Box<dyn std::error::Error>> {
                     tracker_status.progress = progress;
                     tracker_status.message = message;
                 }
+            }
+
+            // Check if all uploads are complete
+            let all_complete = state
+                .tracker_upload_statuses
+                .iter()
+                .all(|s| matches!(s.status, UploadStatus::Success | UploadStatus::Failed));
+
+            if all_complete && !state.tracker_upload_statuses.is_empty() {
+                // All uploads are done, reset upload_running
+                state.upload_running = false;
+            }
+        }
+
+        // Log refresh mechanism for ViewingLog state
+        if state.current_state == UIState::ViewingLog {
+            let now = std::time::Instant::now();
+            let refresh_interval = Duration::from_millis(1500); // 1.5 seconds
+
+            if now.duration_since(state.last_log_refresh) >= refresh_interval {
+                let current_log_count = state.get_total_log_count();
+
+                // If new logs were added, reset scroll to show most recent
+                if current_log_count > state.last_log_count {
+                    state.log_scroll_offset = 0; // Reset to auto-scroll to bottom
+                }
+
+                state.last_log_count = current_log_count;
+                state.last_log_refresh = now;
             }
         }
 
@@ -870,7 +930,17 @@ fn handle_category_input(key: event::KeyEvent, state: &mut AppState) -> io::Resu
 }
 
 fn handle_log_view_input(key: event::KeyEvent, state: &mut AppState) -> io::Result<()> {
-    let log_len = state.log_output.lock().unwrap().len();
+    // Calculate total log count (UI logs + file logs)
+    let mut total_logs = state.log_output.lock().unwrap().len();
+
+    // Add file log count
+    if let Ok(log_content) = std::fs::read_to_string("seedbrr.log") {
+        total_logs += log_content
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count();
+    }
+
     match key.code {
         KeyCode::Up => {
             if state.log_scroll_offset > 0 {
@@ -878,7 +948,7 @@ fn handle_log_view_input(key: event::KeyEvent, state: &mut AppState) -> io::Resu
             }
         }
         KeyCode::Down => {
-            if state.log_scroll_offset < log_len.saturating_sub(1) {
+            if state.log_scroll_offset < total_logs.saturating_sub(1) {
                 state.log_scroll_offset += 1;
             }
         }
@@ -886,10 +956,25 @@ fn handle_log_view_input(key: event::KeyEvent, state: &mut AppState) -> io::Resu
             state.log_scroll_offset = state.log_scroll_offset.saturating_sub(10);
         }
         KeyCode::PageDown => {
-            state.log_scroll_offset = (state.log_scroll_offset + 10).min(log_len.saturating_sub(1));
+            state.log_scroll_offset =
+                (state.log_scroll_offset + 10).min(total_logs.saturating_sub(1));
+        }
+        KeyCode::Home => {
+            // Go to top of logs
+            state.log_scroll_offset = 0;
+        }
+        KeyCode::End => {
+            // Go to bottom of logs (most recent)
+            state.log_scroll_offset = 0; // Reset to 0 to trigger auto-scroll to bottom
         }
         KeyCode::Esc | KeyCode::Char('l') | KeyCode::Char('L') => {
             state.current_state = UIState::Main;
+        }
+        KeyCode::Char('u') | KeyCode::Char('U') => {
+            // Return to upload progress view if upload is running
+            if state.upload_running {
+                state.current_state = UIState::UploadProgress;
+            }
         }
         _ => {}
     }
@@ -1425,6 +1510,10 @@ fn handle_upload_progress_input(key: event::KeyEvent, state: &mut AppState) -> i
                 .all(|s| matches!(s.status, UploadStatus::Success | UploadStatus::Failed));
             if all_complete {
                 state.current_state = UIState::Main;
+                // Reset upload state
+                state.upload_running = false;
+                state.tracker_upload_statuses.clear();
+                state.upload_progress_receiver = None;
             }
         }
         _ => {}
@@ -1777,136 +1866,182 @@ fn render_main_view(f: &mut ratatui::Frame, area: ratatui::layout::Rect, state: 
 
     // Preflight results area
     let mut preflight_lines = vec![];
-    if let Some(ref result) = state.preflight_result {
-        preflight_lines.push(Line::from(vec![
-            Span::raw("📝 Title: "),
-            Span::styled(&result.release_name, Style::default().fg(Color::White)),
-        ]));
-
-        preflight_lines.push(Line::from(vec![
-            Span::raw("🏷️  Generated: "),
-            Span::styled(
-                &result.generated_release_name,
-                Style::default().fg(Color::Cyan),
-            ),
-        ]));
-
-        preflight_lines.push(Line::from(vec![
-            Span::raw("🎯 Type: "),
-            Span::styled(&result.release_type, Style::default().fg(Color::Blue)),
-        ]));
-
-        if result.is_boxset {
+    if let Some(ref process_result) = state.preflight_result {
+        if let Some(ref result) = process_result.preflight_data {
             preflight_lines.push(Line::from(vec![
-                Span::raw("📦 Format: "),
-                Span::styled("Season Pack/Boxset", Style::default().fg(Color::Magenta)),
+                Span::raw("📝 Title: "),
+                Span::styled(&result.release_name, Style::default().fg(Color::White)),
             ]));
-        } else if result.episode_number.is_some() && result.episode_number != Some(0) {
-            preflight_lines.push(Line::from(vec![
-                Span::raw("📺 Format: "),
-                Span::styled("Single Episode", Style::default().fg(Color::Green)),
-            ]));
-        }
 
-        // Show season/episode info
-        if let Some(season) = result.season_number {
-            if let Some(episode) = result.episode_number {
-                if episode > 0 {
+            preflight_lines.push(Line::from(vec![
+                Span::raw("🏷️  Generated: "),
+                Span::styled(
+                    &result.generated_release_name,
+                    Style::default().fg(Color::Cyan),
+                ),
+            ]));
+
+            preflight_lines.push(Line::from(vec![
+                Span::raw("🎯 Type: "),
+                Span::styled(&result.release_type, Style::default().fg(Color::Blue)),
+            ]));
+
+            if result.is_boxset {
+                preflight_lines.push(Line::from(vec![
+                    Span::raw("📦 Format: "),
+                    Span::styled("Season Pack/Boxset", Style::default().fg(Color::Magenta)),
+                ]));
+            } else if result.episode_number.is_some() && result.episode_number != Some(0) {
+                preflight_lines.push(Line::from(vec![
+                    Span::raw("📺 Format: "),
+                    Span::styled("Single Episode", Style::default().fg(Color::Green)),
+                ]));
+            }
+
+            // Show season/episode info
+            if let Some(season) = result.season_number {
+                if let Some(episode) = result.episode_number {
+                    if episode > 0 {
+                        preflight_lines.push(Line::from(vec![
+                            Span::raw("📺 Season/Episode: "),
+                            Span::styled(
+                                format!("S{:02}E{:02}", season, episode),
+                                Style::default().fg(Color::Yellow),
+                            ),
+                        ]));
+                    } else {
+                        preflight_lines.push(Line::from(vec![
+                            Span::raw("📺 Season: "),
+                            Span::styled(format!("{}", season), Style::default().fg(Color::Yellow)),
+                        ]));
+                    }
+                }
+            }
+
+            preflight_lines.push(Line::from(vec![
+                Span::raw("🔍 Dupe Check: "),
+                Span::styled(
+                    &result.dupe_check,
+                    Style::default().fg(if result.dupe_check.contains("PASS") {
+                        Color::Green
+                    } else {
+                        Color::Red
+                    }),
+                ),
+            ]));
+
+            // Show external IDs
+            if result.tmdb_id > 0 || result.imdb_id.is_some() || result.tvdb_id.is_some() {
+                preflight_lines.push(Line::from(vec![Span::raw("🆔 External IDs: ")]));
+                if result.tmdb_id > 0 {
                     preflight_lines.push(Line::from(vec![
-                        Span::raw("📺 Season/Episode: "),
+                        Span::raw("   TMDB: "),
                         Span::styled(
-                            format!("S{:02}E{:02}", season, episode),
-                            Style::default().fg(Color::Yellow),
+                            format!("{}", result.tmdb_id),
+                            Style::default().fg(Color::Cyan),
                         ),
                     ]));
-                } else {
+                }
+                if let Some(ref imdb_id) = result.imdb_id {
                     preflight_lines.push(Line::from(vec![
-                        Span::raw("📺 Season: "),
-                        Span::styled(format!("{}", season), Style::default().fg(Color::Yellow)),
+                        Span::raw("   IMDB: "),
+                        Span::styled(imdb_id, Style::default().fg(Color::Cyan)),
+                    ]));
+                }
+                if let Some(tvdb_id) = result.tvdb_id {
+                    preflight_lines.push(Line::from(vec![
+                        Span::raw("   TVDB: "),
+                        Span::styled(format!("{}", tvdb_id), Style::default().fg(Color::Cyan)),
                     ]));
                 }
             }
-        }
 
-        preflight_lines.push(Line::from(vec![
-            Span::raw("🔍 Dupe Check: "),
-            Span::styled(
-                &result.dupe_check,
-                Style::default().fg(if result.dupe_check.contains("PASS") {
-                    Color::Green
-                } else {
-                    Color::Red
-                }),
-            ),
-        ]));
+            // Show IGDB data for games
+            if result.release_type.contains("Game") && result.igdb_id.is_some() {
+                preflight_lines.push(Line::from(vec![Span::raw("🎮 IGDB Info: ")]));
 
-        // Show external IDs
-        if result.tmdb_id > 0 || result.imdb_id.is_some() || result.tvdb_id.is_some() {
-            preflight_lines.push(Line::from(vec![Span::raw("🆔 External IDs: ")]));
-            if result.tmdb_id > 0 {
+                if let Some(igdb_id) = result.igdb_id {
+                    preflight_lines.push(Line::from(vec![
+                        Span::raw("   ID: "),
+                        Span::styled(format!("{}", igdb_id), Style::default().fg(Color::Cyan)),
+                    ]));
+                }
+
+                if let Some(ref developer) = result.igdb_developer {
+                    preflight_lines.push(Line::from(vec![
+                        Span::raw("   Developer: "),
+                        Span::styled(developer, Style::default().fg(Color::Yellow)),
+                    ]));
+                }
+
+                if let Some(ref publisher) = result.igdb_publisher {
+                    preflight_lines.push(Line::from(vec![
+                        Span::raw("   Publisher: "),
+                        Span::styled(publisher, Style::default().fg(Color::Yellow)),
+                    ]));
+                }
+
+                if let Some(ref genres) = result.igdb_genres {
+                    preflight_lines.push(Line::from(vec![
+                        Span::raw("   Genres: "),
+                        Span::styled(genres, Style::default().fg(Color::Magenta)),
+                    ]));
+                }
+
+                if let Some(rating) = result.igdb_rating {
+                    preflight_lines.push(Line::from(vec![
+                        Span::raw("   Rating: "),
+                        Span::styled(
+                            format!("{:.1}/100", rating),
+                            Style::default().fg(if rating >= 70.0 {
+                                Color::Green
+                            } else if rating >= 50.0 {
+                                Color::Yellow
+                            } else {
+                                Color::Red
+                            }),
+                        ),
+                    ]));
+                }
+
+                if let Some(ref platforms) = result.igdb_platforms {
+                    if !platforms.is_empty() {
+                        let platform_str = if platforms.len() > 3 {
+                            format!(
+                                "{} and {} more",
+                                platforms[..3].join(", "),
+                                platforms.len() - 3
+                            )
+                        } else {
+                            platforms.join(", ")
+                        };
+                        preflight_lines.push(Line::from(vec![
+                            Span::raw("   Platforms: "),
+                            Span::styled(platform_str, Style::default().fg(Color::Blue)),
+                        ]));
+                    }
+                }
+            }
+
+            // Show audio languages (or platforms for games without IGDB data)
+            if !result.audio_languages.is_empty() && !result.release_type.contains("Game") {
                 preflight_lines.push(Line::from(vec![
-                    Span::raw("   TMDB: "),
+                    Span::raw("🔊 Audio: "),
                     Span::styled(
-                        format!("{}", result.tmdb_id),
-                        Style::default().fg(Color::Cyan),
+                        result.audio_languages.join(", "),
+                        Style::default().fg(Color::Green),
                     ),
                 ]));
             }
-            if let Some(ref imdb_id) = result.imdb_id {
-                preflight_lines.push(Line::from(vec![
-                    Span::raw("   IMDB: "),
-                    Span::styled(imdb_id, Style::default().fg(Color::Cyan)),
-                ]));
-            }
-            if let Some(tvdb_id) = result.tvdb_id {
-                preflight_lines.push(Line::from(vec![
-                    Span::raw("   TVDB: "),
-                    Span::styled(format!("{}", tvdb_id), Style::default().fg(Color::Cyan)),
-                ]));
-            }
-        }
 
-        // Show IGDB data for games
-        if result.release_type.contains("Game") && result.igdb_id.is_some() {
-            preflight_lines.push(Line::from(vec![Span::raw("🎮 IGDB Info: ")]));
-
-            if let Some(igdb_id) = result.igdb_id {
+            // Show album cover info for ebooks/music
+            if result.album_cover != "N/A" {
                 preflight_lines.push(Line::from(vec![
-                    Span::raw("   ID: "),
-                    Span::styled(format!("{}", igdb_id), Style::default().fg(Color::Cyan)),
-                ]));
-            }
-
-            if let Some(ref developer) = result.igdb_developer {
-                preflight_lines.push(Line::from(vec![
-                    Span::raw("   Developer: "),
-                    Span::styled(developer, Style::default().fg(Color::Yellow)),
-                ]));
-            }
-
-            if let Some(ref publisher) = result.igdb_publisher {
-                preflight_lines.push(Line::from(vec![
-                    Span::raw("   Publisher: "),
-                    Span::styled(publisher, Style::default().fg(Color::Yellow)),
-                ]));
-            }
-
-            if let Some(ref genres) = result.igdb_genres {
-                preflight_lines.push(Line::from(vec![
-                    Span::raw("   Genres: "),
-                    Span::styled(genres, Style::default().fg(Color::Magenta)),
-                ]));
-            }
-
-            if let Some(rating) = result.igdb_rating {
-                preflight_lines.push(Line::from(vec![
-                    Span::raw("   Rating: "),
+                    Span::raw("🖼️  Cover: "),
                     Span::styled(
-                        format!("{:.1}/100", rating),
-                        Style::default().fg(if rating >= 70.0 {
+                        &result.album_cover,
+                        Style::default().fg(if result.album_cover.contains("Available") {
                             Color::Green
-                        } else if rating >= 50.0 {
-                            Color::Yellow
                         } else {
                             Color::Red
                         }),
@@ -1914,61 +2049,21 @@ fn render_main_view(f: &mut ratatui::Frame, area: ratatui::layout::Rect, state: 
                 ]));
             }
 
-            if let Some(ref platforms) = result.igdb_platforms {
-                if !platforms.is_empty() {
-                    let platform_str = if platforms.len() > 3 {
-                        format!(
-                            "{} and {} more",
-                            platforms[..3].join(", "),
-                            platforms.len() - 3
-                        )
-                    } else {
-                        platforms.join(", ")
-                    };
+            if !result.tracker_categories.is_empty() {
+                preflight_lines.push(Line::from(vec![Span::raw("📋 Tracker Mappings: ")]));
+                for (tracker, category) in &result.tracker_categories {
                     preflight_lines.push(Line::from(vec![
-                        Span::raw("   Platforms: "),
-                        Span::styled(platform_str, Style::default().fg(Color::Blue)),
+                        Span::raw("   "),
+                        Span::styled(tracker, Style::default().fg(Color::Yellow)),
+                        Span::raw(" → "),
+                        Span::styled(category, Style::default().fg(Color::Cyan)),
                     ]));
                 }
             }
-        }
-
-        // Show audio languages (or platforms for games without IGDB data)
-        if !result.audio_languages.is_empty() && !result.release_type.contains("Game") {
-            preflight_lines.push(Line::from(vec![
-                Span::raw("🔊 Audio: "),
-                Span::styled(
-                    result.audio_languages.join(", "),
-                    Style::default().fg(Color::Green),
-                ),
-            ]));
-        }
-
-        // Show album cover info for ebooks/music
-        if result.album_cover != "N/A" {
-            preflight_lines.push(Line::from(vec![
-                Span::raw("🖼️  Cover: "),
-                Span::styled(
-                    &result.album_cover,
-                    Style::default().fg(if result.album_cover.contains("Available") {
-                        Color::Green
-                    } else {
-                        Color::Red
-                    }),
-                ),
-            ]));
-        }
-
-        if !result.tracker_categories.is_empty() {
-            preflight_lines.push(Line::from(vec![Span::raw("📋 Tracker Mappings: ")]));
-            for (tracker, category) in &result.tracker_categories {
-                preflight_lines.push(Line::from(vec![
-                    Span::raw("   "),
-                    Span::styled(tracker, Style::default().fg(Color::Yellow)),
-                    Span::raw(" → "),
-                    Span::styled(category, Style::default().fg(Color::Cyan)),
-                ]));
-            }
+        } else {
+            preflight_lines.push(Line::from(vec![Span::raw(
+                "❌ No preflight data available",
+            )]));
         }
     } else {
         preflight_lines.push(Line::from(vec![
@@ -2354,19 +2449,37 @@ fn render_log_view(f: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &
         }
     }
 
+    // Calculate the number of lines to show (all logs if they fit, otherwise use scrolling)
+    let available_height = area.height as usize - 2;
+    let total_logs = all_logs.len();
+
+    // If we have more logs than can fit, show the most recent ones by default
+    let start_index = if total_logs > available_height {
+        if state.log_scroll_offset == 0 {
+            // Auto-scroll to bottom (most recent logs)
+            total_logs - available_height
+        } else {
+            // User is scrolling, respect their position
+            state
+                .log_scroll_offset
+                .min(total_logs.saturating_sub(available_height))
+        }
+    } else {
+        0
+    };
+
     let items: Vec<ListItem> = all_logs
         .iter()
-        .skip(state.log_scroll_offset)
-        .take(area.height as usize - 2)
+        .skip(start_index)
+        .take(available_height)
         .map(|log| {
             // Sanitize log lines for display
             let sanitized = log
                 .replace('\n', " ") // Replace newlines with spaces
                 .replace('\r', "") // Remove carriage returns
-                .replace('\t', "  ") // Replace tabs with spaces
-                .chars()
-                .take(area.width as usize - 4) // Truncate to terminal width
-                .collect::<String>();
+                .replace('\t', "  "); // Replace tabs with spaces
+
+            // Don't truncate - let the terminal handle line wrapping
             ListItem::new(sanitized)
         })
         .collect();
@@ -2374,7 +2487,7 @@ fn render_log_view(f: &mut ratatui::Frame, area: ratatui::layout::Rect, state: &
     let log_list = List::new(items).block(
         Block::default()
             .title(format!(
-                "Logs ({} lines) - Scroll with mouse wheel",
+                "Logs ({} lines) - Auto-refreshing every 1.5s - Scroll with mouse wheel",
                 all_logs.len()
             ))
             .borders(Borders::ALL),
@@ -2884,7 +2997,7 @@ fn start_preflight_check(state: &mut AppState) -> io::Result<()> {
     };
 
     // Create a channel to communicate results
-    let (tx, rx) = std::sync::mpsc::channel::<PreflightCheckResult>();
+    let (tx, rx) = std::sync::mpsc::channel::<ProcessResult>();
     state.preflight_receiver = Some(rx);
 
     thread::spawn(move || {
@@ -2905,7 +3018,18 @@ fn start_preflight_check(state: &mut AppState) -> io::Result<()> {
         };
 
         match preflight_check(path_str, &config, dry_run) {
-            Ok(result) => {
+            Ok(process_result) => {
+                // Extract preflight data from the ProcessResult
+                let result = match process_result.preflight_data.as_ref() {
+                    Some(preflight_data) => preflight_data,
+                    None => {
+                        log_output.lock().unwrap().push(
+                            "❌ Preflight check failed: No preflight data generated".to_string(),
+                        );
+                        return;
+                    }
+                };
+
                 let mut logs = log_output.lock().unwrap();
                 logs.push("\n===== PREFLIGHT CHECK RESULTS =====".to_string());
                 logs.push(format!("📁 Path: {}", input_path.display()));
@@ -2984,8 +3108,8 @@ fn start_preflight_check(state: &mut AppState) -> io::Result<()> {
 
                 logs.push("\n✅ Preflight check completed!".to_string());
 
-                // Send the result through the channel
-                let _ = tx.send(result);
+                // Send the full ProcessResult through the channel
+                let _ = tx.send(process_result);
             }
             Err(e) => {
                 log_output
@@ -2994,7 +3118,7 @@ fn start_preflight_check(state: &mut AppState) -> io::Result<()> {
                     .push(format!("❌ Preflight check failed: {}", e));
                 // Still need to complete the operation
                 // Send a dummy result to unblock the UI
-                let _ = tx.send(PreflightCheckResult {
+                let dummy_preflight = PreflightCheckResult {
                     release_name: "Error".to_string(),
                     generated_release_name: "Error".to_string(),
                     dupe_check: format!("Error: {}", e),
@@ -3017,7 +3141,19 @@ fn start_preflight_check(state: &mut AppState) -> io::Result<()> {
                     igdb_rating: None,
                     igdb_summary: None,
                     igdb_platforms: None,
-                });
+                };
+
+                let dummy_process_result = ProcessResult {
+                    media_type: MediaType::Hobby(crate::core::HobbyType::Directory),
+                    title: "Error".to_string(),
+                    metadata: serde_json::Value::Object(serde_json::Map::new()),
+                    classification: None,
+                    upload_data: None,
+                    preflight_data: Some(dummy_preflight),
+                    upload_result: None,
+                };
+
+                let _ = tx.send(dummy_process_result);
             }
         }
 
@@ -3076,14 +3212,8 @@ fn start_upload(state: &mut AppState) -> io::Result<()> {
     let ebook_format = state.ebook_format.clone();
     let game_platform = state.game_platform.clone();
 
-    // Extract component settings
-    let enable_screenshots = state.enable_screenshots;
-    let screenshot_count = state.screenshot_count;
-    let screenshot_layout = state.screenshot_layout.clone();
-    let enable_mediainfo = state.enable_mediainfo;
-    let enable_nfo = state.enable_nfo;
-    let enable_sample = state.enable_sample;
-    let enable_cover_art = state.enable_cover_art;
+    // Clone preflight result for TMDB data
+    let preflight_result = state.preflight_result.clone();
 
     // Load config for the upload
     let config = match load_config() {
@@ -3259,65 +3389,84 @@ fn start_upload(state: &mut AppState) -> io::Result<()> {
                         enable_cover_art,
                     );
 
-                    match process_builder::upload_builder(
-                        &path_str,
-                        std::sync::Arc::new(config.clone()),
-                    )
-                    .with_component_config(component_config)
-                    .force_category(category_str)
-                    .force_type(type_str)
-                    .dry_run(dry_run)
-                    .build()
-                    {
-                        Ok(_result) => {
-                            // Process upload for each selected tracker
-                            for tracker in &selected_trackers {
-                                // Update status to in progress
-                                progress_tx
-                                    .send((
-                                        tracker.clone(),
-                                        UploadStatus::InProgress,
-                                        0.0,
-                                        format!(
-                                            "Uploading with {} - {}",
-                                            torrent_info.category_name(),
-                                            torrent_info.type_name()
-                                        ),
-                                    ))
-                                    .ok();
+                    let mut builder = if let Some(ref preflight_process_result) = preflight_result {
+                        // Use preflight data to avoid recomputation
+                        process_builder::upload_builder_with_preflight(
+                            &path_str,
+                            std::sync::Arc::new(config.clone()),
+                            preflight_process_result,
+                        )
+                    } else {
+                        // No preflight data available, use regular builder
+                        process_builder::upload_builder(
+                            &path_str,
+                            std::sync::Arc::new(config.clone()),
+                        )
+                    };
 
-                                log_output
-                                    .lock()
-                                    .unwrap()
-                                    .push(format!("📤 Processing upload to {}", tracker));
+                    builder = builder
+                        .with_component_config(component_config)
+                        .force_category(category_str.clone())
+                        .force_type(type_str.clone())
+                        .dry_run(dry_run);
 
-                                // Simulate upload progress
-                                for i in 1..=10 {
-                                    thread::sleep(Duration::from_millis(100));
-                                    progress_tx
-                                        .send((
-                                            tracker.clone(),
-                                            UploadStatus::InProgress,
-                                            i as f32 / 10.0,
-                                            format!("Uploading... {}/10", i),
-                                        ))
-                                        .ok();
+                    // Add TMDB data from preflight if available (for backward compatibility)
+                    if let Some(ref preflight_process_result) = preflight_result {
+                        if let Some(ref preflight) = preflight_process_result.preflight_data {
+                            if preflight.tmdb_id > 0 {
+                                use crate::core::types::UploadComponent;
+                                let tmdb_component = UploadComponent::TmdbData {
+                                    tmdb_id: preflight.tmdb_id,
+                                    imdb_id: preflight.imdb_id.clone(),
+                                    tvdb_id: preflight.tvdb_id,
+                                    title: preflight.release_name.clone(),
+                                    year: None, // Could extract from metadata if needed
+                                };
+                                // TODO: Add TMDB component when ProcessBuilder supports it
+                            }
+                        }
+                    }
+
+                    match builder.build() {
+                        Ok(process_result) => {
+                            // The upload has already been processed by ProcessBuilder
+                            if let Some(upload_result) = process_result.upload_result {
+                                for tracker in &selected_trackers {
+                                    if upload_result.success {
+                                        progress_tx
+                                            .send((
+                                                tracker.clone(),
+                                                UploadStatus::Success,
+                                                1.0,
+                                                upload_result.message.clone(),
+                                            ))
+                                            .ok();
+
+                                        log_output.lock().unwrap().push(format!(
+                                            "✅ {} upload complete: {}",
+                                            tracker, upload_result.message
+                                        ));
+                                    } else {
+                                        progress_tx
+                                            .send((
+                                                tracker.clone(),
+                                                UploadStatus::Failed,
+                                                1.0,
+                                                upload_result.message.clone(),
+                                            ))
+                                            .ok();
+
+                                        log_output.lock().unwrap().push(format!(
+                                            "❌ {} upload failed: {}",
+                                            tracker, upload_result.message
+                                        ));
+                                    }
                                 }
-
-                                // Mark as complete
-                                progress_tx
-                                    .send((
-                                        tracker.clone(),
-                                        UploadStatus::Success,
-                                        1.0,
-                                        "Upload completed successfully".to_string(),
-                                    ))
-                                    .ok();
-
+                            } else {
                                 log_output
                                     .lock()
                                     .unwrap()
-                                    .push(format!("✅ {} upload complete", tracker));
+                                    .push("❌ Error: No upload data generated".to_string());
                             }
                             Ok(())
                         }
@@ -3340,56 +3489,79 @@ fn start_upload(state: &mut AppState) -> io::Result<()> {
                 enable_cover_art,
             );
 
-            match process_builder::upload_builder(&path_str, std::sync::Arc::new(config.clone()))
+            let mut builder = if let Some(ref preflight_process_result) = preflight_result {
+                // Use preflight data to avoid recomputation
+                process_builder::upload_builder_with_preflight(
+                    &path_str,
+                    std::sync::Arc::new(config.clone()),
+                    preflight_process_result,
+                )
+            } else {
+                // No preflight data available, use regular builder
+                process_builder::upload_builder(&path_str, std::sync::Arc::new(config.clone()))
+            };
+
+            builder = builder
                 .with_component_config(component_config)
-                .dry_run(dry_run)
-                .build()
-            {
-                Ok(_result) => {
-                    // Process upload for each selected tracker
-                    for tracker in &selected_trackers {
-                        // Update status to in progress
-                        progress_tx
-                            .send((
-                                tracker.clone(),
-                                UploadStatus::InProgress,
-                                0.0,
-                                "Uploading with auto-detected media type".to_string(),
-                            ))
-                            .ok();
+                .dry_run(dry_run);
 
-                        log_output
-                            .lock()
-                            .unwrap()
-                            .push(format!("📤 Processing upload to {}", tracker));
+            // Add TMDB data from preflight if available (for backward compatibility)
+            if let Some(ref preflight_process_result) = preflight_result {
+                if let Some(ref preflight) = preflight_process_result.preflight_data {
+                    if preflight.tmdb_id > 0 {
+                        use crate::core::types::UploadComponent;
+                        let tmdb_component = UploadComponent::TmdbData {
+                            tmdb_id: preflight.tmdb_id,
+                            imdb_id: preflight.imdb_id.clone(),
+                            tvdb_id: preflight.tvdb_id,
+                            title: preflight.release_name.clone(),
+                            year: None, // Could extract from metadata if needed
+                        };
+                        // TODO: Add TMDB component when ProcessBuilder supports it
+                    }
+                }
+            }
 
-                        // Simulate upload progress
-                        for i in 1..=10 {
-                            thread::sleep(Duration::from_millis(100));
-                            progress_tx
-                                .send((
-                                    tracker.clone(),
-                                    UploadStatus::InProgress,
-                                    i as f32 / 10.0,
-                                    format!("Uploading... {}/10", i),
-                                ))
-                                .ok();
+            match builder.build() {
+                Ok(process_result) => {
+                    // The upload has already been processed by ProcessBuilder
+                    if let Some(upload_result) = process_result.upload_result {
+                        for tracker in &selected_trackers {
+                            if upload_result.success {
+                                progress_tx
+                                    .send((
+                                        tracker.clone(),
+                                        UploadStatus::Success,
+                                        1.0,
+                                        upload_result.message.clone(),
+                                    ))
+                                    .ok();
+
+                                log_output.lock().unwrap().push(format!(
+                                    "✅ {} upload complete: {}",
+                                    tracker, upload_result.message
+                                ));
+                            } else {
+                                progress_tx
+                                    .send((
+                                        tracker.clone(),
+                                        UploadStatus::Failed,
+                                        1.0,
+                                        upload_result.message.clone(),
+                                    ))
+                                    .ok();
+
+                                log_output.lock().unwrap().push(format!(
+                                    "❌ {} upload failed: {}",
+                                    tracker, upload_result.message
+                                ));
+                            }
                         }
-
-                        // Mark as complete
-                        progress_tx
-                            .send((
-                                tracker.clone(),
-                                UploadStatus::Success,
-                                1.0,
-                                "Upload completed successfully".to_string(),
-                            ))
-                            .ok();
-
+                    } else {
                         log_output
                             .lock()
                             .unwrap()
-                            .push(format!("✅ {} upload complete", tracker));
+                            .push("❌ Error: No upload data generated".to_string());
                     }
                     Ok(())
                 }
@@ -3438,7 +3610,7 @@ fn start_upload(state: &mut AppState) -> io::Result<()> {
                     e
                 ));
             }
-        }
+        };
     });
 
     state.current_state = UIState::UploadProgress;
@@ -3468,8 +3640,15 @@ fn generate_description_preview(state: &mut AppState) {
         let mut builder = DescriptionBuilder::with_config(media_type, config);
 
         // Get title from preflight data or filename
-        let title = if let Some(ref preflight) = state.preflight_result {
-            preflight.release_name.clone()
+        let title = if let Some(ref process_result) = state.preflight_result {
+            if let Some(ref preflight) = process_result.preflight_data {
+                preflight.release_name.clone()
+            } else {
+                input_path
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "Unknown".to_string())
+            }
         } else {
             input_path
                 .file_name()
@@ -3493,24 +3672,30 @@ fn generate_description_preview(state: &mut AppState) {
         }
 
         // Add synopsis from preflight data if available
-        if let Some(ref preflight) = state.preflight_result {
-            if let Some(ref summary) = preflight.igdb_summary {
-                builder = builder.synopsis(summary);
+        if let Some(ref process_result) = state.preflight_result {
+            if let Some(ref preflight) = process_result.preflight_data {
+                if let Some(ref summary) = preflight.igdb_summary {
+                    builder = builder.synopsis(summary);
+                }
             }
         }
 
         // Add actual MediaInfo if available from preflight, otherwise placeholder
         if state.enable_mediainfo {
-            if let Some(ref preflight) = state.preflight_result {
-                // In a real implementation, MediaInfo would be stored in preflight data
-                // For now, show that it would be generated from the actual file
-                let mediainfo_content = format!("MediaInfo will be generated from: {}\n\nExample output:\nGeneral\nComplete name: {}\nFormat: Auto-detected\nFile size: [Calculated during upload]\nDuration: [Detected during upload]",
-                    input_path.display(),
-                    preflight.release_name);
-                builder = builder.raw(&format!(
-                    "[b]MediaInfo:[/b]\n[spoiler]\n{}\n[/spoiler]",
-                    mediainfo_content
-                ));
+            if let Some(ref process_result) = state.preflight_result {
+                if let Some(ref preflight) = process_result.preflight_data {
+                    // In a real implementation, MediaInfo would be stored in preflight data
+                    // For now, show that it would be generated from the actual file
+                    let mediainfo_content = format!("MediaInfo will be generated from: {}\n\nExample output:\nGeneral\nComplete name: {}\nFormat: Auto-detected\nFile size: [Calculated during upload]\nDuration: [Detected during upload]",
+                        input_path.display(),
+                        preflight.release_name);
+                    builder = builder.raw(&format!(
+                        "[b]MediaInfo:[/b]\n[spoiler]\n{}\n[/spoiler]",
+                        mediainfo_content
+                    ));
+                } else {
+                    builder = builder.raw("[b]MediaInfo:[/b]\n[spoiler]\n[Generated from actual media file during upload]\n[/spoiler]");
+                }
             } else {
                 builder = builder.raw("[b]MediaInfo:[/b]\n[spoiler]\n[Generated from actual media file during upload]\n[/spoiler]");
             }
@@ -3518,15 +3703,20 @@ fn generate_description_preview(state: &mut AppState) {
 
         // Add NFO with actual data if available
         if state.enable_nfo {
-            if let Some(ref preflight) = state.preflight_result {
-                let nfo_content = format!("Release: {}\nType: {}\nGenerated: {}\n\n[Additional NFO data would be generated during upload]",
-                    preflight.release_name,
-                    preflight.release_type,
-                    chrono::Utc::now().format("%Y-%m-%d"));
-                builder = builder.raw(&format!(
-                    "[b]NFO:[/b]\n[spoiler]\n{}\n[/spoiler]",
-                    nfo_content
-                ));
+            if let Some(ref process_result) = state.preflight_result {
+                if let Some(ref preflight) = process_result.preflight_data {
+                    let nfo_content = format!("Release: {}\nType: {}\nGenerated: {}\n\n[Additional NFO data would be generated during upload]",
+                        preflight.release_name,
+                        preflight.release_type,
+                        chrono::Utc::now().format("%Y-%m-%d"));
+                    builder = builder.raw(&format!(
+                        "[b]NFO:[/b]\n[spoiler]\n{}\n[/spoiler]",
+                        nfo_content
+                    ));
+                } else {
+                    builder = builder
+                        .raw("[b]NFO:[/b]\n[spoiler]\n[Generated during upload]\n[/spoiler]");
+                }
             } else {
                 builder = builder.raw(
                     "[b]NFO:[/b]\n[spoiler]\n[Generated NFO data will appear here]\n[/spoiler]",

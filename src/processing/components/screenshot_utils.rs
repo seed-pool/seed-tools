@@ -66,7 +66,12 @@ pub fn generate_screenshots(
     let timestamps = generate_random_timestamps(duration, count);
 
     // Generate sanitized base name
+    info!("Screenshot generation - input_name: '{}'", input_name);
     let sanitized_input_name = generate_release_name(input_name);
+    info!(
+        "Screenshot generation - sanitized_input_name: '{}'",
+        sanitized_input_name
+    );
 
     // Decide whether to use ImgBB or CDN
     if has_imgbb {

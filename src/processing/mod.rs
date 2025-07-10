@@ -15,5 +15,4 @@ pub use crate::core::PreflightCheckResult;
 pub use naming::generate_release_name;
 pub use preflight::preflight_check;
 pub use process_builder::{ProcessBuilder, ProcessResult};
-pub use torrent::create_torrent;
 pub use upload::{UploadBuilder, UploadProcessor, UploadResult};

@@ -1,12 +1,11 @@
 use crate::core::types::{MediaFile, MediaType};
+use log::info;
 
 use super::{audio, ebook, game, hobby, video};
 
 /// Comprehensive media type detection for any file or directory
 pub fn detect_media_type(path: &str) -> Result<Vec<MediaFile>, String> {
-    use log::debug;
-
-    debug!("detect_media_type: Starting detection for path: {}", path);
+    info!("detect_media_type: Starting detection for path: {}", path);
     let mut media_files = Vec::new();
 
     // Try each media type detector in priority order

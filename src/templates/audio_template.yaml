@@ -16,59 +16,29 @@ layout:
   include_footer: true
 
 sections:
-  - name: "title"
-    section_type: "title"
-    content: "{{musicbrainz_artist}} - {{album}}"
+  - name: "basic_info"
+    section_type: "raw"
+    content: |
+      [b]{{filename}}[/b]
+      [b]Artist:[/b] {{musicbrainz_artist|artist|mediainfo_artist|default:"Unknown Artist"}}
+      [b]Album:[/b] {{musicbrainz_title|album|mediainfo_album|default:"Unknown Album"}}
+      [b]Year:[/b] {{musicbrainz_year|year|mediainfo_year|default:"Unknown"}}
+      [b]Genre:[/b] {{musicbrainz_genres|genre|mediainfo_genre|default:"Unknown"}}
+      [b]Audio:[/b] {{audio_format|default:"Unknown Format"}} {{audio_bitrate|default:""}} / {{audio_sample_rate|default:""}}
     order: 1
-    required_fields: ["album"]
 
-  - name: "artist"
-    section_type: "author"
-    content: "{{musicbrainz_artist}}"
+  - name: "tracklist_table"
+    section_type: "raw"
+    content: |
+      [table]
+      [tr][th]Nr.[/th][th]Artist[/th][th]Title[/th][th]Duration[/th][th]Size[/th][th]Format[/th][th]Bitrate[/th][/tr]
+      {{tracklist_rows|default:"[tr][td colspan=7]No tracklist available[/td][/tr]"}}
+      [/table]
     order: 2
-    required_fields: ["musicbrainz_artist"]
 
   - name: "images"
     section_type: "images"
     order: 3
-
-  - name: "details"
-    section_type: "table"
-    order: 4
-    table_fields:
-      - label: "Format"
-        field: "format"
-      - label: "Category"
-        field: "category"
-      - label: "Quality"
-        field: "lossless"
-        format: "{{value}} Quality"
-      - label: "Year"
-        field: "musicbrainz_year"
-        fallback: "year"
-      - label: "Label"
-        field: "musicbrainz_labels"
-        fallback: "label"
-      - label: "Catalog"
-        field: "musicbrainz_catalog_numbers"
-        fallback: "catalog_number"
-      - label: "Tracks"
-        field: "musicbrainz_track_count"
-      - label: "Length"
-        field: "musicbrainz_total_length"
-      - label: "Country"
-        field: "musicbrainz_country"
-      - label: "Type"
-        field: "musicbrainz_primary_type"
-      - label: "Source"
-        field: "source_type"
-
-  - name: "tracklist"
-    section_type: "custom"
-    content: "{{musicbrainz_tracklist}}"
-    format: "quoted"
-    order: 5
-    required_fields: ["musicbrainz_tracklist"]
 
 conditionals:
   - name: "24bit"

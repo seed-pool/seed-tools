@@ -135,11 +135,30 @@ impl TemplateProcessor {
             ("hobby", include_str!("hobby_template.yaml")),
         ];
 
+        log::info!("Loading {} default templates", template_files.len());
+
         for (media_type, template_content) in &template_files {
+            log::info!(
+                "Loading template for {}, content length: {}",
+                media_type,
+                template_content.len()
+            );
             match self.load_template_from_yaml(template_content) {
-                Ok(_) => log::info!("Loaded default template for {}", media_type),
-                Err(e) => log::warn!("Failed to load default template for {}: {}", media_type, e),
+                Ok(_) => log::info!("✅ Successfully loaded default template for {}", media_type),
+                Err(e) => {
+                    log::error!(
+                        "❌ Failed to load default template for {}: {}",
+                        media_type,
+                        e
+                    );
+                    log::debug!("Template content for {}: {}", media_type, template_content);
+                }
             }
+        }
+
+        log::info!("Total templates loaded: {}", self.templates.len());
+        for (key, template) in &self.templates {
+            log::info!("  - {}: {} v{}", key, template.name, template.version);
         }
 
         Ok(())
@@ -186,7 +205,19 @@ impl TemplateProcessor {
         template_name: &str,
     ) -> Option<&DescriptionTemplate> {
         let key = format!("{}_{}", media_type, template_name);
-        self.templates.get(&key)
+        log::debug!("Looking for template with key: {}", key);
+        log::debug!(
+            "Available templates: {:?}",
+            self.templates.keys().collect::<Vec<_>>()
+        );
+
+        let result = self.templates.get(&key);
+        if result.is_some() {
+            log::info!("✅ Found template: {}", key);
+        } else {
+            log::warn!("Template not found: {}", key);
+        }
+        result
     }
 
     /// List available templates for a media type
@@ -401,11 +432,37 @@ impl TemplateProcessor {
 
         for capture in var_regex.captures_iter(template) {
             if let Some(var_name) = capture.get(1) {
-                let field_name = var_name.as_str().trim();
-                let value = self
-                    .get_field_value(field_name, metadata, enriched_metadata)
-                    .unwrap_or_default();
-                result = result.replace(&format!("{{{{{}}}}}", field_name), &value);
+                let field_spec = var_name.as_str().trim();
+
+                // Handle fallback syntax: field1|field2|default:"value"
+                let mut value = None;
+                let parts: Vec<&str> = field_spec.split('|').collect();
+
+                for part in parts {
+                    let part = part.trim();
+
+                    if part.starts_with("default:") {
+                        // Handle default value
+                        let default_val = part.strip_prefix("default:").unwrap_or("");
+                        // Remove quotes if present
+                        let default_val = default_val.trim_matches('"').trim_matches('\'');
+                        value = Some(default_val.to_string());
+                        break;
+                    } else {
+                        // Try to get field value
+                        if let Some(field_value) =
+                            self.get_field_value(part, metadata, enriched_metadata)
+                        {
+                            if !field_value.is_empty() {
+                                value = Some(field_value);
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                let replacement = value.unwrap_or_default();
+                result = result.replace(&format!("{{{{{}}}}}", field_spec), &replacement);
             }
         }
 
@@ -438,6 +495,19 @@ impl TemplateProcessor {
             Value::String(s) => Some(s.clone()),
             Value::Number(n) => Some(n.to_string()),
             Value::Bool(b) => Some(b.to_string()),
+            Value::Array(arr) => {
+                // Handle arrays by joining string values
+                let strings: Vec<String> = arr
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .collect();
+                if !strings.is_empty() {
+                    Some(strings.join(", "))
+                } else {
+                    None
+                }
+            }
             _ => None,
         })
     }

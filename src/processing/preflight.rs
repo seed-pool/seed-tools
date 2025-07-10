@@ -1,5 +1,5 @@
 use crate::core::{Config, PreflightCheckResult};
-use crate::processing::process_builder::preflight_builder;
+use crate::processing::process_builder::{preflight_builder, ProcessResult};
 use log::info;
 use std::sync::Arc;
 
@@ -8,7 +8,7 @@ pub fn preflight_check(
     input_path: &str,
     config: &Config,
     dry_run: bool,
-) -> Result<PreflightCheckResult, String> {
+) -> Result<ProcessResult, String> {
     info!("Running preflight check for: {}", input_path);
 
     // Use the process builder to get all the data we need
@@ -16,9 +16,17 @@ pub fn preflight_check(
         .dry_run(dry_run)
         .build()?;
 
-    // The process builder already generated all preflight data for us
+    // Return the full ProcessResult instead of just the preflight data
+    Ok(process_result)
+}
+
+/// Extract preflight data from ProcessResult for backwards compatibility
+pub fn extract_preflight_data(
+    process_result: &ProcessResult,
+) -> Result<PreflightCheckResult, String> {
     process_result
         .preflight_data
+        .clone()
         .ok_or_else(|| "Process builder did not generate preflight data".to_string())
 }
 

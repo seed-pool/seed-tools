@@ -7,46 +7,214 @@ use serde_json::Value;
 
 /// Search for release on MusicBrainz
 pub fn search_musicbrainz_release(artist: &str, album: &str) -> Result<Vec<Value>> {
+    search_musicbrainz_release_with_year(artist, album, None)
+}
+
+/// Search for release on MusicBrainz with optional year
+pub fn search_musicbrainz_release_with_year(
+    artist: &str,
+    album: &str,
+    year: Option<&str>,
+) -> Result<Vec<Value>> {
     let client = Client::new();
 
-    // Build search query
-    let query = format!(
-        "artist:{} AND release:{}",
-        urlencoding::encode(artist),
-        urlencoding::encode(album)
-    );
+    // Clean the artist and album names
+    let clean_artist = artist
+        .trim()
+        .replace('\u{2019}', "'")
+        .replace('\u{2018}', "'");
 
-    let url = format!(
-        "https://musicbrainz.org/ws/2/release/?query={}&fmt=json&limit=5",
-        urlencoding::encode(&query)
-    );
+    let clean_album = album
+        .trim()
+        .replace('\u{2019}', "'")
+        .replace('\u{2018}', "'");
 
-    info!("Searching MusicBrainz for: {} - {}", artist, album);
+    // Try different search strategies
+    let search_strategies = vec![
+        // Strategy 1: Exact search with AND
+        (
+            format!(
+                "artist:{} AND release:{}",
+                urlencoding::encode(&clean_artist),
+                urlencoding::encode(&clean_album)
+            ),
+            "exact with AND",
+        ),
+        // Strategy 2: Remove parenthetical content
+        (
+            format!(
+                "artist:{} AND release:{}",
+                urlencoding::encode(&clean_artist),
+                urlencoding::encode(&clean_album.split('(').next().unwrap_or(&clean_album).trim())
+            ),
+            "without parentheses",
+        ),
+        // Strategy 3: Just the base album name (no Remixed, Remastered, etc)
+        (
+            format!(
+                "artist:{} AND release:{}",
+                urlencoding::encode(&clean_artist),
+                urlencoding::encode(
+                    &clean_album
+                        .replace("(Remixed)", "")
+                        .replace("(Remastered)", "")
+                        .replace("(Deluxe)", "")
+                        .replace("(Expanded)", "")
+                        .trim()
+                )
+            ),
+            "base album name",
+        ),
+        // Strategy 4: Loose search with just artist and album words
+        (format!("{} {}", clean_artist, clean_album), "loose search"),
+        // Strategy 5: Artist only, then filter results
+        (
+            format!("artist:{}", urlencoding::encode(&clean_artist)),
+            "artist only",
+        ),
+    ];
 
-    let response = client
-        .get(&url)
-        .header(
-            "User-Agent",
-            "seedbrr/1.0 (https://github.com/seed-pool/seed-tools)",
-        )
-        .send()
-        .map_err(|e| SeedError::ApiError(format!("Failed to query MusicBrainz: {}", e)))?;
+    for (query_base, strategy) in search_strategies {
+        // Add year if provided (except for loose search)
+        let query =
+            if year.is_some() && !strategy.contains("loose") && !strategy.contains("artist only") {
+                format!("{} AND date:{}", query_base, year.unwrap())
+            } else {
+                query_base
+            };
 
-    if !response.status().is_success() {
-        return Err(SeedError::ApiError(format!(
-            "MusicBrainz API request failed with status: {}",
-            response.status()
-        )));
+        let url = format!(
+            "https://musicbrainz.org/ws/2/release/?query={}&fmt=json&limit=10",
+            urlencoding::encode(&query)
+        );
+
+        info!(
+            "MusicBrainz search strategy '{}': {} - {}",
+            strategy, artist, album
+        );
+
+        let response = client
+            .get(&url)
+            .header(
+                "User-Agent",
+                "seedbrr/1.0 (https://github.com/seed-pool/seed-tools)",
+            )
+            .send()
+            .map_err(|e| SeedError::ApiError(format!("Failed to query MusicBrainz: {}", e)))?;
+
+        if !response.status().is_success() {
+            continue; // Try next variation
+        }
+
+        let json: Value = response.json().map_err(|e| {
+            SeedError::ApiError(format!("Failed to parse MusicBrainz response: {}", e))
+        })?;
+
+        let mut releases = json["releases"].as_array().unwrap_or(&vec![]).clone();
+
+        info!(
+            "Found {} MusicBrainz releases using strategy '{}'",
+            releases.len(),
+            strategy
+        );
+
+        // For broader searches, filter results to find best match
+        if strategy.contains("loose") || strategy.contains("artist only") {
+            releases = releases
+                .into_iter()
+                .filter(|release| {
+                    // Check if artist matches
+                    if let Some(artist_credit) = release["artist-credit"].as_array() {
+                        let release_artist = artist_credit
+                            .iter()
+                            .filter_map(|ac| ac["artist"]["name"].as_str())
+                            .collect::<Vec<_>>()
+                            .join(" ");
+
+                        if !release_artist
+                            .to_lowercase()
+                            .contains(&clean_artist.to_lowercase())
+                        {
+                            return false;
+                        }
+                    }
+
+                    // For artist-only search, also check album name
+                    if strategy.contains("artist only") {
+                        if let Some(title) = release["title"].as_str() {
+                            let title_lower = title.to_lowercase();
+                            let album_lower = clean_album.to_lowercase();
+
+                            // Check if the release title contains key words from our album
+                            let album_words: Vec<&str> = album_lower
+                                .split(|c: char| !c.is_alphanumeric())
+                                .filter(|w| w.len() > 2) // Skip short words
+                                .collect();
+
+                            let matching_words = album_words
+                                .iter()
+                                .filter(|word| title_lower.contains(*word))
+                                .count();
+
+                            // Require at least 50% of words to match
+                            if matching_words < album_words.len() / 2 {
+                                return false;
+                            }
+                        }
+                    }
+
+                    true
+                })
+                .collect();
+
+            info!("After filtering: {} releases remain", releases.len());
+        }
+
+        if !releases.is_empty() {
+            // Sort by relevance (prefer exact matches)
+            releases.sort_by(|a, b| {
+                let a_title = a["title"].as_str().unwrap_or("");
+                let b_title = b["title"].as_str().unwrap_or("");
+
+                // Prefer exact matches
+                let a_exact = a_title.eq_ignore_ascii_case(&clean_album);
+                let b_exact = b_title.eq_ignore_ascii_case(&clean_album);
+
+                match (a_exact, b_exact) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => {
+                        // Then prefer matches without parentheses
+                        let a_base = a_title.eq_ignore_ascii_case(
+                            &clean_album.split('(').next().unwrap_or(&clean_album).trim(),
+                        );
+                        let b_base = b_title.eq_ignore_ascii_case(
+                            &clean_album.split('(').next().unwrap_or(&clean_album).trim(),
+                        );
+
+                        match (a_base, b_base) {
+                            (true, false) => std::cmp::Ordering::Less,
+                            (false, true) => std::cmp::Ordering::Greater,
+                            _ => std::cmp::Ordering::Equal,
+                        }
+                    }
+                }
+            });
+
+            // Log the top matches
+            for (i, release) in releases.iter().take(3).enumerate() {
+                if let Some(title) = release["title"].as_str() {
+                    info!("  Match {}: {}", i + 1, title);
+                }
+            }
+
+            return Ok(releases);
+        }
     }
 
-    let json: Value = response
-        .json()
-        .map_err(|e| SeedError::ApiError(format!("Failed to parse MusicBrainz response: {}", e)))?;
-
-    let releases = json["releases"].as_array().unwrap_or(&vec![]).clone();
-
-    info!("Found {} MusicBrainz releases", releases.len());
-    Ok(releases)
+    // If no strategies found results, return empty vec
+    info!("No MusicBrainz releases found after trying all strategies");
+    Ok(vec![])
 }
 
 /// Get detailed release information from MusicBrainz

@@ -68,13 +68,13 @@ impl UploadComponent for SampleComponent {
             &self.config.paths.screenshots_dir,
             self.config
                 .paths
-                .cdnpaths
+                .screenshots
                 .as_ref()
                 .and_then(|p| p.remote_path.as_ref())
                 .unwrap_or(&"".to_string()),
             self.config
                 .paths
-                .cdnpaths
+                .screenshots
                 .as_ref()
                 .and_then(|p| p.image_path.as_ref())
                 .unwrap_or(&"".to_string()),

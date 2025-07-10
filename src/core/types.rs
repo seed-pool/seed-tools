@@ -543,7 +543,7 @@ pub struct GeneralConfig {
     pub release_groups: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PreflightCheckResult {
     pub release_name: String,
     pub generated_release_name: String,
@@ -577,11 +577,11 @@ pub struct PathsConfig {
     pub ffprobe: String,
     pub mkbrr: String,
     pub mediainfo: String,
-    pub cdnpaths: Option<CDNPaths>,
+    pub screenshots: Option<Screenshots>,
 }
 
 #[derive(Deserialize, Clone)]
-pub struct CDNPaths {
+pub struct Screenshots {
     pub remote_path: Option<String>,
     pub image_path: Option<String>,
 }
@@ -769,7 +769,7 @@ impl Default for Config {
                 ffprobe: String::new(),
                 mkbrr: String::new(),
                 mediainfo: String::new(),
-                cdnpaths: None,
+                screenshots: None,
             },
             qbittorrent: Vec::new(),
             deluge: DelugeConfig {

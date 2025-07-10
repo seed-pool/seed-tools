@@ -1,9 +1,9 @@
 use crate::core::{Config, MediaType, UploadComponent};
 use crate::metadata::tmdb::{fetch_external_ids, fetch_tmdb_id, fetch_youtube_trailer};
 use crate::processing::components::mediainfo_utils::generate_mediainfo;
-use crate::processing::description::{DescriptionBuilder, DescriptionConfig};
+use crate::processing::description::DescriptionConfig;
 use crate::utils::{check_all_duplicates, find_and_read_nfo};
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -112,6 +112,13 @@ pub struct UploadBuilder {
 
     // Description configuration
     description_config: Option<DescriptionConfig>,
+
+    // Template support
+    enriched_metadata: Option<HashMap<String, String>>,
+    template_name: Option<String>,
+
+    // Cached metadata from ProcessBuilder
+    cached_metadata: Option<serde_json::Value>,
     // Media classification handled by ProcessBuilder
 }
 
@@ -130,6 +137,9 @@ impl UploadBuilder {
             active_tracker: None,
             accepted_extensions: None,
             description_config: None,
+            enriched_metadata: None,
+            template_name: None,
+            cached_metadata: None,
         }
     }
 
@@ -173,6 +183,24 @@ impl UploadBuilder {
     ) -> Self {
         self.title = Some(title.into());
         self.year = year.map(|y| y.into());
+        self
+    }
+
+    /// Set enriched metadata for template processing
+    pub fn with_enriched_metadata(mut self, metadata: HashMap<String, String>) -> Self {
+        self.enriched_metadata = Some(metadata);
+        self
+    }
+
+    /// Set cached metadata from ProcessBuilder
+    pub fn with_cached_metadata(mut self, metadata: serde_json::Value) -> Self {
+        self.cached_metadata = Some(metadata);
+        self
+    }
+
+    /// Set template name for description generation
+    pub fn with_template(mut self, template_name: impl Into<String>) -> Self {
+        self.template_name = Some(template_name.into());
         self
     }
 
@@ -246,24 +274,43 @@ impl UploadBuilder {
             "duplicate_check" => self.upload_config.skip_duplicate_check = true,
             "tmdb" => self.upload_config.skip_tmdb = true,
             "torrent" => self.upload_config.skip_torrent_creation = true,
-            _ => warn!("Unknown component to skip: {}", component),
+            _ => info!("Unknown component to skip: {}", component),
         }
         self
     }
 
     /// Detect and apply the active tracker configuration
     fn apply_tracker_config(&mut self) -> Result<(), String> {
+        info!("UploadBuilder: apply_tracker_config - Loading tracker configurations");
         // Load tracker configs
-        let seedpool_config =
-            crate::utils::load_tracker_config::<crate::core::SeedpoolConfig>("seedpool")
-                .map_err(|e| format!("Failed to load seedpool config: {}", e))?;
+        let seedpool_config = crate::utils::load_tracker_config::<crate::core::SeedpoolConfig>(
+            "seedpool",
+        )
+        .map_err(|e| {
+            error!(
+                "UploadBuilder: apply_tracker_config - Failed to load seedpool config: {}",
+                e
+            );
+            format!("Failed to load seedpool config: {}", e)
+        })?;
+        info!("UploadBuilder: apply_tracker_config - Seedpool config loaded successfully");
+
         let torrentleech_config =
             crate::utils::load_tracker_config::<crate::core::TorrentLeechConfig>("torrentleech")
-                .map_err(|e| format!("Failed to load torrentleech config: {}", e))?;
+                .map_err(|e| {
+                    error!(
+                "UploadBuilder: apply_tracker_config - Failed to load torrentleech config: {}",
+                e
+            );
+                    format!("Failed to load torrentleech config: {}", e)
+                })?;
+        info!("UploadBuilder: apply_tracker_config - TorrentLeech config loaded successfully");
 
         // Determine which tracker is enabled and apply its settings
+        info!("UploadBuilder: apply_tracker_config - Determining active tracker: seedpool.enabled={}, torrentleech.enabled={}", 
+            seedpool_config.general.enabled, torrentleech_config.general.enabled);
         if seedpool_config.general.enabled {
-            info!("Applying Seedpool configuration");
+            info!("UploadBuilder: apply_tracker_config - Applying Seedpool configuration");
             self.active_tracker = Some("seedpool".to_string());
 
             // Apply Seedpool settings
@@ -307,7 +354,7 @@ impl UploadBuilder {
                 UploadComponent::Metadata(metadata),
             );
         } else if torrentleech_config.general.enabled {
-            info!("Applying TorrentLeech configuration");
+            info!("UploadBuilder: apply_tracker_config - Applying TorrentLeech configuration");
             self.active_tracker = Some("torrentleech".to_string());
 
             // Apply TorrentLeech settings
@@ -348,17 +395,21 @@ impl UploadBuilder {
                 UploadComponent::Metadata(metadata),
             );
         } else {
-            warn!("No tracker is enabled in configuration");
+            info!("UploadBuilder: apply_tracker_config - No tracker is enabled in configuration");
             self.active_tracker = None;
         }
 
+        info!("UploadBuilder: apply_tracker_config - Configuration applied successfully, active_tracker: {:?}", self.active_tracker);
         Ok(())
     }
 
     /// Build the upload data
     pub fn build(mut self) -> Result<crate::media::video::UploadData, String> {
+        info!("UploadBuilder: Starting build process");
         // Apply tracker configuration automatically
+        info!("UploadBuilder: Applying tracker configuration");
         self.apply_tracker_config()?;
+        info!("UploadBuilder: Tracker configuration applied successfully");
 
         info!(
             "Building upload data for: {} (tracker: {:?})",
@@ -377,7 +428,7 @@ impl UploadBuilder {
                         );
                     }
                 }
-                Err(e) => warn!("Failed to find/read NFO: {}", e),
+                Err(e) => info!("Failed to find/read NFO: {}", e),
             }
         }
 
@@ -391,12 +442,17 @@ impl UploadBuilder {
                         UploadComponent::Mediainfo(mediainfo),
                     );
                 }
-                Err(e) => warn!("Failed to generate mediainfo: {}", e),
+                Err(e) => info!("Failed to generate mediainfo: {}", e),
             }
         }
 
         // Process Duplicate Check
+        info!(
+            "UploadBuilder: Checking duplicate configuration: skip_duplicate_check={}",
+            self.upload_config.skip_duplicate_check
+        );
         if !self.upload_config.skip_duplicate_check {
+            info!("UploadBuilder: Starting duplicate check");
             let check_title = self
                 .title
                 .as_ref()
@@ -406,7 +462,7 @@ impl UploadBuilder {
             match check_all_duplicates(check_title) {
                 Ok(duplicates) => {
                     if !duplicates.is_empty() {
-                        warn!("Found {} duplicate(s)", duplicates.len());
+                        info!("Found {} duplicate(s)", duplicates.len());
                         self.components.insert(
                             "duplicates".to_string(),
                             UploadComponent::DuplicateCheckResults(duplicates),
@@ -415,101 +471,200 @@ impl UploadBuilder {
                         info!("No duplicates found");
                     }
                 }
-                Err(e) => warn!("Failed to check duplicates: {}", e),
+                Err(e) => info!("Failed to check duplicates: {}", e),
             }
         }
 
         // Process TMDB lookup (for video content)
+        info!(
+            "UploadBuilder: Checking TMDB configuration: skip_tmdb={}, media_type={:?}",
+            self.upload_config.skip_tmdb, self.media_type
+        );
         if !self.upload_config.skip_tmdb && matches!(self.media_type, MediaType::Video(_)) {
-            if let Some(metadata) = &self.video_metadata {
-                // Check if it's a movie or TV show based on metadata
-                let is_movie_or_tv = match &metadata.category {
-                    cat if format!("{:?}", cat).contains("Movie") => true,
-                    cat if format!("{:?}", cat).contains("TvShow") => true,
-                    _ => false,
-                };
+            info!("UploadBuilder: Starting TMDB lookup process");
+            // Check if we already have TMDB data from components (e.g., from preflight)
+            if let Some(UploadComponent::TmdbData {
+                tmdb_id,
+                imdb_id,
+                tvdb_id,
+                ..
+            }) = self.components.get("tmdb")
+            {
+                info!("Using TMDB data from preflight: TMDB ID: {}", tmdb_id);
+                info!("Enriched metadata should already be set from preflight");
 
-                if is_movie_or_tv {
-                    let release_type = if format!("{:?}", metadata.category).contains("Movie") {
-                        "Movie"
-                    } else {
-                        "TvShow"
+                // Just keep the existing component, don't fetch again
+                self.components.insert(
+                    "tmdb".to_string(),
+                    UploadComponent::TmdbData {
+                        tmdb_id: *tmdb_id,
+                        imdb_id: imdb_id.clone(),
+                        tvdb_id: *tvdb_id,
+                        title: self
+                            .video_metadata
+                            .as_ref()
+                            .map(|m| m.title.clone())
+                            .unwrap_or_default(),
+                        year: self
+                            .video_metadata
+                            .as_ref()
+                            .and_then(|m| m.year.map(|y| y.to_string())),
+                    },
+                );
+            } else if let Some(metadata) = &self.video_metadata {
+                info!("UploadBuilder: No cached TMDB component found, checking enriched metadata");
+
+                // First check if we have TMDB data in enriched metadata
+                let has_tmdb_in_enriched = self
+                    .enriched_metadata
+                    .as_ref()
+                    .map(|em| {
+                        let has_data = em.contains_key("tmdb_overview")
+                            || em.contains_key("tmdb_title")
+                            || em.contains_key("tmdb_directors");
+                        info!(
+                            "📊 Enriched metadata check: has TMDB data = {}, total fields = {}",
+                            has_data,
+                            em.len()
+                        );
+                        if has_data {
+                            info!("✅ Found TMDB data in enriched metadata, skipping API call");
+                            for (key, value) in em.iter().filter(|(k, _)| k.starts_with("tmdb_")) {
+                                info!("  📌 {} = {}", key, value);
+                            }
+                        }
+                        has_data
+                    })
+                    .unwrap_or(false);
+
+                if !has_tmdb_in_enriched {
+                    info!(
+                        "⚠️ No TMDB data in enriched metadata, performing fresh lookup for: {}",
+                        metadata.title
+                    );
+                    // Check if it's a movie or TV show based on metadata
+                    let is_movie_or_tv = match &metadata.category {
+                        cat if format!("{:?}", cat).contains("Movie") => true,
+                        cat if format!("{:?}", cat).contains("TvShow") => true,
+                        _ => false,
                     };
 
-                    match fetch_tmdb_id(
-                        &metadata.title,
-                        metadata.year.map(|y| y.to_string()),
-                        &self.config.general.tmdb_api_key,
-                        release_type,
-                    ) {
-                        Ok(tmdb_id) => {
-                            info!("Found TMDB ID: {}", tmdb_id);
+                    if is_movie_or_tv {
+                        info!("UploadBuilder: Detected movie/TV show, fetching TMDB data");
+                        let release_type = if format!("{:?}", metadata.category).contains("Movie") {
+                            "Movie"
+                        } else {
+                            "TvShow"
+                        };
 
-                            // Fetch IMDB/TVDB IDs
-                            let (imdb_id, tvdb_id) = match fetch_external_ids(
-                                tmdb_id,
-                                release_type,
-                                &self.config.general.tmdb_api_key,
-                            ) {
-                                Ok((imdb, tvdb)) => {
-                                    if let Some(ref imdb_id) = imdb {
-                                        info!("Found IMDB ID: {}", imdb_id);
-                                    }
-                                    if let Some(ref tvdb_id) = tvdb {
-                                        info!("Found TVDB ID: {}", tvdb_id);
-                                    }
-                                    (imdb, tvdb)
-                                }
-                                Err(e) => {
-                                    warn!("Failed to fetch external IDs: {}", e);
-                                    (None, None)
-                                }
-                            };
+                        match fetch_tmdb_id(
+                            &metadata.title,
+                            metadata.year.map(|y| y.to_string()),
+                            &self.config.general.tmdb_api_key,
+                            release_type,
+                        ) {
+                            Ok(tmdb_id) => {
+                                info!("Found TMDB ID: {}", tmdb_id);
 
-                            self.components.insert(
-                                "tmdb".to_string(),
-                                UploadComponent::TmdbData {
+                                // Fetch IMDB/TVDB IDs
+                                let (imdb_id, tvdb_id) = match fetch_external_ids(
                                     tmdb_id,
-                                    imdb_id,
-                                    tvdb_id,
-                                    title: metadata.title.clone(),
-                                    year: metadata.year.map(|y| y.to_string()),
-                                },
-                            );
-
-                            // Fetch YouTube trailer if YouTube API key is configured
-                            if let Some(ref youtube_api_key) = self.config.general.youtube_api_key {
-                                if !youtube_api_key.is_empty() {
-                                    match fetch_youtube_trailer(
-                                        &metadata.title,
-                                        metadata.year.map(|y| y.to_string()).as_deref(),
-                                        youtube_api_key,
-                                    ) {
-                                        Ok(trailer_url) => {
-                                            info!("Found YouTube trailer: {}", trailer_url);
-                                            self.components.insert(
-                                                "trailer".to_string(),
-                                                UploadComponent::Trailer {
-                                                    url: trailer_url,
-                                                    platform: "YouTube".to_string(),
-                                                },
-                                            );
+                                    release_type,
+                                    &self.config.general.tmdb_api_key,
+                                ) {
+                                    Ok((imdb, tvdb)) => {
+                                        if let Some(ref imdb_id) = imdb {
+                                            info!("Found IMDB ID: {}", imdb_id);
                                         }
-                                        Err(e) => {
-                                            info!("No YouTube trailer found: {}", e);
+                                        if let Some(ref tvdb_id) = tvdb {
+                                            info!("Found TVDB ID: {}", tvdb_id);
+                                        }
+                                        (imdb, tvdb)
+                                    }
+                                    Err(e) => {
+                                        info!("Failed to fetch external IDs: {}", e);
+                                        (None, None)
+                                    }
+                                };
+
+                                // Fetch full TMDB details for enriched metadata
+                                match crate::metadata::tmdb::fetch_tmdb_details(
+                                    tmdb_id,
+                                    release_type,
+                                    &self.config.general.tmdb_api_key,
+                                ) {
+                                    Ok(tmdb_details) => {
+                                        info!("Fetched TMDB details successfully");
+
+                                        // Extract enriched metadata
+                                        let tmdb_metadata =
+                                            crate::metadata::tmdb::extract_tmdb_metadata(
+                                                &tmdb_details,
+                                                release_type,
+                                            );
+
+                                        // Merge TMDB metadata with existing enriched metadata
+                                        if let Some(ref mut enriched) = self.enriched_metadata {
+                                            enriched.extend(tmdb_metadata);
+                                        } else {
+                                            self.enriched_metadata = Some(tmdb_metadata);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        info!("Failed to fetch TMDB details: {}", e);
+                                    }
+                                }
+
+                                self.components.insert(
+                                    "tmdb".to_string(),
+                                    UploadComponent::TmdbData {
+                                        tmdb_id,
+                                        imdb_id,
+                                        tvdb_id,
+                                        title: metadata.title.clone(),
+                                        year: metadata.year.map(|y| y.to_string()),
+                                    },
+                                );
+
+                                // Fetch YouTube trailer if YouTube API key is configured
+                                if let Some(ref youtube_api_key) =
+                                    self.config.general.youtube_api_key
+                                {
+                                    if !youtube_api_key.is_empty() {
+                                        match fetch_youtube_trailer(
+                                            &metadata.title,
+                                            metadata.year.map(|y| y.to_string()).as_deref(),
+                                            youtube_api_key,
+                                        ) {
+                                            Ok(trailer_url) => {
+                                                info!("Found YouTube trailer: {}", trailer_url);
+                                                self.components.insert(
+                                                    "trailer".to_string(),
+                                                    UploadComponent::Trailer {
+                                                        url: trailer_url,
+                                                        platform: "YouTube".to_string(),
+                                                    },
+                                                );
+                                            }
+                                            Err(e) => {
+                                                info!("No YouTube trailer found: {}", e);
+                                            }
                                         }
                                     }
                                 }
                             }
+                            Err(e) => info!("Failed to fetch TMDB ID: {}", e),
                         }
-                        Err(e) => warn!("Failed to fetch TMDB ID: {}", e),
                     }
                 }
             }
         }
 
         // Process Screenshots (for video content)
+        info!("UploadBuilder: Checking screenshot configuration: skip_screenshots={}, media_type={:?}", 
+            self.upload_config.skip_screenshots, self.media_type);
         if !self.upload_config.skip_screenshots && matches!(self.media_type, MediaType::Video(_)) {
+            info!("UploadBuilder: Starting screenshot generation");
             // Get the appropriate extensions for the media type
             let extensions = self
                 .accepted_extensions
@@ -521,27 +676,69 @@ impl UploadBuilder {
             match crate::utils::filter_files_by_extension(&self.input_path, &extensions) {
                 Ok(files) if !files.is_empty() => {
                     let video_file = &files[0];
-                    // Determine input name for screenshots
-                    let input_name = self
-                        .title
-                        .as_ref()
-                        .or_else(|| self.video_metadata.as_ref().map(|m| &m.title))
-                        .map(|s| s.as_str())
-                        .unwrap_or_else(|| {
-                            std::path::Path::new(&self.input_path)
-                                .file_stem()
+                    // Determine input name for screenshots - use release name with dots preserved
+                    info!(
+                        "Determining screenshot name - video_metadata exists: {}",
+                        self.video_metadata.is_some()
+                    );
+                    if let Some(metadata) = &self.video_metadata {
+                        info!("Video metadata release_name: {}", metadata.release_name);
+                    }
+
+                    let input_name = if let Some(metadata) = &self.video_metadata {
+                        metadata.release_name.as_str()
+                    } else {
+                        // Fallback to directory/file name
+                        let path = std::path::Path::new(&self.input_path);
+                        info!("No video metadata, using path: {}", self.input_path);
+                        let name = if path.is_dir() {
+                            // For directories, use the directory name
+                            path.file_name()
                                 .and_then(|s| s.to_str())
                                 .unwrap_or("unknown")
-                        });
+                        } else {
+                            // For files, use the file stem
+                            path.file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("unknown")
+                        };
+                        info!("Using fallback name for screenshots: {}", name);
+                        name
+                    };
+
+                    info!("Final input_name for screenshots: '{}'", input_name);
+
+                    // Get tracker config to access CDN paths
+                    let mut remote_path = None;
+                    let mut image_path = None;
+                    let mut imgbb_api_key = None;
+
+                    if let Some(UploadComponent::Metadata(tracker_metadata)) =
+                        self.components.get("tracker_config")
+                    {
+                        remote_path = tracker_metadata.get("remote_path").map(|s| s.as_str());
+                        image_path = tracker_metadata.get("image_path").map(|s| s.as_str());
+                        // Check for tracker-specific ImgBB key if available
+                        if let Some(key) = tracker_metadata.get("imgbb_api_key") {
+                            if !key.is_empty() {
+                                imgbb_api_key = Some(key.as_str());
+                            }
+                        }
+                    }
+
+                    // Fall back to global ImgBB config if no tracker-specific key
+                    if imgbb_api_key.is_none() {
+                        imgbb_api_key =
+                            self.config.imgbb.as_ref().map(|c| c.imgbb_api_key.as_str());
+                    }
 
                     // Try to generate screenshots
-                    // Note: This will use either ImgBB (if configured) or CDN paths
                     match crate::processing::components::screenshot_utils::generate_screenshots(
                         video_file.to_str().unwrap_or(""),
                         &self.config,
-                        self.config.imgbb.as_ref().map(|c| c.imgbb_api_key.as_str()),
-                        None, // remote_path - would need tracker-specific config
-                        None, // image_path - would need tracker-specific config
+                        imgbb_api_key,
+                        remote_path,
+                        image_path,
                         input_name,
                         self.upload_config.screenshot_count,
                         self.upload_config.dry_run,
@@ -559,15 +756,15 @@ impl UploadBuilder {
                                 );
                             }
                         }
-                        Err(e) => warn!("Failed to generate screenshots: {}", e),
+                        Err(e) => info!("Failed to generate screenshots: {}", e),
                     }
                 }
                 Ok(files) => {
                     if files.is_empty() {
-                        warn!("No video files found for screenshots");
+                        info!("No video files found for screenshots");
                     }
                 }
-                Err(e) => warn!("Failed to find video files: {}", e),
+                Err(e) => info!("Failed to find video files: {}", e),
             }
         }
 
@@ -584,18 +781,26 @@ impl UploadBuilder {
             match crate::utils::filter_files_by_extension(&self.input_path, &extensions) {
                 Ok(files) if !files.is_empty() => {
                     let video_file = &files[0];
-                    // Determine input name for sample
-                    let input_name = self
-                        .title
-                        .as_ref()
-                        .or_else(|| self.video_metadata.as_ref().map(|m| &m.title))
-                        .map(|s| s.as_str())
-                        .unwrap_or_else(|| {
-                            std::path::Path::new(&self.input_path)
-                                .file_stem()
+                    // Determine input name for sample - use release name with dots preserved
+                    let input_name = if let Some(metadata) = &self.video_metadata {
+                        metadata.release_name.as_str()
+                    } else {
+                        // Fallback to directory/file name
+                        let path = std::path::Path::new(&self.input_path);
+                        let name = if path.is_dir() {
+                            // For directories, use the directory name
+                            path.file_name()
                                 .and_then(|s| s.to_str())
                                 .unwrap_or("unknown")
-                        });
+                        } else {
+                            // For files, use the file stem
+                            path.file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("unknown")
+                        };
+                        info!("Using fallback name for sample: {}", name);
+                        name
+                    };
 
                     // Get binary paths
                     let (ffmpeg_path, _, _, _) =
@@ -606,23 +811,22 @@ impl UploadBuilder {
                         .unwrap_or("ffmpeg");
 
                     // Generate sample
-                    // Get CDN paths from config (if available)
-                    let remote_path = self
-                        .config
-                        .paths
-                        .cdnpaths
-                        .as_ref()
-                        .and_then(|p| p.remote_path.as_ref())
-                        .map(|s| s.as_str())
-                        .unwrap_or("");
-                    let image_path = self
-                        .config
-                        .paths
-                        .cdnpaths
-                        .as_ref()
-                        .and_then(|p| p.image_path.as_ref())
-                        .map(|s| s.as_str())
-                        .unwrap_or("");
+                    // Get CDN paths from tracker config
+                    let mut remote_path = "";
+                    let mut image_path = "";
+
+                    if let Some(UploadComponent::Metadata(tracker_metadata)) =
+                        self.components.get("tracker_config")
+                    {
+                        remote_path = tracker_metadata
+                            .get("remote_path")
+                            .map(|s| s.as_str())
+                            .unwrap_or("");
+                        image_path = tracker_metadata
+                            .get("image_path")
+                            .map(|s| s.as_str())
+                            .unwrap_or("");
+                    }
 
                     match crate::media::video::generate_sample(
                         video_file.to_str().unwrap_or(""),
@@ -652,17 +856,17 @@ impl UploadBuilder {
                         Err(e) => {
                             // Only warn if we're not in dry run mode or if we have upload paths
                             if !self.upload_config.dry_run {
-                                warn!("Failed to generate sample: {}", e);
+                                info!("Failed to generate sample: {}", e);
                             }
                         }
                     }
                 }
                 Ok(files) => {
                     if files.is_empty() {
-                        warn!("No video files found for sample generation");
+                        info!("No video files found for sample generation");
                     }
                 }
-                Err(e) => warn!("Failed to find video files: {}", e),
+                Err(e) => info!("Failed to find video files: {}", e),
             }
         }
 
@@ -708,7 +912,7 @@ impl UploadBuilder {
                 Ok(None) => {
                     info!("No cover art found for audio files");
                 }
-                Err(e) => warn!("Failed to extract cover art: {}", e),
+                Err(e) => info!("Failed to extract cover art: {}", e),
             }
         }
 
@@ -739,21 +943,47 @@ impl UploadBuilder {
                     Err(e) => error!("Failed to create torrent: {}", e),
                 }
             } else {
-                warn!("No announce URL provided for torrent creation");
+                info!("No announce URL provided for torrent creation");
             }
         }
 
-        // Build description if we have the necessary components
-        self.build_description()?;
+        // Build description using DescriptionComponent for template support
+        self.add_description_component()?;
 
         // Build the final UploadData
         let mut upload_data = crate::media::video::UploadData::new();
 
-        // Set release name
+        // Set release name and TV show metadata
         if let Some(metadata) = &self.video_metadata {
-            upload_data.release_name = Some(metadata.title.clone());
+            // Use the original release_name with dots preserved for upload
+            upload_data.release_name = Some(metadata.release_name.clone());
+            upload_data.season = metadata.season;
+            upload_data.episode = metadata.episode;
+            upload_data.resolution = metadata.resolution.clone();
         } else if let Some(title) = &self.title {
             upload_data.release_name = Some(title.clone());
+        } else {
+            // Fallback: generate release name from input path
+            let path = Path::new(&self.input_path);
+            let base_name = if path.is_dir() {
+                // For directories, use the directory name
+                path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+            } else {
+                // For files, use the file name
+                path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+            };
+            let release_name = crate::processing::naming::generate_release_name(&base_name);
+            info!(
+                "No title or video metadata found, generated release name from path: {}",
+                release_name
+            );
+            upload_data.release_name = Some(release_name);
         }
 
         // Process components into UploadData
@@ -800,6 +1030,7 @@ impl UploadBuilder {
             }
         }
 
+        info!("UploadBuilder: Build process completed successfully");
         Ok(upload_data)
     }
 
@@ -907,23 +1138,102 @@ impl UploadBuilder {
             }
         }
 
-        // Execute the mkbrr command
-        let output = command
-            .output()
-            .map_err(|e| format!("Failed to run mkbrr: {}", e))?;
+        // Execute the mkbrr command with real-time output streaming
+        use std::io::{BufRead, BufReader};
+        use std::process::Stdio;
+        use std::thread;
 
-        if !output.stdout.is_empty() {
-            info!("mkbrr stdout:\n{}", String::from_utf8_lossy(&output.stdout));
+        info!("Starting mkbrr torrent creation process...");
+        info!(
+            "Command: {} {:?}",
+            self.config.paths.mkbrr,
+            command.get_args().collect::<Vec<_>>()
+        );
+
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+
+        let mut child = command
+            .spawn()
+            .map_err(|e| format!("Failed to spawn mkbrr process: {}", e))?;
+
+        // Handle stdout in a separate thread
+        let stdout_handle = if let Some(stdout) = child.stdout.take() {
+            Some(thread::spawn(move || {
+                use std::io::Read;
+                let mut reader = BufReader::new(stdout);
+                let mut buffer = Vec::new();
+                let mut byte = [0u8; 1];
+
+                while reader.read_exact(&mut byte).is_ok() {
+                    if byte[0] == b'\n' || byte[0] == b'\r' {
+                        if !buffer.is_empty() {
+                            if let Ok(line) = String::from_utf8(buffer.clone()) {
+                                let trimmed = line.trim();
+                                if !trimmed.is_empty() {
+                                    info!("mkbrr: {}", trimmed);
+                                }
+                            }
+                            buffer.clear();
+                        }
+                    } else {
+                        buffer.push(byte[0]);
+                    }
+                }
+
+                // Handle any remaining data in buffer
+                if !buffer.is_empty() {
+                    if let Ok(line) = String::from_utf8(buffer) {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            info!("mkbrr: {}", trimmed);
+                        }
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+
+        // Handle stderr in a separate thread
+        let stderr_handle = if let Some(stderr) = child.stderr.take() {
+            Some(thread::spawn(move || {
+                let reader = BufReader::new(stderr);
+                for line in reader.lines() {
+                    match line {
+                        Ok(line) => {
+                            if !line.trim().is_empty() {
+                                error!("mkbrr stderr: {}", line);
+                            }
+                        }
+                        Err(e) => error!("Error reading mkbrr stderr: {}", e),
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+
+        // Wait for the process to complete
+        let status = child
+            .wait()
+            .map_err(|e| format!("Failed to wait for mkbrr process: {}", e))?;
+
+        // Wait for output threads to complete
+        if let Some(handle) = stdout_handle {
+            let _ = handle.join();
         }
-        if !output.stderr.is_empty() {
-            error!("mkbrr stderr:\n{}", String::from_utf8_lossy(&output.stderr));
+        if let Some(handle) = stderr_handle {
+            let _ = handle.join();
         }
 
-        if !output.status.success() {
+        info!("mkbrr process completed");
+
+        if !status.success() {
             return Err(format!(
                 "mkbrr failed to create torrent for input path: {}. Exit code: {}",
                 self.input_path,
-                output.status.code().unwrap_or(-1)
+                status.code().unwrap_or(-1)
             ));
         }
 
@@ -961,63 +1271,134 @@ impl UploadBuilder {
         Ok(extensions.into_iter().collect())
     }
 
-    /// Build the description using DescriptionBuilder
-    fn build_description(&mut self) -> Result<(), String> {
-        // Use provided config or create default for media type
-        let config = self
-            .description_config
-            .clone()
-            .unwrap_or_else(|| DescriptionConfig::default());
+    /// Add description component that uses templates
+    fn add_description_component(&mut self) -> Result<(), String> {
+        use crate::processing::components::description::DescriptionComponent;
+        use crate::processing::components::UploadComponent as ComponentTrait;
 
-        let mut builder = DescriptionBuilder::with_config(self.media_type.clone(), config);
+        // Prepare metadata for description generation
+        let mut metadata = serde_json::json!({});
 
-        // Add title if available
+        // Add basic metadata passed from ProcessBuilder
+        if let Some(cached_metadata) = &self.cached_metadata {
+            // Start with the cached metadata as base
+            metadata = cached_metadata.clone();
+        }
+
+        // Add/override with title
         if let Some(title) = &self.title {
-            builder = builder.title(title);
-        } else if let Some(metadata) = &self.video_metadata {
-            builder = builder.title(&metadata.title);
+            metadata["title"] = serde_json::json!(title);
+        } else if let Some(video_metadata) = &self.video_metadata {
+            metadata["title"] = serde_json::json!(video_metadata.title);
         }
 
-        // Add screenshots if available
-        if let Some(UploadComponent::Screenshots(screenshots)) = self.components.get("screenshots")
-        {
-            if !screenshots.is_empty() {
-                builder = builder.images(screenshots.clone());
+        // Add audio metadata if available (includes artist, album, etc.)
+        if let Some(UploadComponent::Metadata(audio_meta)) = self.components.get("audio_metadata") {
+            for (key, value) in audio_meta {
+                metadata[key] = serde_json::json!(value);
             }
         }
 
-        // Add cover art for audio files
-        if matches!(self.media_type, MediaType::Audio(_)) {
-            if let Some(UploadComponent::CoverImage(cover_url)) = self.components.get("cover_art") {
-                builder = builder.images(vec![cover_url.clone()]);
-            }
+        // Add mediainfo if available
+        if let Some(UploadComponent::Mediainfo(mediainfo)) = self.components.get("mediainfo") {
+            metadata["mediainfo"] = serde_json::json!(mediainfo);
         }
 
-        // Add sample if available
+        // Add sample URL if available
         if let Some(UploadComponent::Sample { url, filename }) = self.components.get("sample") {
-            builder = builder.sample(url, filename);
+            metadata["sample_url"] = serde_json::json!(url);
+            metadata["sample_filename"] = serde_json::json!(filename);
         }
 
         // Add trailer if available
         if let Some(UploadComponent::Trailer { url, platform }) = self.components.get("trailer") {
-            builder = builder.trailer(url, platform);
+            metadata["trailer_url"] = serde_json::json!(url);
+            metadata["trailer_platform"] = serde_json::json!(platform);
         }
 
-        // Add any custom description from tracker config
-        if let Some(UploadComponent::Metadata(metadata)) = self.components.get("tracker_config") {
-            if let Some(custom_desc) = metadata.get("custom_description") {
-                if !custom_desc.is_empty() {
-                    builder = builder.raw(custom_desc);
-                }
+        // Add any TMDB data if available
+        if let Some(UploadComponent::TmdbData {
+            tmdb_id,
+            imdb_id,
+            tvdb_id,
+            title,
+            year,
+            ..
+        }) = self.components.get("tmdb")
+        {
+            metadata["tmdb_id"] = serde_json::json!(tmdb_id);
+            if let Some(imdb) = imdb_id {
+                metadata["tmdb_imdb_id"] = serde_json::json!(imdb);
+            }
+            if let Some(tvdb) = tvdb_id {
+                metadata["tmdb_tvdb_id"] = serde_json::json!(tvdb);
+            }
+            metadata["tmdb_title"] = serde_json::json!(title);
+            if let Some(y) = year {
+                metadata["tmdb_year"] = serde_json::json!(y);
             }
         }
 
-        // Build the description and store it as a component
-        let description = builder.build();
-        self.components.insert(
-            "description".to_string(),
-            UploadComponent::Description(description),
-        );
+        // Add cover art URL if available
+        if let Some(UploadComponent::CoverImage(cover_url)) = self.components.get("cover_art") {
+            info!("Adding cover art to metadata: {}", cover_url);
+            metadata["cover_url"] = serde_json::json!(cover_url);
+            // Also add as cover_images array for template compatibility
+            metadata["cover_images"] = serde_json::json!([cover_url]);
+        } else {
+            info!("No cover art component found");
+        }
+
+        // Create DescriptionComponent
+        let mut desc_component =
+            DescriptionComponent::new(self.input_path.clone(), self.media_type.clone(), metadata);
+
+        // Add screenshots and thumbnails together
+        let screenshots =
+            if let Some(UploadComponent::Screenshots(s)) = self.components.get("screenshots") {
+                s.clone()
+            } else {
+                Vec::new()
+            };
+
+        let thumbnails =
+            if let Some(UploadComponent::Thumbnails(t)) = self.components.get("thumbnails") {
+                t.clone()
+            } else {
+                Vec::new()
+            };
+
+        desc_component = desc_component.with_screenshots(screenshots, thumbnails);
+
+        // Add mediainfo text
+        if let Some(UploadComponent::Mediainfo(mediainfo)) = self.components.get("mediainfo") {
+            desc_component = desc_component.with_mediainfo(mediainfo.clone());
+        }
+
+        // Add enriched metadata if available (for templates)
+        if let Some(enriched) = &self.enriched_metadata {
+            desc_component = desc_component.with_enriched_metadata(enriched.clone());
+        }
+
+        // Set template name if provided
+        if let Some(template) = &self.template_name {
+            desc_component = desc_component.with_template(template.clone());
+        }
+
+        // Process the component to generate description
+        match desc_component.process() {
+            Ok(result) => {
+                if let Some(description) = result.data {
+                    self.components.insert(
+                        "description".to_string(),
+                        UploadComponent::Description(description),
+                    );
+                } else {
+                    return Err("Description component returned no data".to_string());
+                }
+            }
+            Err(e) => return Err(format!("Failed to generate description: {:?}", e)),
+        }
 
         Ok(())
     }
@@ -1121,7 +1502,7 @@ impl TrackerUploadExt for UploadBuilder {
 /// ```
 
 /// Result of an upload operation
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct UploadResult {
     pub success: bool,
     pub tracker: String,
@@ -1424,6 +1805,29 @@ impl UploadProcessor {
             form_data.insert("keywords".to_string(), keywords);
         }
 
+        // Add TV show specific fields for Seedpool
+        if tracker_name == "seedpool" && category == 2 {
+            // TV Show category
+            // Map resolution to resolution_id
+            if let Some(resolution) = &self.upload_data.resolution {
+                if let Some(resolution_id) =
+                    crate::trackers::seedpool::map_resolution_to_id(resolution)
+                {
+                    form_data.insert("resolution_id".to_string(), resolution_id);
+                }
+            }
+
+            // Add season number
+            if let Some(season) = self.upload_data.season {
+                form_data.insert("season_number".to_string(), season.to_string());
+            }
+
+            // Add episode number
+            if let Some(episode) = self.upload_data.episode {
+                form_data.insert("episode_number".to_string(), episode.to_string());
+            }
+        }
+
         // Note: Cover images are NOT included in the main torrent upload form
         // They are uploaded separately to CDN after getting the torrent ID
 
@@ -1477,6 +1881,13 @@ impl UploadProcessor {
             crate::utils::load_tracker_config::<crate::core::SeedpoolConfig>("seedpool")
                 .map_err(|e| format!("Failed to load seedpool config: {}", e))?;
 
+        // Log all form_data entries
+        info!("=== FORM DATA CONTENTS ===");
+        for (key, value) in &form_data {
+            info!("  {}: {}", key, value);
+        }
+        info!("=== END FORM DATA ===");
+
         // Get required fields from form_data
         let torrent_path = form_data
             .get("torrent")
@@ -1494,6 +1905,19 @@ impl UploadProcessor {
         let tvdb = form_data.get("tvdb").unwrap_or(&default_zero);
         let mal = form_data.get("mal").unwrap_or(&default_zero);
         let igdb = form_data.get("igdb").unwrap_or(&default_zero);
+
+        // Log all the data we're sending
+        info!("=== SEEDPOOL UPLOAD REQUEST DATA ===");
+        info!("  torrent: {}", torrent_path);
+        info!("  name: {}", name);
+        info!("  category_id: {}", category_id);
+        info!("  type_id: {}", type_id);
+        info!("  tmdb: {}", tmdb);
+        info!("  imdb: {}", imdb);
+        info!("  tvdb: {}", tvdb);
+        info!("  description length: {} chars", description.len());
+        info!("  mal: {}", mal);
+        info!("  igdb: {}", igdb);
 
         // Build multipart form
         let mut form = Form::new()
@@ -1514,8 +1938,25 @@ impl UploadProcessor {
 
         // Add keywords if present
         if let Some(keywords) = form_data.get("keywords") {
+            info!("  keywords: {}", keywords);
             form = form.text("keywords", keywords.clone());
         }
+
+        // Add TV show specific fields
+        if let Some(resolution_id) = form_data.get("resolution_id") {
+            info!("  resolution_id: {}", resolution_id);
+            form = form.text("resolution_id", resolution_id.clone());
+        }
+        if let Some(season_number) = form_data.get("season_number") {
+            info!("  season_number: {}", season_number);
+            form = form.text("season_number", season_number.clone());
+        }
+        if let Some(episode_number) = form_data.get("episode_number") {
+            info!("  episode_number: {}", episode_number);
+            form = form.text("episode_number", episode_number.clone());
+        }
+
+        info!("=== END SEEDPOOL UPLOAD REQUEST DATA ===");
 
         // Add NFO file if present
         if let Some(nfo_path) = form_data.get("nfo") {
@@ -1549,7 +1990,7 @@ impl UploadProcessor {
             .unwrap_or_else(|_| "Failed to read response body".to_string());
 
         info!("Seedpool API Response Status: {}", status);
-        debug!("Seedpool API Response: {}", response_text);
+        info!("Seedpool API Response: {}", response_text);
 
         if !status.is_success() {
             return Ok(UploadResult {
@@ -1570,17 +2011,20 @@ impl UploadProcessor {
 
                 // Upload cover image if available
                 if let Some(cover_url) = &self.upload_data.cover_url {
+                    info!("Found cover URL: {}, uploading to CDN...", cover_url);
                     match self.upload_cover_to_seedpool(&torrent_id, cover_url, &seedpool_config) {
                         Ok(_) => info!("Cover image uploaded successfully"),
-                        Err(e) => warn!("Failed to upload cover image: {}", e),
+                        Err(e) => error!("Failed to upload cover image: {}", e),
                     }
+                } else {
+                    info!("No cover URL available for upload");
                 }
 
                 // Add torrent to qBittorrent for seeding
                 if let Some(torrent_path) = &self.upload_data.torrent_path {
                     match self.add_torrent_to_qbittorrent(torrent_path) {
                         Ok(_) => info!("Torrent added to qBittorrent for seeding"),
-                        Err(e) => warn!("Failed to add torrent to qBittorrent: {}", e),
+                        Err(e) => info!("Failed to add torrent to qBittorrent: {}", e),
                     }
                 }
 
@@ -1592,7 +2036,7 @@ impl UploadProcessor {
                 })
             }
             Err(e) => {
-                warn!("Upload succeeded but failed to extract torrent ID: {}", e);
+                info!("Upload succeeded but failed to extract torrent ID: {}", e);
                 Ok(UploadResult {
                     success: true,
                     tracker: "seedpool".to_string(),
@@ -1610,7 +2054,7 @@ impl UploadProcessor {
     ) -> Result<UploadResult, String> {
         // This will be implemented to call the actual TorrentLeech upload API
         // For now, return a placeholder
-        warn!("TorrentLeech upload not yet implemented in UploadProcessor");
+        info!("TorrentLeech upload not yet implemented in UploadProcessor");
         Ok(UploadResult {
             success: false,
             tracker: "torrentleech".to_string(),
@@ -1774,17 +2218,8 @@ impl UploadProcessor {
             torrent_id
         );
 
-        // Check if we have CDN configuration
-        let cdn_paths = self
-            .config
-            .paths
-            .cdnpaths
-            .as_ref()
-            .ok_or("CDN paths not configured")?;
-        let remote_path = cdn_paths
-            .remote_path
-            .as_ref()
-            .ok_or("CDN remote path not configured")?;
+        // Use the seedpool-specific CDN paths
+        let remote_path = &seedpool_config.screenshots.remote_path;
 
         // Download the cover image from the current URL
         let cover_data = download_file(cover_url, 30)
@@ -1795,16 +2230,63 @@ impl UploadProcessor {
         fs::create_dir_all(&temp_dir)
             .map_err(|e| format!("Failed to create temp directory: {}", e))?;
 
-        // Create the correctly named cover file: torrent-cover_{torrent_id}.jpg
+        // Determine the image format from the URL or data
+        let temp_filename = if cover_url.to_lowercase().ends_with(".png") {
+            format!("temp_cover_{}.png", torrent_id)
+        } else if cover_url.to_lowercase().ends_with(".webp") {
+            format!("temp_cover_{}.webp", torrent_id)
+        } else {
+            format!("temp_cover_{}.jpg", torrent_id)
+        };
+
+        let temp_cover_path = format!("{}/{}", temp_dir, temp_filename);
+
+        // Write the cover data to a temporary file
+        fs::write(&temp_cover_path, cover_data)
+            .map_err(|e| format!("Failed to write temporary cover file: {}", e))?;
+
+        // Create the correctly named JPEG file: torrent-cover_{torrent_id}.jpg
         let cover_filename = format!("torrent-cover_{}.jpg", torrent_id);
         let local_cover_path = format!("{}/{}", temp_dir, cover_filename);
 
-        // Write the cover data to the local file
-        fs::write(&local_cover_path, cover_data)
-            .map_err(|e| format!("Failed to write cover file: {}", e))?;
+        // Convert to JPEG if needed using ffmpeg
+        if !temp_filename.ends_with(".jpg") {
+            info!("Converting cover image to JPEG format");
+            let (ffmpeg_path, _, _, _) = Config::get_binary_paths(&self.config);
+            let ffmpeg_path_str = ffmpeg_path.to_str().ok_or("Invalid ffmpeg path")?;
+
+            let convert_output = std::process::Command::new(ffmpeg_path_str)
+                .args(&[
+                    "-i",
+                    &temp_cover_path,
+                    "-vf",
+                    "scale='min(1000,iw)':'min(1000,ih)'", // Limit to max 1000x1000
+                    "-q:v",
+                    "2",  // High quality JPEG
+                    "-y", // Overwrite output
+                    &local_cover_path,
+                ])
+                .output()
+                .map_err(|e| format!("Failed to run ffmpeg for cover conversion: {}", e))?;
+
+            if !convert_output.status.success() {
+                let stderr = String::from_utf8_lossy(&convert_output.stderr);
+                return Err(format!("Failed to convert cover to JPEG: {}", stderr));
+            }
+
+            // Clean up temporary file
+            if let Err(e) = fs::remove_file(&temp_cover_path) {
+                info!("Failed to clean up temporary cover file: {}", e);
+            }
+        } else {
+            // Already JPEG, just rename
+            fs::rename(&temp_cover_path, &local_cover_path)
+                .map_err(|e| format!("Failed to rename cover file: {}", e))?;
+        }
 
         // Upload to CDN with the correct path structure
-        let remote_cover_path = format!("{}/covers/{}", remote_path, cover_filename);
+        let remote_cover_path = format!("{}/covers/", remote_path.trim_end_matches('/'));
+        info!("Uploading cover to CDN path: {}", remote_cover_path);
 
         if self.dry_run {
             info!(
@@ -1819,7 +2301,7 @@ impl UploadProcessor {
 
         // Clean up temporary file
         if let Err(e) = fs::remove_file(&local_cover_path) {
-            warn!("Failed to clean up temporary cover file: {}", e);
+            info!("Failed to clean up temporary cover file: {}", e);
         }
 
         info!("Successfully uploaded cover: {}", cover_filename);

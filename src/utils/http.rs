@@ -1,7 +1,7 @@
 // HTTP client utilities
 
 use crate::core::error::{Result, SeedError};
-use log::{debug, info};
+use log::info;
 use reqwest::blocking::{multipart::Form, Client};
 use serde_json::Value;
 use std::time::Duration;
@@ -61,7 +61,7 @@ pub fn upload_to_imgbb(
     let client = Client::new();
 
     // Log the image path and API key for debugging
-    debug!(
+    info!(
         "Uploading image to ImgBB: path={}, api_key={}",
         image_path, imgbb_api_key
     );
@@ -71,7 +71,7 @@ pub fn upload_to_imgbb(
         .map_err(|e| SeedError::ApiError(format!("Failed to attach image file: {}", e)))?;
 
     let url = format!("https://api.imgbb.com/1/upload?key={}", imgbb_api_key);
-    debug!("ImgBB API URL: {}", url);
+    info!("ImgBB API URL: {}", url);
 
     if dry_run {
         info!("[DRY RUN] Would upload image to ImgBB: {}", url);

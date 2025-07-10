@@ -5,83 +5,9 @@ use reqwest::cookie::Jar;
 use serde_json::json;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 
 use crate::core::{DelugeConfig, PathsConfig, QbittorrentConfig};
-use crate::processing::naming::generate_release_name;
-
-/// Create a torrent file using mkbrr
-pub fn create_torrent(
-    input_path: &str,
-    torrent_dir: &str,
-    announce_url: &str,
-    mkbrr_path: &str,
-    stripshit_from_videos: bool,
-) -> Result<String, String> {
-    fs::create_dir_all(torrent_dir).map_err(|e| {
-        format!(
-            "Failed to create torrent directory '{}': {}",
-            torrent_dir, e
-        )
-    })?;
-
-    let base_name = Path::new(input_path)
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-
-    let release_name = generate_release_name(&base_name);
-    let torrent_file = format!("{}/{}.torrent", torrent_dir, release_name);
-
-    info!("Creating torrent for input path: {}", input_path);
-    info!("Torrent File: {}", torrent_file);
-
-    // Build the mkbrr command
-    let mut command = Command::new(mkbrr_path);
-    command.args(&[
-        "create",
-        "-t",
-        announce_url,
-        "-o",
-        &torrent_file,
-        "--source",
-        "seedpool.org",
-        input_path,
-    ]);
-
-    // Add the --exclude flag to exclude unwanted terms and non-video files
-    if stripshit_from_videos {
-        command.args(&[
-            "--exclude",
-            "[X]*,*sample*,*proof*,*screens*,*screenshots*,*.txt,*.jpg,*.jpeg,*.png,*.nfo,*.srr,*.doc,*.sfv,*.r??",
-        ]);
-    }
-
-    // Execute the mkbrr command
-    let output = command
-        .output()
-        .map_err(|e| format!("Failed to run mkbrr: {}", e))?;
-
-    if !output.stdout.is_empty() {
-        info!("mkbrr stdout:\n{}", String::from_utf8_lossy(&output.stdout));
-    }
-    if !output.stderr.is_empty() {
-        error!("mkbrr stderr:\n{}", String::from_utf8_lossy(&output.stderr));
-    }
-
-    if !output.status.success() {
-        return Err(format!(
-            "mkbrr failed to create torrent for input path: {}. Exit code: {}",
-            input_path,
-            output.status.code().unwrap_or(-1)
-        ));
-    }
-
-    info!("Created torrent: {}", torrent_file);
-    Ok(torrent_file)
-}
 
 pub fn add_torrent_to_qbittorrent(
     torrent_file: &str,

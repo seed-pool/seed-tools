@@ -110,14 +110,14 @@ impl UploadComponent for ScreenshotComponent {
         let remote_path = self
             .config
             .paths
-            .cdnpaths
+            .screenshots
             .as_ref()
             .and_then(|p| p.remote_path.as_ref())
             .map(|s| s.as_str());
         let image_path = self
             .config
             .paths
-            .cdnpaths
+            .screenshots
             .as_ref()
             .and_then(|p| p.image_path.as_ref())
             .map(|s| s.as_str());

@@ -21,13 +21,13 @@ sections:
     section_type: "title"
     content: "{{tmdb_title}} ({{tmdb_year}})"
     order: 1
-    required_fields: ["title"]
+    required_fields: ["tmdb_title"]
 
   - name: "director"
     section_type: "author"
-    content: "{{tmdb_director}}"
+    content: "{{tmdb_directors}}"
     order: 2
-    required_fields: ["tmdb_director"]
+    required_fields: ["tmdb_directors"]
 
   - name: "synopsis"
     section_type: "synopsis"
@@ -47,9 +47,9 @@ sections:
         field: "tmdb_genres"
       - label: "Runtime"
         field: "tmdb_runtime"
-        format: "{{value}} minutes"
+        format: "{{value}}"
       - label: "Rating"
-        field: "tmdb_vote_average"
+        field: "tmdb_rating"
         format: "{{value}}/10"
       - label: "Release Date"
         field: "tmdb_release_date"
@@ -68,6 +68,14 @@ sections:
     required_fields: ["tmdb_cast"]
 
 conditionals:
+  - name: "sample"
+    condition: "field_exists:sample_url"
+    section:
+      name: "sample"
+      section_type: "raw"
+      content: "[b][spoiler=Sample: {{sample_filename}}]{{sample_url}}[/spoiler][/b]"
+      order: 7
+      
   - name: "trailer"
     condition: "field_exists:tmdb_trailer_url"
     section:

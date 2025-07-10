@@ -356,11 +356,12 @@ impl DescriptionBuilder {
     /// Get the default footer
     fn default_footer(&self) -> String {
         format!(
-            "[b][size=12][color=#757575]Created with mkbrr, ffmpeg, and mediainfo. Posted to this fine tracker with seedbrr.[/color][/size][/b]
+            "[center][b][size=12][color=#757575]Created with mkbrr, ffmpeg, and mediainfo. Posted to this fine tracker with seedbrr.[/color][/size][/b]
 
         [url=https://github.com/seed-pool/seed-tools][img]https://cdn.seedpool.org/sp.png[/img][/url]  \
         [url=https://github.com/autobrr/mkbrr][img]https://cdn.seedpool.org/mkbrr.png[/img][/url]  \
-        [url=https://www.rust-lang.org][img]https://cdn.seedpool.org/rust.png[/img][/url]"
+        [url=https://www.rust-lang.org][img]https://cdn.seedpool.org/rust.png[/img][/url][/center]"
+
         )
     }
 }

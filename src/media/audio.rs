@@ -3,7 +3,7 @@ use crate::core::types::{
 };
 use crate::processing::description::DescriptionConfig;
 use crate::processing::extraction::process_and_extract_archives;
-use log::{debug, info, warn};
+use log::{info, warn};
 use regex::Regex;
 use std::path::Path;
 
@@ -367,7 +367,7 @@ pub fn classify_audio_content(path: &Path, audio_type: &AudioType) -> AudioMetad
     let cassette_regex = Regex::new(r"(?i)\b(cassette|tape)\b").unwrap();
     let remaster_regex = Regex::new(r"(?i)\b(remaster|remastered|anniversary|deluxe)\b").unwrap();
 
-    debug!("Classifying audio content for: {}", path.display());
+    info!("Classifying audio content for: {}", path.display());
 
     // Check for artist - album pattern (common for music folders)
     let artist_album_regex = Regex::new(r"^([^-]+?)\s*-\s*(.+?)(?:\s*\((\d{4})\))?$").unwrap();
@@ -487,7 +487,7 @@ pub fn classify_audio_content(path: &Path, audio_type: &AudioType) -> AudioMetad
         metadata.source_type = AudioSourceType::CD;
     }
 
-    debug!("Audio classification result: {:?}", metadata);
+    info!("Audio classification result: {:?}", metadata);
     metadata
 }
 

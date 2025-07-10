@@ -35,6 +35,10 @@ pub struct UploadData {
     pub imdb_id: Option<String>,
     pub tvdb_id: Option<u32>,
     pub anonymous: bool,
+    // TV show specific fields
+    pub resolution_id: Option<String>,
+    pub season_number: Option<u32>,
+    pub episode_number: Option<u32>,
 }
 
 /// Upload response from tracker
