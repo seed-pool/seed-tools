@@ -49,3 +49,12 @@ conditionals:
       content: "High Definition 24-bit Audio"
       format: "colored"
       color: "#E74C3C"
+      order: 4
+
+  - name: "custom_description"
+    condition: "field_exists:custom_description"
+    section:
+      name: "custom_description"
+      section_type: "raw"
+      content: "{{custom_description}}"
+      order: 5

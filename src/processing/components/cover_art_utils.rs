@@ -95,7 +95,7 @@ fn extract_embedded_artwork(
         audio_file.display()
     );
 
-    let (ffmpeg_path, _, _, _) = Config::get_binary_paths(config);
+    let (ffmpeg_path, _, _, _, _) = Config::get_binary_paths(config);
     let ffmpeg_path_str = ffmpeg_path
         .to_str()
         .ok_or_else(|| SeedError::Other("Invalid ffmpeg path".to_string()))?;

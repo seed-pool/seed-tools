@@ -3,7 +3,7 @@ use crate::metadata::tmdb::{fetch_external_ids, fetch_tmdb_id, fetch_youtube_tra
 use crate::processing::components::mediainfo_utils::generate_mediainfo;
 use crate::processing::description::DescriptionConfig;
 use crate::utils::{check_all_duplicates, find_and_read_nfo};
-use log::{error, info, warn};
+use log::{error, info};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -537,7 +537,37 @@ impl UploadBuilder {
                     })
                     .unwrap_or(false);
 
-                if !has_tmdb_in_enriched {
+                if has_tmdb_in_enriched {
+                    // Extract IDs from enriched metadata and create TmdbData component
+                    if let Some(enriched) = &self.enriched_metadata {
+                        let tmdb_id = enriched.get("tmdb_id")
+                            .and_then(|v| v.parse::<u32>().ok())
+                            .unwrap_or(0);
+                        let imdb_id = enriched.get("imdb_id")
+                            .map(|s| {
+                                // Strip "tt" prefix if present
+                                if s.starts_with("tt") {
+                                    s[2..].to_string()
+                                } else {
+                                    s.to_string()
+                                }
+                            });
+                        let tvdb_id = enriched.get("tvdb_id")
+                            .and_then(|v| v.parse::<u32>().ok());
+
+                        if tmdb_id > 0 {
+                            info!("✅ Creating TmdbData component from enriched metadata: TMDB ID: {}", tmdb_id);
+                            let tmdb_component = UploadComponent::TmdbData {
+                                tmdb_id,
+                                imdb_id,
+                                tvdb_id,
+                                title: metadata.title.clone(),
+                                year: metadata.year.map(|y| y.to_string()),
+                            };
+                            self.components.insert("tmdb".to_string(), tmdb_component);
+                        }
+                    }
+                } else if !has_tmdb_in_enriched {
                     info!(
                         "⚠️ No TMDB data in enriched metadata, performing fresh lookup for: {}",
                         metadata.title
@@ -657,6 +687,338 @@ impl UploadBuilder {
                         }
                     }
                 }
+            }
+        }
+
+        // Process IGDB (for game content)
+        if matches!(self.media_type, MediaType::Game(_)) {
+            info!("UploadBuilder: Checking IGDB configuration: skip_igdb=false, media_type={:?}", self.media_type);
+            
+            // Check if we already have an IGDB component
+            if !self.components.contains_key("igdb") {
+                info!("UploadBuilder: No cached IGDB component found, checking enriched metadata");
+
+                // Check if we have IGDB data in enriched metadata
+                let has_igdb_in_enriched = self
+                    .enriched_metadata
+                    .as_ref()
+                    .map(|em| {
+                        let has_data = em.contains_key("igdb_summary")
+                            || em.contains_key("igdb_title")
+                            || em.contains_key("igdb_developer");
+                        info!(
+                            "📊 Enriched metadata check: has IGDB data = {}, total fields = {}",
+                            has_data,
+                            em.len()
+                        );
+                        if has_data {
+                            info!("✅ Found IGDB data in enriched metadata, skipping API call");
+                            for (key, value) in em.iter().filter(|(k, _)| k.starts_with("igdb_")) {
+                                info!("  📌 {} = {}", key, value);
+                            }
+                        }
+                        has_data
+                    })
+                    .unwrap_or(false);
+
+                if has_igdb_in_enriched {
+                    // Extract IGDB ID from enriched metadata and create IGDB component
+                    if let Some(enriched) = &self.enriched_metadata {
+                        let igdb_id = enriched.get("igdb_id")
+                            .and_then(|v| v.parse::<u64>().ok())
+                            .unwrap_or(0);
+
+                        if igdb_id > 0 {
+                            info!("✅ Creating IGDB component from enriched metadata: IGDB ID: {}", igdb_id);
+                            
+                            // Create IGDB component (placeholder for now)
+                            // TODO: Create proper IGDB component type if needed
+                        }
+                    }
+                } else {
+                    info!("⚠️ No IGDB data in enriched metadata for game");
+                }
+            }
+        }
+
+        // Process IGDB Screenshots (for game content)
+        if !self.upload_config.skip_screenshots && matches!(self.media_type, MediaType::Game(_)) {
+            info!("UploadBuilder: Checking IGDB screenshot processing for games");
+            
+            // Get IGDB screenshots from enriched metadata
+            if let Some(enriched) = &self.enriched_metadata {
+                if let Some(screenshots_str) = enriched.get("igdb_screenshots") {
+                    let screenshot_urls: Vec<&str> = screenshots_str
+                        .split(',')
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    
+                    if !screenshot_urls.is_empty() {
+                        info!("🎮 Found {} IGDB screenshots to download", screenshot_urls.len());
+                        
+                        // Get tracker config for CDN paths
+                        let mut remote_path = None;
+                        let mut image_path = None;
+                        let mut imgbb_api_key = None;
+
+                        if let Some(UploadComponent::Metadata(tracker_metadata)) =
+                            self.components.get("tracker_config")
+                        {
+                            remote_path = tracker_metadata.get("remote_path").map(|s| s.as_str());
+                            image_path = tracker_metadata.get("image_path").map(|s| s.as_str());
+                            // Check for tracker-specific ImgBB key if available
+                            if let Some(key) = tracker_metadata.get("imgbb_api_key") {
+                                if !key.is_empty() {
+                                    imgbb_api_key = Some(key.as_str());
+                                }
+                            }
+                        }
+
+                        // Fall back to global ImgBB config if no tracker-specific key
+                        if imgbb_api_key.is_none() {
+                            imgbb_api_key =
+                                self.config.imgbb.as_ref().map(|c| c.imgbb_api_key.as_str());
+                        }
+
+                        // Check if we have CDN configuration
+                        let has_cdn = remote_path.is_some() && image_path.is_some();
+                        let has_imgbb = imgbb_api_key.map_or(false, |key| !key.is_empty());
+
+                        if !has_cdn && !has_imgbb {
+                            info!("⚠️ No CDN or ImgBB configuration found, skipping IGDB screenshot upload");
+                        } else {
+                            let mut uploaded_screenshots = Vec::new();
+                            let mut uploaded_thumbnails = Vec::new();
+                            
+                            // Use configured screenshot count
+                            let max_screenshots = self.upload_config.screenshot_count;
+                            let screenshots_to_process = screenshot_urls.iter().take(max_screenshots);
+                            
+                            // Generate sanitized base name for files
+                            let sanitized_input_name = if let Some(title) = enriched.get("igdb_title") {
+                                crate::processing::naming::generate_release_name(title)
+                            } else if let Some(filename) = enriched.get("filename") {
+                                crate::processing::naming::generate_release_name(filename)
+                            } else {
+                                "game".to_string()
+                            };
+
+                            // Ensure the output directory exists for CDN
+                            if has_cdn {
+                                let output_dir = &self.config.paths.screenshots_dir;
+                                if let Err(e) = std::fs::create_dir_all(output_dir) {
+                                    info!("❌ Failed to create screenshots directory: {}", e);
+                                } else {
+                                    info!("🎮 Using CDN for IGDB screenshot upload");
+                                    
+                                    for (index, &url) in screenshots_to_process.enumerate() {
+                                        info!("📸 Downloading IGDB screenshot {}/{}: {}", index + 1, max_screenshots, url);
+                                        
+                                        // Download the image
+                                        match reqwest::blocking::get(url) {
+                                            Ok(response) => {
+                                                if response.status().is_success() {
+                                                    match response.bytes() {
+                                                        Ok(image_bytes) => {
+                                                            // Save to screenshots directory
+                                                            let screenshot_file = format!("{}/{}_{}.jpg", output_dir, sanitized_input_name, index + 1);
+                                                            let thumbnail_file = format!("{}/{}_{}_thumb.jpg", output_dir, sanitized_input_name, index + 1);
+                                                            
+                                                            match std::fs::write(&screenshot_file, &image_bytes) {
+                                                                Ok(_) => {
+                                                                    // Create thumbnail by copying the same image (IGDB screenshots are already appropriately sized)
+                                                                    if let Err(e) = std::fs::copy(&screenshot_file, &thumbnail_file) {
+                                                                        info!("⚠️ Failed to create thumbnail, using original: {}", e);
+                                                                    }
+                                                                    
+                                                                    // Set permissions
+                                                                    #[cfg(unix)]
+                                                                    {
+                                                                        use std::os::unix::fs::PermissionsExt;
+                                                                        let _ = std::fs::set_permissions(&screenshot_file, std::fs::Permissions::from_mode(0o777));
+                                                                        let _ = std::fs::set_permissions(&thumbnail_file, std::fs::Permissions::from_mode(0o777));
+                                                                    }
+                                                                    
+                                                                    // Upload to CDN
+                                                                    if !self.upload_config.dry_run {
+                                                                        let remote = remote_path.unwrap();
+                                                                        match crate::utils::upload_to_cdn(&screenshot_file, &format!("{}/screenshots/", remote.trim_end_matches('/'))) {
+                                                                            Ok(_) => {
+                                                                                info!("✅ Uploaded IGDB screenshot to CDN");
+                                                                                match crate::utils::upload_to_cdn(&thumbnail_file, &format!("{}/screenshots/", remote.trim_end_matches('/'))) {
+                                                                                    Ok(_) => info!("✅ Uploaded IGDB thumbnail to CDN"),
+                                                                                    Err(e) => info!("❌ Failed to upload IGDB thumbnail to CDN: {}", e),
+                                                                                }
+                                                                            }
+                                                                            Err(e) => info!("❌ Failed to upload IGDB screenshot to CDN: {}", e),
+                                                                        }
+                                                                    } else {
+                                                                        info!("[DRY RUN] Skipping IGDB screenshot/thumbnail upload to CDN");
+                                                                    }
+                                                                    
+                                                                    // Add public-facing URLs
+                                                                    let screenshot_filename = std::path::Path::new(&screenshot_file)
+                                                                        .file_name()
+                                                                        .unwrap()
+                                                                        .to_string_lossy();
+                                                                    let thumbnail_filename = std::path::Path::new(&thumbnail_file)
+                                                                        .file_name()
+                                                                        .unwrap()
+                                                                        .to_string_lossy();
+
+                                                                    let image = image_path.unwrap();
+                                                                    uploaded_screenshots.push(format!("{}/{}", image, screenshot_filename));
+                                                                    uploaded_thumbnails.push(format!("{}/{}", image, thumbnail_filename));
+                                                                }
+                                                                Err(e) => info!("❌ Failed to save IGDB screenshot: {}", e),
+                                                            }
+                                                        }
+                                                        Err(e) => info!("❌ Failed to read image bytes: {}", e),
+                                                    }
+                                                } else {
+                                                    info!("❌ Failed to download IGDB screenshot: HTTP {}", response.status());
+                                                }
+                                            }
+                                            Err(e) => info!("❌ Failed to download IGDB screenshot: {}", e),
+                                        }
+                                    }
+                                }
+                            } else if has_imgbb {
+                                info!("🎮 Using ImgBB for IGDB screenshot upload");
+                                let api_key = imgbb_api_key.unwrap();
+                                
+                                for (index, &url) in screenshots_to_process.enumerate() {
+                                    info!("📸 Downloading IGDB screenshot {}/{}: {}", index + 1, max_screenshots, url);
+                                    
+                                    // Download the image
+                                    match reqwest::blocking::get(url) {
+                                        Ok(response) => {
+                                            if response.status().is_success() {
+                                                match response.bytes() {
+                                                    Ok(image_bytes) => {
+                                                        // Save to temporary file
+                                                        let temp_dir = std::env::temp_dir();
+                                                        let temp_filename = format!("igdb_screenshot_{}_{}.jpg", index, chrono::Utc::now().timestamp());
+                                                        let temp_path = temp_dir.join(temp_filename);
+                                                        
+                                                        match std::fs::write(&temp_path, &image_bytes) {
+                                                            Ok(_) => {
+                                                                // Upload to ImgBB
+                                                                if let Some(temp_path_str) = temp_path.to_str() {
+                                                                    match crate::utils::upload_to_imgbb(temp_path_str, api_key, self.upload_config.dry_run) {
+                                                                        Ok((imgbb_url, _thumb_url)) => {
+                                                                            info!("✅ Uploaded IGDB screenshot to ImgBB: {}", imgbb_url);
+                                                                            uploaded_screenshots.push(imgbb_url.clone());
+                                                                            uploaded_thumbnails.push(imgbb_url); // Use same URL for thumbnail
+                                                                        }
+                                                                        Err(e) => info!("❌ Failed to upload IGDB screenshot to ImgBB: {}", e),
+                                                                    }
+                                                                }
+                                                                // Clean up temp file
+                                                                let _ = std::fs::remove_file(&temp_path);
+                                                            }
+                                                            Err(e) => info!("❌ Failed to save temporary file: {}", e),
+                                                        }
+                                                    }
+                                                    Err(e) => info!("❌ Failed to read image bytes: {}", e),
+                                                }
+                                            } else {
+                                                info!("❌ Failed to download IGDB screenshot: HTTP {}", response.status());
+                                            }
+                                        }
+                                        Err(e) => info!("❌ Failed to download IGDB screenshot: {}", e),
+                                    }
+                                }
+                            }
+                            
+                            if !uploaded_screenshots.is_empty() {
+                                info!("✅ Successfully processed {} IGDB screenshots", uploaded_screenshots.len());
+                                self.components.insert(
+                                    "screenshots".to_string(),
+                                    UploadComponent::Screenshots(uploaded_screenshots.clone()),
+                                );
+                                self.components.insert(
+                                    "thumbnails".to_string(),
+                                    UploadComponent::Thumbnails(uploaded_thumbnails),
+                                );
+                            }
+                        }
+                    } else {
+                        info!("⚠️ No IGDB screenshots found in metadata");
+                    }
+                } else {
+                    info!("⚠️ No IGDB screenshot data found in enriched metadata");
+                }
+            } else {
+                info!("⚠️ No enriched metadata available for IGDB screenshots");
+            }
+        }
+
+        // Process Screenshots (for ebook content - includes all ebook types)
+        if !self.upload_config.skip_screenshots {
+            if let MediaType::Ebook(_ebook_type) = &self.media_type {
+            info!("UploadBuilder: Checking ebook screenshot processing");
+            
+            // Find ebook files (PDF, CBR, CBZ, EPUB)
+            let ebook_extensions = ["pdf", "cbr", "cbz", "epub"];
+            match crate::utils::filter_files_by_extension(&self.input_path, &ebook_extensions) {
+                Ok(files) if !files.is_empty() => {
+                    let ebook_file = &files[0];
+                    info!("📚 Found ebook file for screenshot processing: {}", ebook_file.display());
+                    
+                    // Get tracker config for CDN paths
+                    let mut remote_path = None;
+                    let mut image_path = None;
+                    
+                    if let Some(UploadComponent::Metadata(tracker_metadata)) = 
+                        self.components.get("tracker_config") 
+                    {
+                        remote_path = tracker_metadata.get("remote_path").map(|s| s.as_str());
+                        image_path = tracker_metadata.get("image_path").map(|s| s.as_str());
+                    }
+                    
+                    if let (Some(remote), Some(image)) = (remote_path, image_path) {
+                        // Determine input name for screenshots
+                        let input_name = std::path::Path::new(&self.input_path)
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("ebook");
+                            
+                        info!("📚 Generating ebook screenshots for: {}", input_name);
+                        
+                        // Generate ebook description (may include rich Open Library content)
+                        match crate::media::ebook::generate_ebook_description(
+                            ebook_file.to_str().unwrap_or(""),
+                            input_name,
+                            remote,
+                            image,
+                            self.upload_config.dry_run,
+                            &self.config,
+                        ) {
+                            Ok(description) => {
+                                info!("✅ Successfully generated ebook description");
+                                // Store the description (rich Open Library or basic with screenshots)
+                                self.components.insert(
+                                    "description".to_string(),
+                                    UploadComponent::Description(description),
+                                );
+                            }
+                            Err(e) => {
+                                info!("❌ Failed to generate ebook description: {}", e);
+                            }
+                        }
+                    } else {
+                        info!("⚠️ No CDN configuration found for ebook screenshots");
+                    }
+                }
+                Ok(_) => {
+                    info!("⚠️ No ebook files found for screenshot processing");
+                }
+                Err(e) => {
+                    info!("❌ Failed to find ebook files: {}", e);
+                }
+            }
             }
         }
 
@@ -803,7 +1165,7 @@ impl UploadBuilder {
                     };
 
                     // Get binary paths
-                    let (ffmpeg_path, _, _, _) =
+                    let (ffmpeg_path, _, _, _, _) =
                         crate::core::Config::get_binary_paths(&self.config);
                     let ffmpeg_path_str = ffmpeg_path
                         .to_str()
@@ -952,6 +1314,18 @@ impl UploadBuilder {
 
         // Build the final UploadData
         let mut upload_data = crate::media::video::UploadData::new();
+        
+        // Initialize IGDB ID from enriched metadata if available
+        if let Some(enriched) = &self.enriched_metadata {
+            if let Some(igdb_id_str) = enriched.get("igdb_id") {
+                if let Ok(igdb_id) = igdb_id_str.parse::<u64>() {
+                    if igdb_id > 0 {
+                        upload_data.igdb_id = Some(igdb_id);
+                        info!("✅ Set IGDB ID in upload_data: {}", igdb_id);
+                    }
+                }
+            }
+        }
 
         // Set release name and TV show metadata
         if let Some(metadata) = &self.video_metadata {
@@ -1349,55 +1723,72 @@ impl UploadBuilder {
             info!("No cover art component found");
         }
 
-        // Create DescriptionComponent
-        let mut desc_component =
-            DescriptionComponent::new(self.input_path.clone(), self.media_type.clone(), metadata);
-
-        // Add screenshots and thumbnails together
-        let screenshots =
-            if let Some(UploadComponent::Screenshots(s)) = self.components.get("screenshots") {
-                s.clone()
-            } else {
-                Vec::new()
-            };
-
-        let thumbnails =
-            if let Some(UploadComponent::Thumbnails(t)) = self.components.get("thumbnails") {
-                t.clone()
-            } else {
-                Vec::new()
-            };
-
-        desc_component = desc_component.with_screenshots(screenshots, thumbnails);
-
-        // Add mediainfo text
-        if let Some(UploadComponent::Mediainfo(mediainfo)) = self.components.get("mediainfo") {
-            desc_component = desc_component.with_mediainfo(mediainfo.clone());
-        }
-
-        // Add enriched metadata if available (for templates)
-        if let Some(enriched) = &self.enriched_metadata {
-            desc_component = desc_component.with_enriched_metadata(enriched.clone());
-        }
-
-        // Set template name if provided
-        if let Some(template) = &self.template_name {
-            desc_component = desc_component.with_template(template.clone());
-        }
-
-        // Process the component to generate description
-        match desc_component.process() {
-            Ok(result) => {
-                if let Some(description) = result.data {
-                    self.components.insert(
-                        "description".to_string(),
-                        UploadComponent::Description(description),
-                    );
-                } else {
-                    return Err("Description component returned no data".to_string());
+        // Check if a description component already exists (e.g., from ebook processing)
+        if !self.components.contains_key("description") {
+            // Add custom description from tracker config to metadata before creating component
+            if let Some(UploadComponent::Metadata(tracker_meta)) = self.components.get("tracker_config") {
+                if let Some(custom_desc) = tracker_meta.get("custom_description") {
+                    if !custom_desc.is_empty() {
+                        metadata["custom_description"] = serde_json::json!(custom_desc);
+                        info!("📝 Adding custom description from tracker config: {} chars", custom_desc.len());
+                    }
                 }
             }
-            Err(e) => return Err(format!("Failed to generate description: {:?}", e)),
+
+            // Create DescriptionComponent only if one doesn't already exist
+            let mut desc_component =
+                DescriptionComponent::new(self.input_path.clone(), self.media_type.clone(), metadata);
+
+            // Add screenshots and thumbnails together
+            let screenshots =
+                if let Some(UploadComponent::Screenshots(s)) = self.components.get("screenshots") {
+                    s.clone()
+                } else {
+                    Vec::new()
+                };
+
+            let thumbnails =
+                if let Some(UploadComponent::Thumbnails(t)) = self.components.get("thumbnails") {
+                    t.clone()
+                } else {
+                    Vec::new()
+                };
+
+            desc_component = desc_component.with_screenshots(screenshots, thumbnails);
+
+            // Add mediainfo text
+            if let Some(UploadComponent::Mediainfo(mediainfo)) = self.components.get("mediainfo") {
+                desc_component = desc_component.with_mediainfo(mediainfo.clone());
+            }
+
+            // Add enriched metadata if available (for templates)
+            if let Some(enriched) = &self.enriched_metadata {
+                desc_component = desc_component.with_enriched_metadata(enriched.clone());
+            }
+
+
+
+            // Set template name if provided
+            if let Some(template) = &self.template_name {
+                desc_component = desc_component.with_template(template.clone());
+            }
+
+            // Process the component to generate description
+            match desc_component.process() {
+                Ok(result) => {
+                    if let Some(description) = result.data {
+                        self.components.insert(
+                            "description".to_string(),
+                            UploadComponent::Description(description),
+                        );
+                    } else {
+                        return Err("Description component returned no data".to_string());
+                    }
+                }
+                Err(e) => return Err(format!("Failed to generate description: {:?}", e)),
+            }
+        } else {
+            info!("📝 Description component already exists, skipping template-based generation");
         }
 
         Ok(())
@@ -1524,6 +1915,12 @@ pub struct UploadProcessor {
     media_source_type: Option<String>,
     /// Field mapping override
     field_mapping: Option<TrackerFieldMapping>,
+    /// Original torrent info with preserved category/type codes
+    original_torrent_info: Option<crate::trackers::seedpool::SeedpoolTorrentInfo>,
+    /// Media type for cover generation
+    media_type: Option<MediaType>,
+    /// Input path for PDF cover generation
+    input_path: Option<String>,
 }
 
 impl UploadProcessor {
@@ -1536,12 +1933,28 @@ impl UploadProcessor {
             media_category: None,
             media_source_type: None,
             field_mapping: None,
+            original_torrent_info: None,
+            media_type: None,
+            input_path: None,
         }
+    }
+
+    /// Set media type and input path for cover generation
+    pub fn with_media_info(mut self, media_type: MediaType, input_path: String) -> Self {
+        self.media_type = Some(media_type);
+        self.input_path = Some(input_path);
+        self
     }
 
     /// Set dry run mode
     pub fn dry_run(mut self, dry_run: bool) -> Self {
         self.dry_run = dry_run;
+        self
+    }
+    
+    /// Set original torrent info with preserved category/type codes  
+    pub fn with_original_torrent_info(mut self, torrent_info: crate::trackers::seedpool::SeedpoolTorrentInfo) -> Self {
+        self.original_torrent_info = Some(torrent_info);
         self
     }
 
@@ -1671,6 +2084,16 @@ impl UploadProcessor {
     ) -> Result<(u32, Option<u32>), String> {
         match tracker_name {
             "seedpool" => {
+                // Use original torrent info with preserved codes if available
+                if let Some(ref original_info) = self.original_torrent_info {
+                    info!("🎯 Using original category/type codes: {}/{}", 
+                          original_info.category_code(), original_info.type_code());
+                    return Ok((
+                        original_info.category_code() as u32,
+                        Some(original_info.type_code() as u32),
+                    ));
+                }
+                
                 // Convert media strings to Seedpool TorrentInfo
                 let torrent_info =
                     crate::trackers::seedpool::create_torrent_info_from_media_strings(
@@ -1792,7 +2215,15 @@ impl UploadProcessor {
 
         // Default values for other optional fields
         form_data.insert("mal".to_string(), "0".to_string());
-        form_data.insert("igdb".to_string(), "0".to_string());
+        
+        // Add IGDB ID if available
+        form_data.insert(
+            "igdb".to_string(),
+            self.upload_data
+                .igdb_id
+                .map(|id| id.to_string())
+                .unwrap_or("0".to_string()),
+        );
 
         // Generate keywords from release name
         if let Some(release_name) = &self.upload_data.release_name {
@@ -1805,10 +2236,9 @@ impl UploadProcessor {
             form_data.insert("keywords".to_string(), keywords);
         }
 
-        // Add TV show specific fields for Seedpool
-        if tracker_name == "seedpool" && category == 2 {
-            // TV Show category
-            // Map resolution to resolution_id
+        // Add resolution_id for Seedpool video uploads (movies, TV shows, anime, etc.)
+        if tracker_name == "seedpool" {
+            // Map resolution to resolution_id for all video content
             if let Some(resolution) = &self.upload_data.resolution {
                 if let Some(resolution_id) =
                     crate::trackers::seedpool::map_resolution_to_id(resolution)
@@ -1816,6 +2246,11 @@ impl UploadProcessor {
                     form_data.insert("resolution_id".to_string(), resolution_id);
                 }
             }
+        }
+
+        // Add TV show specific fields for Seedpool  
+        if tracker_name == "seedpool" && category == 2 {
+            // TV Show category
 
             // Add season number
             if let Some(season) = self.upload_data.season {
@@ -1892,7 +2327,33 @@ impl UploadProcessor {
         let torrent_path = form_data
             .get("torrent")
             .ok_or("Missing torrent file path")?;
-        let name = form_data.get("name").ok_or("Missing release name")?;
+        
+        // For Seedpool, use original filename (minus extension) instead of sanitized release name
+        let name = if let Some(input_path) = &self.input_path {
+            let path = std::path::Path::new(input_path);
+            if path.is_file() {
+                // For files, use file stem (filename without extension)
+                path.file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| {
+                        // Fallback to sanitized name if we can't get the original
+                        form_data.get("name").map(|s| s.clone()).unwrap_or_else(|| "Unknown".to_string())
+                    })
+            } else {
+                // For directories, use directory name
+                path.file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| {
+                        // Fallback to sanitized name if we can't get the original
+                        form_data.get("name").map(|s| s.clone()).unwrap_or_else(|| "Unknown".to_string())
+                    })
+            }
+        } else {
+            // No input path available, use sanitized name
+            form_data.get("name").map(|s| s.clone()).unwrap_or_else(|| "Unknown".to_string())
+        };
         let category_id = form_data.get("category_id").ok_or("Missing category ID")?;
         let type_id = form_data.get("type_id").ok_or("Missing type ID")?;
         let default_description = String::new();
@@ -2004,13 +2465,86 @@ impl UploadProcessor {
         // Extract torrent ID from response
         match extract_torrent_id(&response_text) {
             Ok(torrent_id) => {
-                info!(
-                    "Successfully uploaded to Seedpool. Torrent ID: {}",
-                    torrent_id
-                );
+                        info!(
+            "Successfully uploaded to Seedpool. Torrent ID: {}",
+            torrent_id
+        );
 
-                // Upload cover image if available
-                if let Some(cover_url) = &self.upload_data.cover_url {
+        // Process ebooks with Open Library lookup and cover upload after successful upload
+        if let Some(media_type) = &self.media_type {
+            match media_type {
+                crate::core::MediaType::Ebook(ebook_type) => {
+                    match ebook_type {
+                        crate::core::EbookType::Epub => {
+                            // Check if Open Library processing was already attempted during screenshot generation
+                            if std::env::var("SEEDBRR_OPEN_LIBRARY_ATTEMPTED").is_ok() {
+                                info!("📚 Open Library processing already completed during upload, skipping duplicate processing");
+                                std::env::remove_var("SEEDBRR_OPEN_LIBRARY_ATTEMPTED"); // Clean up
+                            } else {
+                                info!("📚 Starting EPUB Open Library processing...");
+                                if let Err(e) = self.process_ebook_open_library(&torrent_id, &seedpool_config, ebook_type) {
+                                    error!("❌ Failed to process EPUB with Open Library: {}", e);
+                                } else {
+                                    info!("✅ Successfully processed EPUB with Open Library");
+                                }
+                            }
+
+                            // Generate and upload EPUB cover for torrent
+                            info!("📚 EPUB detected, finding and uploading cover image...");
+                            match self.generate_epub_cover_for_upload(&torrent_id, &seedpool_config) {
+                                Ok(cover_url) => {
+                                    info!("✅ EPUB cover processed successfully: {}", cover_url);
+                                    // Upload the cover to Seedpool
+                                    match self.upload_cover_to_seedpool(&torrent_id, &cover_url, &seedpool_config) {
+                                        Ok(_) => info!("✅ EPUB cover uploaded to Seedpool successfully"),
+                                        Err(e) => error!("❌ Failed to upload EPUB cover to Seedpool: {}", e),
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("❌ Failed to process EPUB cover: {}", e);
+                                }
+                            }
+                        }
+                        crate::core::EbookType::Pdf => {
+                            info!("📚 Starting PDF Open Library processing...");
+                            if let Err(e) = self.process_ebook_open_library(&torrent_id, &seedpool_config, ebook_type) {
+                                error!("❌ Failed to process PDF with Open Library: {}", e);
+                            } else {
+                                info!("✅ Successfully processed PDF with Open Library");
+                            }
+                        }
+                        _ => {
+                            info!("📚 Ebook type {:?} - skipping Open Library processing", ebook_type);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+                // Generate PDF cover if this is a PDF ebook
+                let mut generated_cover_url: Option<String> = None;
+                if let Some(media_type) = &self.media_type {
+                    if let crate::core::MediaType::Ebook(crate::core::EbookType::Pdf) = media_type {
+                        info!("📚 PDF ebook detected, generating cover image...");
+                        match self.generate_pdf_cover_for_upload(&torrent_id, &seedpool_config) {
+                            Ok(cover_url) => {
+                                info!("✅ PDF cover generated successfully: {}", cover_url);
+                                generated_cover_url = Some(cover_url);
+                            }
+                            Err(e) => {
+                                error!("❌ Failed to generate PDF cover: {}", e);
+                            }
+                        }
+                    }
+                }
+
+                // Upload cover image if available (existing or generated)
+                let cover_to_upload = generated_cover_url
+                    .as_ref()
+                    .or(self.upload_data.cover_url.as_ref());
+                    
+                if let Some(cover_url) = cover_to_upload {
                     info!("Found cover URL: {}, uploading to CDN...", cover_url);
                     match self.upload_cover_to_seedpool(&torrent_id, cover_url, &seedpool_config) {
                         Ok(_) => info!("Cover image uploaded successfully"),
@@ -2203,6 +2737,181 @@ impl UploadProcessor {
         result.trim().to_string()
     }
 
+    /// Generate EPUB cover for upload
+    fn generate_epub_cover_for_upload(
+        &self,
+        torrent_id: &str,
+        _seedpool_config: &crate::core::SeedpoolConfig,
+    ) -> Result<String, String> {
+        use std::fs;
+        use std::fs::File;
+        use std::io::copy;
+        use zip::ZipArchive;
+
+        info!("📚 Extracting EPUB cover for torrent ID: {}", torrent_id);
+
+        let input_path = self.input_path.as_ref()
+            .ok_or("No input path available for EPUB cover processing")?;
+
+        // Find EPUB file
+        let epub_files = crate::utils::filter_files_by_extension(input_path, &["epub"])
+            .map_err(|e| format!("Failed to find EPUB files: {}", e))?;
+
+        let epub_file = epub_files.first()
+            .ok_or("No EPUB file found for processing")?;
+
+        let epub_path = epub_file.to_str()
+            .ok_or("Invalid EPUB path")?;
+
+        info!("📚 Extracting cover from EPUB: {}", epub_path);
+
+        // Extract cover directly from EPUB file
+        let file = File::open(epub_path)
+            .map_err(|e| format!("Failed to open EPUB: {}", e))?;
+        let mut archive = ZipArchive::new(file)
+            .map_err(|e| format!("Failed to read EPUB as zip: {}", e))?;
+
+        // Look for cover image in EPUB
+        let mut cover_found = None;
+        for i in 0..archive.len() {
+            let file = archive.by_index(i)
+                .map_err(|e| format!("Failed to access EPUB entry: {}", e))?;
+            let name = file.name().to_lowercase();
+            
+            // Look for cover images (prioritize cover.* files)
+            if name.contains("cover") && (name.ends_with(".jpg") || name.ends_with(".jpeg") || name.ends_with(".png")) {
+                cover_found = Some(i);
+                break;
+            }
+        }
+
+        // If no cover found, try first image
+        if cover_found.is_none() {
+            for i in 0..archive.len() {
+                let file = archive.by_index(i)
+                    .map_err(|e| format!("Failed to access EPUB entry: {}", e))?;
+                let name = file.name().to_lowercase();
+                
+                if name.ends_with(".jpg") || name.ends_with(".jpeg") || name.ends_with(".png") {
+                    cover_found = Some(i);
+                    break;
+                }
+            }
+        }
+
+        let cover_index = cover_found
+            .ok_or("No cover image found in EPUB file")?;
+
+        // Extract the cover to temp directory
+        let temp_dir = format!("{}/temp_covers", self.config.paths.screenshots_dir);
+        fs::create_dir_all(&temp_dir)
+            .map_err(|e| format!("Failed to create temp directory: {}", e))?;
+
+        let cover_filename = format!("epub-cover-{}.jpg", torrent_id);
+        let cover_path = format!("{}/{}", temp_dir, cover_filename);
+
+        {
+            let mut cover_file = archive.by_index(cover_index)
+                .map_err(|e| format!("Failed to access cover in EPUB: {}", e))?;
+            let mut out_file = File::create(&cover_path)
+                .map_err(|e| format!("Failed to create cover file: {}", e))?;
+            copy(&mut cover_file, &mut out_file)
+                .map_err(|e| format!("Failed to extract cover: {}", e))?;
+        }
+
+        // Create the correctly named JPEG file: torrent-cover_{torrent_id}.jpg
+        let final_cover_filename = format!("torrent-cover_{}.jpg", torrent_id);
+        let final_cover_path = format!("{}/{}", temp_dir, final_cover_filename);
+
+        if self.dry_run {
+            info!("🔄 Dry run: Would process EPUB cover to {}", final_cover_path);
+            return Ok(format!("file://{}", final_cover_path));
+        }
+
+        // Convert to JPEG if needed using ffmpeg
+        let (ffmpeg_path, _, _, _, _) = crate::core::Config::get_binary_paths(&self.config);
+        let ffmpeg_path_str = ffmpeg_path.to_str().ok_or("Invalid ffmpeg path")?;
+
+        let convert_output = std::process::Command::new(ffmpeg_path_str)
+            .args(&[
+                "-i",
+                &cover_path,
+                "-q:v",
+                "2", // Quality (1-31, 1 is best)
+                "-y", // Overwrite output
+                &final_cover_path,
+            ])
+            .output()
+            .map_err(|e| format!("Failed to run ffmpeg for EPUB cover conversion: {}", e))?;
+
+        if !convert_output.status.success() {
+            let stderr = String::from_utf8_lossy(&convert_output.stderr);
+            return Err(format!("Failed to convert EPUB cover to JPEG: {}", stderr));
+        }
+
+        // Clean up temporary extracted cover
+        let _ = fs::remove_file(&cover_path);
+
+        // Set permissions to 777 for web server readability
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            info!("Setting permissions to 777 for EPUB cover: {}", final_cover_path);
+            fs::set_permissions(&final_cover_path, fs::Permissions::from_mode(0o777))
+                .map_err(|e| {
+                    format!(
+                        "Failed to set permissions for EPUB cover '{}': {}",
+                        final_cover_path, e
+                    )
+                })?;
+            info!("Successfully set permissions to 777 for EPUB cover: {}", final_cover_path);
+        }
+
+        info!("✅ Successfully processed EPUB cover: {}", final_cover_path);
+        Ok(format!("file://{}", final_cover_path))
+    }
+
+    /// Generate PDF cover for upload
+    fn generate_pdf_cover_for_upload(
+        &self,
+        torrent_id: &str,
+        _seedpool_config: &crate::core::SeedpoolConfig,
+    ) -> Result<String, String> {
+        use crate::media::ebook::detect_ebook_files;
+
+        // Find PDF files in the input path
+        let input_path = self.input_path.as_ref()
+            .ok_or("No input path available for PDF cover generation")?;
+
+        let ebook_files = detect_ebook_files(input_path)
+            .map_err(|e| format!("Failed to detect ebook files: {}", e))?;
+
+        // Find the first PDF file
+        let pdf_file = ebook_files
+            .iter()
+            .find(|file| matches!(file.ebook_type, crate::core::EbookType::Pdf))
+            .ok_or("No PDF file found for cover generation")?;
+
+        let pdf_path = pdf_file.path.to_str()
+            .ok_or("Invalid PDF path")?;
+
+        info!("📚 Generating cover from PDF: {}", pdf_path);
+
+        // Generate the cover using our new function
+        let cover_path = crate::media::ebook::generate_pdf_cover(
+            pdf_path,
+            torrent_id,
+            &self.config,
+            self.dry_run,
+        )?;
+
+        // Convert local path to a file:// URL for upload_cover_to_seedpool
+        let cover_url = format!("file://{}", cover_path);
+        
+        info!("📚 Generated PDF cover at: {}", cover_url);
+        Ok(cover_url)
+    }
+
     /// Upload cover image to CDN with correct naming scheme for Seedpool
     fn upload_cover_to_seedpool(
         &self,
@@ -2221,38 +2930,53 @@ impl UploadProcessor {
         // Use the seedpool-specific CDN paths
         let remote_path = &seedpool_config.screenshots.remote_path;
 
-        // Download the cover image from the current URL
-        let cover_data = download_file(cover_url, 30)
-            .map_err(|e| format!("Failed to download cover image: {}", e))?;
-
         // Create temporary directory for processing
         let temp_dir = format!("{}/temp_covers", self.config.paths.screenshots_dir);
         fs::create_dir_all(&temp_dir)
             .map_err(|e| format!("Failed to create temp directory: {}", e))?;
 
-        // Determine the image format from the URL or data
-        let temp_filename = if cover_url.to_lowercase().ends_with(".png") {
-            format!("temp_cover_{}.png", torrent_id)
-        } else if cover_url.to_lowercase().ends_with(".webp") {
-            format!("temp_cover_{}.webp", torrent_id)
+        let temp_cover_path = if cover_url.starts_with("file://") {
+            // Handle local file URLs (e.g., from PDF cover generation)
+            let local_path = cover_url.strip_prefix("file://").unwrap();
+            info!("📚 Using local cover file: {}", local_path);
+            
+            // Verify the local file exists
+            if !std::path::Path::new(local_path).exists() {
+                return Err(format!("Local cover file not found: {}", local_path));
+            }
+            
+            local_path.to_string()
         } else {
-            format!("temp_cover_{}.jpg", torrent_id)
+            // Handle remote URLs (existing behavior)
+            let cover_data = download_file(cover_url, 30)
+                .map_err(|e| format!("Failed to download cover image: {}", e))?;
+
+            // Determine the image format from the URL or data
+            let temp_filename = if cover_url.to_lowercase().ends_with(".png") {
+                format!("temp_cover_{}.png", torrent_id)
+            } else if cover_url.to_lowercase().ends_with(".webp") {
+                format!("temp_cover_{}.webp", torrent_id)
+            } else {
+                format!("temp_cover_{}.jpg", torrent_id)
+            };
+
+            let temp_path = format!("{}/{}", temp_dir, temp_filename);
+
+            // Write the cover data to a temporary file
+            fs::write(&temp_path, cover_data)
+                .map_err(|e| format!("Failed to write temporary cover file: {}", e))?;
+                
+            temp_path
         };
-
-        let temp_cover_path = format!("{}/{}", temp_dir, temp_filename);
-
-        // Write the cover data to a temporary file
-        fs::write(&temp_cover_path, cover_data)
-            .map_err(|e| format!("Failed to write temporary cover file: {}", e))?;
 
         // Create the correctly named JPEG file: torrent-cover_{torrent_id}.jpg
         let cover_filename = format!("torrent-cover_{}.jpg", torrent_id);
         let local_cover_path = format!("{}/{}", temp_dir, cover_filename);
 
         // Convert to JPEG if needed using ffmpeg
-        if !temp_filename.ends_with(".jpg") {
+        if !temp_cover_path.to_lowercase().ends_with(".jpg") {
             info!("Converting cover image to JPEG format");
-            let (ffmpeg_path, _, _, _) = Config::get_binary_paths(&self.config);
+            let (ffmpeg_path, _, _, _, _) = Config::get_binary_paths(&self.config);
             let ffmpeg_path_str = ffmpeg_path.to_str().ok_or("Invalid ffmpeg path")?;
 
             let convert_output = std::process::Command::new(ffmpeg_path_str)
@@ -2282,6 +3006,21 @@ impl UploadProcessor {
             // Already JPEG, just rename
             fs::rename(&temp_cover_path, &local_cover_path)
                 .map_err(|e| format!("Failed to rename cover file: {}", e))?;
+        }
+
+        // Set permissions to 777 for web server readability
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            info!("Setting permissions to 777 for cover image: {}", local_cover_path);
+            fs::set_permissions(&local_cover_path, fs::Permissions::from_mode(0o777))
+                .map_err(|e| {
+                    format!(
+                        "Failed to set permissions for cover image '{}': {}",
+                        local_cover_path, e
+                    )
+                })?;
+            info!("Successfully set permissions to 777 for cover image: {}", local_cover_path);
         }
 
         // Upload to CDN with the correct path structure
@@ -2349,6 +3088,186 @@ impl UploadProcessor {
             .map_err(|e| format!("Failed to add torrent to qBittorrent: {}", e))?;
 
         info!("Successfully added torrent to qBittorrent for seeding");
+        Ok(())
+    }
+
+    /// Process ebook with Open Library lookup and cover extraction
+    fn process_ebook_open_library(
+        &self,
+        torrent_id: &str,
+        seedpool_config: &crate::core::SeedpoolConfig,
+        ebook_type: &crate::core::EbookType,
+    ) -> Result<(), String> {
+        use crate::media::ebook::{extract_metadata_from_epub, generate_ebook_bbcode_description};
+        use reqwest::blocking::Client;
+
+        // Find ebook file in input path based on type
+        let input_path = self.input_path.as_ref()
+            .ok_or("No input path available for ebook processing")?;
+
+        let (ebook_files, file_type_name) = match ebook_type {
+            crate::core::EbookType::Epub => {
+                let files = crate::utils::filter_files_by_extension(input_path, &["epub"])
+                    .map_err(|e| format!("Failed to find EPUB files: {}", e))?;
+                (files, "EPUB")
+            }
+            crate::core::EbookType::Pdf => {
+                let files = crate::utils::filter_files_by_extension(input_path, &["pdf"])
+                    .map_err(|e| format!("Failed to find PDF files: {}", e))?;
+                (files, "PDF")
+            }
+            _ => return Err(format!("Ebook type {:?} not supported for Open Library processing", ebook_type)),
+        };
+
+        let ebook_file = ebook_files.first()
+            .ok_or(format!("No {} file found for processing", file_type_name))?;
+
+        let ebook_path = ebook_file.to_str()
+            .ok_or("Invalid ebook path")?;
+
+        info!("📚 Extracting metadata from {}: {}", file_type_name, ebook_path);
+
+        // Extract title and author based on ebook type
+        let (title, author) = match ebook_type {
+            crate::core::EbookType::Epub => {
+                extract_metadata_from_epub(ebook_path)
+                    .map_err(|e| format!("Failed to extract EPUB metadata: {}", e))?
+            }
+            crate::core::EbookType::Pdf => {
+                crate::media::ebook::extract_metadata_from_pdf(ebook_path)
+                    .map_err(|e| format!("Failed to extract PDF metadata: {}", e))?
+            }
+            _ => return Err(format!("Unsupported ebook type: {:?}", ebook_type)),
+        };
+
+        let title = title.unwrap_or_else(|| "Unknown Title".to_string());
+        let author = author.unwrap_or_else(|| "Unknown Author".to_string());
+
+        info!("📚 Extracted - Title: '{}', Author: '{}'", title, author);
+
+        // Only try Open Library if we have at least a title or author
+        if title != "Unknown Title" || author != "Unknown Author" {
+            let query = format!(
+                "https://openlibrary.org/search.json?title={}&author={}",
+                urlencoding::encode(&title),
+                urlencoding::encode(&author)
+            );
+
+            info!("📚 Querying Open Library API: {}", query);
+
+            let client = Client::new();
+            let response = client
+                .get(&query)
+                .send()
+                .map_err(|e| format!("Failed to query Open Library API: {}", e))?;
+
+            if response.status().is_success() {
+                let json: serde_json::Value = response
+                    .json()
+                    .map_err(|e| format!("Failed to parse Open Library API response: {}", e))?;
+
+                if let Some(first_result) = json["docs"].as_array().and_then(|docs| docs.get(0)) {
+                    // Use Open Library's title and author if available
+                    let ol_title = first_result["title"].as_str().unwrap_or(&title).to_string();
+                    let ol_author = first_result["author_name"]
+                        .as_array()
+                        .and_then(|authors| authors.get(0))
+                        .and_then(|author| author.as_str())
+                        .unwrap_or(&author)
+                        .to_string();
+
+                    info!("📚 Open Library found - Title: '{}', Author: '{}'", ol_title, ol_author);
+
+                    // Extract Open Library work and author keys
+                    let open_library_work_key = first_result["key"]
+                        .as_str()
+                        .unwrap_or("")
+                        .trim_start_matches("/works/")
+                        .to_string();
+                    let open_library_author_key = first_result["author_key"]
+                        .as_array()
+                        .and_then(|keys| keys.get(0))
+                        .and_then(|key| key.as_str())
+                        .unwrap_or("")
+                        .to_string();
+
+                    // Extract cover ID for potential cover download
+                    let cover_id = first_result["cover_i"].as_u64();
+
+                    info!("📚 Open Library keys - Work: '{}', Author: '{}', Cover ID: {:?}", 
+                          open_library_work_key, open_library_author_key, cover_id);
+
+                    // Generate rich BBCode description using Open Library data
+                    if !open_library_work_key.is_empty() && !open_library_author_key.is_empty() {
+                        match generate_ebook_bbcode_description(
+                            &ol_title,
+                            &ol_author,
+                            &open_library_work_key,
+                            &open_library_author_key,
+                            &client,
+                        ) {
+                            Ok((description, _subjects)) => {
+                                info!("✅ Generated rich description from Open Library");
+                                info!("📚 Description length: {} characters", description.len());
+                                // TODO: Update the torrent description on Seedpool with the rich description
+                                // This would require a separate API call to update the torrent description
+                            }
+                            Err(e) => {
+                                info!("⚠️ Failed to generate rich description: {}", e);
+                            }
+                        }
+                    }
+
+                    // Download and upload cover if available
+                    if let Some(cover_id) = cover_id {
+                        let cover_url = format!("https://covers.openlibrary.org/b/id/{}-L.jpg", cover_id);
+                        info!("📚 Downloading cover from Open Library: {}", cover_url);
+
+                        match self.upload_cover_to_seedpool(torrent_id, &cover_url, seedpool_config) {
+                            Ok(_) => info!("✅ Successfully uploaded Open Library cover"),
+                            Err(e) => info!("⚠️ Failed to upload Open Library cover: {}", e),
+                        }
+                    } else {
+                        info!("📚 No cover available in Open Library");
+                    }
+                                    } else {
+                        info!("📚 No results found in Open Library for title: '{}', author: '{}'", title, author);
+                        
+                        // Generate fallback description with extracted metadata
+                        info!("📚 Generating fallback description with extracted metadata");
+                        let fallback_description = format!(
+                            "[center][b][size=32][color=#2E86C1]{}[/color][/size][/b][/center]\n\n[center][b]Title:[/b] {}\n[b]Author:[/b] {}\n[b]Format:[/b] EPUB[/center]\n\n[center][b][size=12][color=#757575]Created with mkbrr, ffmpeg, and mediainfo. Posted to this fine tracker with seedbrr.[/color][/size][/b]\n\n[url=https://github.com/seed-pool/seed-tools][img]https://cdn.seedpool.org/sp.png[/img][/url]  [url=https://github.com/autobrr/mkbrr][img]https://cdn.seedpool.org/mkbrr.png[/img][/url]  [url=https://www.rust-lang.org][img]https://cdn.seedpool.org/rust.png[/img][/url][/center]",
+                            self.input_path.as_ref().and_then(|p| std::path::Path::new(p).file_name()).and_then(|n| n.to_str()).unwrap_or("EPUB"),
+                            title,
+                            author
+                        );
+                        
+                        info!("📚 Generated fallback description with extracted EPUB metadata");
+                        info!("📚 Fallback description length: {} characters", fallback_description.len());
+                        // TODO: Update torrent description with fallback description
+                    }
+                } else {
+                    info!("⚠️ Open Library API returned status: {}", response.status());
+                    
+                    // Generate fallback description even for API errors
+                    if title != "Unknown Title" || author != "Unknown Author" {
+                        info!("📚 Generating fallback description due to API error");
+                        let fallback_description = format!(
+                            "[center][b][size=32][color=#2E86C1]{}[/color][/size][/b][/center]\n\n[center][b]Title:[/b] {}\n[b]Author:[/b] {}\n[b]Format:[/b] EPUB[/center]\n\n[center][b][size=12][color=#757575]Created with mkbrr, ffmpeg, and mediainfo. Posted to this fine tracker with seedbrr.[/color][/size][/b]\n\n[url=https://github.com/seed-pool/seed-tools][img]https://cdn.seedpool.org/sp.png[/img][/url]  [url=https://github.com/autobrr/mkbrr][img]https://cdn.seedpool.org/mkbrr.png[/img][/url]  [url=https://www.rust-lang.org][img]https://cdn.seedpool.org/rust.png[/img][/url][/center]",
+                            self.input_path.as_ref().and_then(|p| std::path::Path::new(p).file_name()).and_then(|n| n.to_str()).unwrap_or("EPUB"),
+                            title,
+                            author
+                        );
+                        
+                        info!("📚 Generated fallback description due to API error");
+                        info!("📚 Fallback description length: {} characters", fallback_description.len());
+                        // TODO: Update torrent description with fallback description
+                    }
+                }
+            } else {
+                info!("📚 Skipping Open Library lookup - no valid title or author");
+            }
+
         Ok(())
     }
 }

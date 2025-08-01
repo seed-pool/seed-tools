@@ -18,17 +18,29 @@ pub fn fetch_tmdb_id(
         title, release_type, year
     );
 
+    // Extract year from title if not provided and present in title
+    let year_regex = Regex::new(r"\b(19|20)\d{2}\b").unwrap();
+    let extracted_year = if year.is_none() {
+        if let Some(captures) = year_regex.find(title) {
+            let year_str = captures.as_str();
+            info!("🗓️ Extracted year from title: {}", year_str);
+            Some(year_str.to_string())
+        } else {
+            None
+        }
+    } else {
+        year.clone()
+    };
+
     let sanitized_title = if release_type == "TvShow" {
         // Extract everything before the SXX* pattern
         let season_regex = Regex::new(r"(?i)(S\d{2}.*)").unwrap();
         let cleaned_title = season_regex.replace(title, "").trim().to_string();
 
         // Remove the year if present
-        let year_regex = Regex::new(r"\b(19|20)\d{2}\b").unwrap();
         year_regex.replace(&cleaned_title, "").trim().to_string()
     } else {
         // For movies, extract everything before the year
-        let year_regex = Regex::new(r"\b(19|20)\d{2}\b").unwrap();
         year_regex.replace(title, "").trim().to_string()
     };
 
@@ -42,14 +54,14 @@ pub fn fetch_tmdb_id(
         format!(
             "https://api.themoviedb.org/3/search/tv?query={}&first_air_date_year={}&api_key={}",
             encoded_title,
-            year.unwrap_or_default(),
+            extracted_year.unwrap_or_default(),
             tmdb_api_key
         )
     } else {
         format!(
             "https://api.themoviedb.org/3/search/movie?query={}&year={}&api_key={}",
             encoded_title,
-            year.unwrap_or_default(),
+            extracted_year.unwrap_or_default(),
             tmdb_api_key
         )
     };
@@ -203,10 +215,7 @@ pub fn extract_tmdb_metadata(
         "🎬 Extracting TMDB metadata for release type: {}",
         release_type
     );
-    info!(
-        "📊 TMDB details received: {}",
-        serde_json::to_string_pretty(tmdb_details).unwrap_or_else(|_| "Invalid JSON".to_string())
-    );
+    // TMDB details JSON logging removed for cleaner output
 
     let mut metadata = std::collections::HashMap::new();
 

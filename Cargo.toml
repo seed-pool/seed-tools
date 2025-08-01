@@ -38,6 +38,7 @@ lopdf = "0.33"
 zip = "2.1"
 which = "6.0"
 async-trait = "0.1.88"
+uuid = { version = "1.10", features = ["v4"] }
 
 [package.metadata.bundle]
 resources = ["binaries/"]

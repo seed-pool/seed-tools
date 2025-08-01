@@ -1,6 +1,6 @@
 use crate::{
     classification::{ClassificationResult, MediaClassification},
-    core::{Config, MediaType, PreflightCheckResult},
+    core::{Config, MediaType, PreflightCheckResult, VideoType, AudioType, EbookType, GameType, HobbyType},
     media::{detector::detect_media_type, video::UploadData},
     processing::{
         component_config::ComponentConfig, description::DescriptionConfig, upload::UploadBuilder,
@@ -35,6 +35,9 @@ pub struct ProcessBuilder {
     // Classification overrides
     force_category: Option<String>,
     force_type: Option<String>,
+    
+    // Original torrent info with preserved category/type codes
+    original_torrent_info: Option<crate::trackers::seedpool::SeedpoolTorrentInfo>,
 
     // Preflight data reuse
     cached_preflight_data: Option<PreflightCheckResult>,
@@ -73,6 +76,7 @@ impl ProcessBuilder {
             dry_run: false,
             force_category: None,
             force_type: None,
+            original_torrent_info: None,
             cached_preflight_data: None,
             cached_classification: None,
             cached_metadata: None,
@@ -84,6 +88,84 @@ impl ProcessBuilder {
         self.force_media_type = Some(media_type);
         self.auto_detect = false;
         self
+    }
+
+    /// Manual ebook type detection by scanning files directly
+    fn manual_ebook_detection(path: &str) -> Option<crate::core::EbookType> {
+        use std::fs;
+        use std::path::Path;
+        
+        let path_obj = Path::new(path);
+        
+        // If it's a single file, detect from extension
+        if path_obj.is_file() {
+            return path_obj
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .and_then(|ext| crate::core::EbookType::from_extension(ext));
+        }
+        
+        // If it's a directory, scan for ebook files
+        if let Ok(entries) = fs::read_dir(path_obj) {
+            for entry in entries.flatten() {
+                let entry_path = entry.path();
+                if entry_path.is_file() {
+                    if let Some(ebook_type) = entry_path
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .and_then(|ext| crate::core::EbookType::from_extension(ext))
+                    {
+                        return Some(ebook_type);
+                    }
+                }
+            }
+        }
+        
+        None
+    }
+
+    /// Run ebook cleanup with the correct detected type
+    fn run_ebook_cleanup(
+        input_path: &str, 
+        ebook_type: &crate::core::EbookType, 
+        ebook_results: &[(crate::core::EbookFile, crate::media::ebook::EbookMetadata)]
+    ) {
+        match ebook_type {
+            crate::core::EbookType::Pdf => {
+                info!("📚 Running PDF ebook cleanup (keeping only PDF and NFO files)");
+            }
+            crate::core::EbookType::Epub => {
+                info!("📚 Running EPUB ebook cleanup (keeping EPUB and NFO files, removing archives)");
+            }
+            _ => {
+                info!("📚 Running {:?} ebook cleanup", ebook_type);
+            }
+        }
+        
+        if let Err(cleanup_err) = crate::media::ebook::cleanup_ebook_files(input_path, ebook_results) {
+            info!("⚠️ Ebook cleanup failed: {}", cleanup_err);
+        } else {
+            info!("✅ Ebook cleanup completed successfully");
+        }
+    }
+
+    /// Run basic ebook cleanup when processing failed
+    fn run_ebook_cleanup_basic(input_path: &str, ebook_type: &crate::core::EbookType) {
+        info!("📚 Running fallback cleanup for type: {:?}", ebook_type);
+        // Create a dummy results vector for cleanup
+        let dummy_results = vec![(
+            crate::core::EbookFile {
+                path: std::path::PathBuf::from(input_path),
+                ebook_type: ebook_type.clone(),
+            },
+            crate::media::ebook::EbookMetadata::default(),
+        )];
+        
+        if let Err(cleanup_err) = crate::media::ebook::cleanup_ebook_files(input_path, &dummy_results) {
+            info!("⚠️ Fallback ebook cleanup failed: {}", cleanup_err);
+        } else {
+            info!("✅ Fallback ebook cleanup completed successfully");
+        }
     }
 
     /// Enable/disable auto-detection (enabled by default)
@@ -154,6 +236,12 @@ impl ProcessBuilder {
         self.force_type = Some(type_code.into());
         self
     }
+    
+    /// Set original torrent info with preserved category/type codes
+    pub fn with_original_torrent_info(mut self, torrent_info: crate::trackers::seedpool::SeedpoolTorrentInfo) -> Self {
+        self.original_torrent_info = Some(torrent_info);
+        self
+    }
 
     /// Set cached preflight data to avoid recomputation
     pub fn with_cached_preflight_data(mut self, preflight_data: PreflightCheckResult) -> Self {
@@ -181,15 +269,59 @@ impl ProcessBuilder {
 
     /// Build and execute the processing pipeline
     pub fn build(self) -> Result<ProcessResult, String> {
-        info!(
-            "ProcessBuilder: Starting build for path: {}",
-            self.input_path
-        );
+        info!("ProcessBuilder: Starting build for path: {}", self.input_path);
 
         // Step 1: Determine media type
         let (media_type, raw_metadata) = if let Some(forced_type) = self.force_media_type.clone() {
             // Use forced media type
             (forced_type, JsonValue::Object(serde_json::Map::new()))
+        } else if let Some(ref forced_category) = self.force_category {
+            // Infer media type from forced category
+            let media_type = if forced_category.starts_with("VideoCategory::") {
+                MediaType::Video(VideoType::Mkv) // Default to MKV for video directories
+            } else if forced_category.starts_with("AudioCategory::") {
+                MediaType::Audio(AudioType::Flac) // Default to FLAC for audio directories  
+            } else if forced_category.starts_with("EbookCategory::") {
+                // For ebook categories, detect actual file type instead of guessing
+                let media_files = detect_media_type(&self.input_path)?;
+                if let Some(first_file) = media_files.first() {
+                    if let MediaType::Ebook(ebook_type) = &first_file.media_type {
+                        MediaType::Ebook(ebook_type.clone())
+                    } else {
+                        // If detect_media_type doesn't return an ebook, try manual detection from files
+                        let detected_type = Self::manual_ebook_detection(&self.input_path);
+                        
+                        // Fall back to category-based guessing if manual detection fails
+                        if let Some(ebook_type) = detected_type {
+                            MediaType::Ebook(ebook_type)
+                        } else if forced_category.contains("Comic") {
+                            MediaType::Ebook(EbookType::Cbr) // Comic uses CBR
+                        } else if forced_category.contains("Magazine") {
+                            MediaType::Ebook(EbookType::Pdf) // Magazine uses PDF  
+                        } else if forced_category.contains("E-Pub") {
+                            MediaType::Ebook(EbookType::Epub) // E-Pub uses EPUB
+                        } else {
+                            MediaType::Ebook(EbookType::Pdf) // Default to PDF for other ebook types
+                        }
+                    }
+                } else {
+                    return Err("No ebook files detected in the input path".to_string());
+                }
+            } else if forced_category.starts_with("GameCategory::") {
+                MediaType::Game(GameType::Directory)
+            } else if forced_category.starts_with("HobbyCategory::") {
+                MediaType::Hobby(HobbyType::Directory)
+            } else {
+                // Default to auto-detection if category format is unrecognized
+                let media_files = detect_media_type(&self.input_path)?;
+                if let Some(first_file) = media_files.first() {
+                    first_file.media_type.clone()
+                } else {
+                    return Err("No media files detected in the input path".to_string());
+                }
+            };
+            info!("ProcessBuilder: Inferred media type from forced category '{}': {:?}", forced_category, media_type);
+            (media_type, JsonValue::Object(serde_json::Map::new()))
         } else if self.auto_detect {
             // Auto-detect media type
             let media_files = detect_media_type(&self.input_path)?;
@@ -209,12 +341,16 @@ impl ProcessBuilder {
 
         // Step 2: Extract media-specific metadata if enabled
         let mut metadata = raw_metadata;
+        let mut media_type = media_type; // Make media_type mutable for correction
         if let Some(cached_metadata) = self.cached_metadata.clone() {
             info!("ProcessBuilder: Using cached metadata");
             metadata = cached_metadata;
         } else if self.include_metadata_extraction {
             info!("ProcessBuilder: Extracting metadata");
-            metadata = self.extract_metadata(&media_type, metadata)?;
+            let (extracted_metadata, corrected_media_type) = self.extract_metadata_with_type_correction(&media_type, metadata)?;
+            metadata = extracted_metadata;
+            // Update media type if corrected during extraction  
+            media_type = corrected_media_type;
             info!(
                 "ProcessBuilder: Extracted metadata: {}",
                 serde_json::to_string_pretty(&metadata)
@@ -261,7 +397,10 @@ impl ProcessBuilder {
         let upload_result = if self.include_upload_processing {
             if let Some(upload_data) = &upload_data {
                 info!("ProcessBuilder: Processing upload");
-                Some(self.process_upload(upload_data, &classification)?)
+                info!("🚨 DEBUG: About to call process_upload - this should NOT trigger video processing again");
+                let result = self.process_upload(upload_data, &classification, &media_type)?;
+                info!("🚨 DEBUG: process_upload completed, checking for any side effects...");
+                Some(result)
             } else {
                 return Err("Upload processing enabled but no upload data available".to_string());
             }
@@ -287,12 +426,23 @@ impl ProcessBuilder {
         })
     }
 
-    /// Extract metadata based on media type
-    fn extract_metadata(
+    /// Extract metadata based on media type (returns corrected media type if needed)
+    fn extract_metadata_with_type_correction(
         &self,
         media_type: &MediaType,
         metadata: JsonValue,
-    ) -> Result<JsonValue, String> {
+    ) -> Result<(JsonValue, MediaType), String> {
+        let (extracted_metadata, corrected_type) = self.extract_metadata_internal(media_type, metadata)?;
+        Ok((extracted_metadata, corrected_type))
+    }
+
+    /// Extract metadata based on media type
+    fn extract_metadata_internal(
+        &self,
+        media_type: &MediaType,
+        metadata: JsonValue,
+    ) -> Result<(JsonValue, MediaType), String> {
+        info!("🔍 extract_metadata_internal called for: {:?}", media_type);
         // Extract basic metadata from path for all media types
         let path = std::path::Path::new(&self.input_path);
         let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -320,9 +470,27 @@ impl ProcessBuilder {
             // For video files, run video-specific classification to extract metadata
             match media_type {
                 MediaType::Video(_) => {
-                    // Use video classification to extract metadata
-                    let video_metadata =
-                        crate::media::video::classify_video_content(&self.input_path);
+                    // Process video (including archive extraction if needed)
+                    info!("🎬 Processing video files and extracting archives if needed");
+                    let video_results = crate::media::video::process_video(&self.input_path, &self.config, false)?;
+                    
+                    info!("🎬 Found {} video file(s) after processing", video_results.len());
+                    for (i, (video_file, metadata)) in video_results.iter().enumerate() {
+                        info!("  Video {}: {} -> {}", i + 1, 
+                              video_file.path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown"),
+                              metadata.release_name);
+                    }
+                    
+                    // Use the first video file's metadata if available
+                    let video_metadata = if let Some((_, metadata)) = video_results.first() {
+                        info!("🎬 Using metadata from first video file: {}", metadata.release_name);
+                        metadata.clone()
+                    } else {
+                        // Fallback to direct classification if no results
+                        info!("🎬 No video results found, falling back to direct classification");
+                        crate::media::video::classify_video_content(&self.input_path)
+                    };
+                    
                     info!("Video metadata extracted: title='{}', year={:?}, season={:?}, category={:?}",
                         video_metadata.title, video_metadata.year, video_metadata.season, video_metadata.category);
 
@@ -473,6 +641,80 @@ impl ProcessBuilder {
                                 }
                             }
                         }
+                    }
+                }
+                MediaType::Game(_) => {
+                    // For games, extract title and do IGDB lookup if credentials are available
+                    let game_title = obj.get("title")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or(&filename)
+                        .to_string();
+                    
+                    // Clean the game title for IGDB search
+                    let cleaned_title = crate::metadata::igdb::clean_game_title_for_search(&game_title, &self.config);
+                    
+                    if !self.config.general.igdb_client_id.is_empty()
+                        && !self.config.general.igdb_bearer_token.is_empty()
+                    {
+                        info!(
+                            "🎮 Fetching IGDB data during metadata extraction for: {}",
+                            game_title
+                        );
+
+                        match crate::metadata::igdb::search_igdb_game(
+                            &cleaned_title,
+                            &self.config.general.igdb_client_id,
+                            &self.config.general.igdb_bearer_token,
+                            &self.config,
+                        ) {
+                            Ok(games) if !games.is_empty() => {
+                                info!("✅ Found {} games on IGDB", games.len());
+                                
+                                // Take the first result (best match)
+                                if let Some(game) = games.first() {
+                                    if let Some(igdb_id) = game["id"].as_u64() {
+                                        info!("✅ Found IGDB ID: {}", igdb_id);
+                                        obj.insert(
+                                            "igdb_id".to_string(),
+                                            serde_json::Value::Number(serde_json::Number::from(igdb_id)),
+                                        );
+
+                                        // Fetch detailed game information
+                                        match crate::metadata::igdb::get_igdb_game_details(
+                                            igdb_id,
+                                            &self.config.general.igdb_client_id,
+                                            &self.config.general.igdb_bearer_token,
+                                        ) {
+                                            Ok(igdb_details) => {
+                                                info!("✅ Successfully fetched IGDB details");
+
+                                                // Extract and add all IGDB metadata
+                                                let igdb_metadata = crate::metadata::igdb::extract_igdb_metadata(&igdb_details);
+
+                                                info!(
+                                                    "📊 Adding {} IGDB fields to metadata",
+                                                    igdb_metadata.len()
+                                                );
+                                                for (key, value) in igdb_metadata {
+                                                    obj.insert(key, serde_json::Value::String(value));
+                                                }
+                                            }
+                                            Err(e) => {
+                                                info!("❌ Failed to fetch IGDB details: {}", e);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(_) => {
+                                info!("⚠️ No games found on IGDB for: {}", cleaned_title);
+                            }
+                            Err(e) => {
+                                info!("❌ Failed to search IGDB: {}", e);
+                            }
+                        }
+                    } else {
+                        info!("⚠️ IGDB credentials not configured, skipping game lookup");
                     }
                 }
                 MediaType::Audio(_) => {
@@ -845,6 +1087,114 @@ impl ProcessBuilder {
                         );
                     }
                 }
+                MediaType::Ebook(_) => {
+                    // For ebook files, process archives and extract metadata
+                    info!("📚 Processing ebook metadata extraction and archive processing");
+                    
+                    // First, process and extract any archives
+                    match crate::media::ebook::process_ebook(&self.input_path, &self.config, false) {
+                        Ok(ebook_results) => {
+                            info!("✅ Successfully processed {} ebook file(s)", ebook_results.len());
+                            
+                            // If we have ebook results, use the first one for metadata
+                            if let Some((ebook_file, mut ebook_metadata)) = ebook_results.first().cloned() {
+                                // Override category if forced category is set
+                                if let Some(ref forced_cat) = self.force_category {
+                                    if forced_cat.contains("EbookCategory::") {
+                                        let category_name = forced_cat.replace("EbookCategory::", "");
+                                        match category_name.as_str() {
+                                            "Comic" => ebook_metadata.category = crate::core::EbookCategory::Comic,
+                                            "Novel" => ebook_metadata.category = crate::core::EbookCategory::Novel,
+                                            "Magazine" => ebook_metadata.category = crate::core::EbookCategory::Magazine,
+                                            "Newspaper" => ebook_metadata.category = crate::core::EbookCategory::Newspaper,
+                                            "Technical" => ebook_metadata.category = crate::core::EbookCategory::Technical,
+                                            "Educational" => ebook_metadata.category = crate::core::EbookCategory::Educational,
+                                            _ => {}
+                                        }
+                                        info!("📚 Override ebook category to: {:?}", ebook_metadata.category);
+                                    }
+                                }
+                                
+                                // Add ebook-specific metadata
+                                obj.insert(
+                                    "ebook_type".to_string(),
+                                    serde_json::Value::String(format!("{:?}", ebook_file.ebook_type)),
+                                );
+                                obj.insert(
+                                    "ebook_category".to_string(),
+                                    serde_json::Value::String(format!("{:?}", ebook_metadata.category)),
+                                );
+                                if let Some(format_type) = &ebook_metadata.format_type {
+                                    obj.insert(
+                                        "ebook_format_type".to_string(),
+                                        serde_json::Value::String(format!("{:?}", format_type)),
+                                    );
+                                }
+                                
+                                // Add other ebook metadata if available
+                                if let Some(author) = &ebook_metadata.author {
+                                    obj.insert(
+                                        "ebook_author".to_string(),
+                                        serde_json::Value::String(author.clone()),
+                                    );
+                                }
+                                if let Some(year) = ebook_metadata.year {
+                                    obj.insert(
+                                        "ebook_year".to_string(),
+                                        serde_json::Value::Number(serde_json::Number::from(year)),
+                                    );
+                                }
+                                if let Some(publisher) = &ebook_metadata.publisher {
+                                    obj.insert(
+                                        "ebook_publisher".to_string(),
+                                        serde_json::Value::String(publisher.clone()),
+                                    );
+                                }
+                                
+                                // Use the ebook file path as the title (without extension)
+                                if let Some(file_stem) = ebook_file.path.file_stem().and_then(|s| s.to_str()) {
+                                    obj.insert(
+                                        "title".to_string(),
+                                        serde_json::Value::String(file_stem.to_string()),
+                                    );
+                                }
+                                
+                                info!("📚 Added ebook metadata: type={:?}, category={:?}", 
+                                      ebook_file.ebook_type, ebook_metadata.category);
+                                
+                                // Note: Cleanup is already handled by process_ebook function
+                                info!("📚 Detected ebook type: {:?} (cleanup already completed by process_ebook)", ebook_file.ebook_type);
+                                
+                                // Store the corrected media type for return
+                                obj.insert("__corrected_media_type".to_string(), 
+                                          serde_json::Value::String(format!("{:?}", ebook_file.ebook_type)));
+                                info!("📚 Correcting media type from {:?} to Ebook({:?})", media_type, ebook_file.ebook_type);
+                                
+                                // Rename EPUB files to standard naming convention if needed
+                                if ebook_file.ebook_type == crate::core::EbookType::Epub {
+                                    if let Err(e) = self.rename_epub_file(&ebook_file.path) {
+                                        info!("⚠️ Failed to rename EPUB file: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            info!("⚠️ Failed to process ebook, trying to extract archives anyway: {}", e);
+                            
+                            // Still try to extract archives even if classification failed
+                            let _ = crate::processing::extraction::process_and_extract_archives(&self.input_path);
+                            
+                            // Fallback to filename as title
+                            obj.insert(
+                                "title".to_string(),
+                                serde_json::Value::String(filename.to_string()),
+                            );
+                            
+                            // Note: Cleanup for failed processing is handled elsewhere if needed
+                        }
+                    }
+
+                }
                 _ => {
                     // For other media types, just use filename as title for now
                     obj.insert(
@@ -854,7 +1204,30 @@ impl ProcessBuilder {
                 }
             }
         }
-        Ok(enriched)
+        // Check if we have a corrected media type from ebook processing
+        let corrected_media_type = if let Some(corrected_type) = enriched.get("__corrected_media_type") {
+            if let Some(type_str) = corrected_type.as_str() {
+                match type_str {
+                    "Epub" => MediaType::Ebook(crate::core::EbookType::Epub),
+                    "Pdf" => MediaType::Ebook(crate::core::EbookType::Pdf), 
+                    "Cbr" => MediaType::Ebook(crate::core::EbookType::Cbr),
+                    "Cbz" => MediaType::Ebook(crate::core::EbookType::Cbz),
+                    _ => media_type.clone(),
+                }
+            } else {
+                media_type.clone()
+            }
+        } else {
+            media_type.clone()
+        };
+        
+        // Remove the internal field
+        let mut final_enriched = enriched;
+        if final_enriched.is_object() {
+            final_enriched.as_object_mut().unwrap().remove("__corrected_media_type");
+        }
+        
+        Ok((final_enriched, corrected_media_type))
     }
 
     /// Classify media using the classification system
@@ -1027,9 +1400,60 @@ impl ProcessBuilder {
                     info!("ProcessBuilder: build_upload_data - Video metadata extraction failed - missing required fields");
                 }
             }
+            MediaType::Game(_) => {
+                info!("ProcessBuilder: build_upload_data - Processing game metadata");
+                // For games, use IGDB title if available, otherwise use filename
+                let title = metadata.get("igdb_title")
+                    .and_then(|t| t.as_str())
+                    .or_else(|| metadata.get("filename").and_then(|f| f.as_str()))
+                    .map(|s| s.to_string());
+                
+                if let Some(title) = title {
+                    info!("ProcessBuilder: build_upload_data - Using game title: {}", title);
+                    let year = metadata
+                        .get("igdb_release_year")
+                        .and_then(|y| y.as_str())
+                        .map(|y| y.to_string())
+                        .or_else(|| metadata.get("year").and_then(|y| y.as_u64()).map(|y| y.to_string()));
+                    
+                    builder = builder.with_title_info(title, year);
+                    
+                    // Add IGDB data from metadata if available
+                    if let Some(metadata_obj) = metadata.as_object() {
+                        if let Some(igdb_id) = metadata_obj.get("igdb_id").and_then(|v| v.as_u64()) {
+                            info!("📊 ProcessBuilder: Found IGDB ID in metadata: {}", igdb_id);
+                        }
+                    }
+                } else {
+                    info!("⚠️ ProcessBuilder: No title found for game - using fallback");
+                    // Fallback: use directory/file name
+                    let fallback_title = if let Some(input_path) = metadata.get("input_path").and_then(|p| p.as_str()) {
+                        let path = std::path::Path::new(input_path);
+                        path.file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("Unknown Game")
+                            .to_string()
+                    } else {
+                        "Unknown Game".to_string()
+                    };
+                    builder = builder.with_title_info(fallback_title, None::<String>);
+                }
+            }
+            MediaType::Ebook(_) => {
+                // For ebooks, prioritize filename (release name) over extracted title
+                let title = metadata.get("filename").and_then(|t| t.as_str())
+                    .or_else(|| metadata.get("title").and_then(|t| t.as_str()));
+                
+                if let Some(title) = title {
+                    let year = metadata
+                        .get("ebook_year")
+                        .and_then(|y| y.as_u64())
+                        .map(|y| y.to_string())
+                        .or_else(|| metadata.get("year").and_then(|y| y.as_u64()).map(|y| y.to_string()));
+                    builder = builder.with_title_info(title, year);
+                }
+            }
             MediaType::Audio(_)
-            | MediaType::Ebook(_)
-            | MediaType::Game(_)
             | MediaType::Hobby(_) => {
                 // For non-video media, use title info if available
                 if let Some(title) = metadata.get("title").and_then(|t| t.as_str()) {
@@ -1050,9 +1474,9 @@ impl ProcessBuilder {
                 metadata_obj.len()
             );
 
-            // Extract all TMDB and MusicBrainz related fields
+            // Extract all TMDB, IGDB, and MusicBrainz related fields
             for (key, value) in metadata_obj {
-                if key.starts_with("tmdb_") || key.starts_with("musicbrainz_") {
+                if key.starts_with("tmdb_") || key.starts_with("igdb_") || key.starts_with("musicbrainz_") {
                     if let Some(str_value) = value.as_str() {
                         info!("  📌 Found enriched field: {} = {}", key, str_value);
                         enriched_map.insert(key.clone(), str_value.to_string());
@@ -1082,11 +1506,17 @@ impl ProcessBuilder {
                 "filename",
                 "cover_url",
                 "cover_images",
+                "imdb_id",
+                "tvdb_id",
+                "igdb_id",
             ] {
                 if let Some(value) = metadata_obj.get(field) {
                     if let Some(str_value) = value.as_str() {
                         info!("  📌 Found audio field: {} = {}", field, str_value);
                         enriched_map.insert(field.to_string(), str_value.to_string());
+                    } else if let Some(num_value) = value.as_f64() {
+                        info!("  📌 Found audio field: {} = {}", field, num_value);
+                        enriched_map.insert(field.to_string(), num_value.to_string());
                     } else if field == "cover_images" && value.is_array() {
                         // Handle cover_images array specially - the template processor will handle it
                         info!(
@@ -1217,8 +1647,8 @@ impl ProcessBuilder {
             // Use default media-specific components
             match media_type {
                 MediaType::Video(_) => {
-                    info!("ProcessBuilder: build_upload_data - Video: enabling screenshots(4), mediainfo, nfo");
-                    builder = builder.with_screenshots(4).with_mediainfo().with_nfo();
+                    info!("ProcessBuilder: build_upload_data - Video: enabling mediainfo, nfo (screenshots already configured by tracker)");
+                    builder = builder.with_mediainfo().with_nfo();
                 }
                 MediaType::Audio(_) => {
                     info!(
@@ -1227,8 +1657,8 @@ impl ProcessBuilder {
                     builder = builder.with_mediainfo().with_cover_art();
                 }
                 MediaType::Ebook(_) => {
-                    info!("ProcessBuilder: build_upload_data - Ebook: enabling cover_art, nfo");
-                    builder = builder.with_cover_art().with_nfo();
+                    info!("ProcessBuilder: build_upload_data - Ebook: enabling screenshots(8), cover_art, nfo");
+                    builder = builder.with_screenshots(8).with_cover_art().with_nfo();
                 }
                 MediaType::Game(_) => {
                     info!("ProcessBuilder: build_upload_data - Game: enabling screenshots(4), nfo");
@@ -1260,23 +1690,82 @@ impl ProcessBuilder {
         &self,
         upload_data: &UploadData,
         classification: &Option<ClassificationResult>,
+        media_type: &MediaType,
     ) -> Result<crate::processing::upload::UploadResult, String> {
         use crate::processing::upload::UploadProcessor;
 
+        info!("🚨 DEBUG: Creating UploadProcessor with media_type: {:?}", media_type);
         let mut processor =
-            UploadProcessor::new(upload_data.clone(), self.config.clone()).dry_run(self.dry_run);
+            UploadProcessor::new(upload_data.clone(), self.config.clone())
+                .with_media_info(media_type.clone(), self.input_path.clone())
+                .dry_run(self.dry_run);
+        
+        // Pass original torrent info if available
+        if let Some(ref torrent_info) = self.original_torrent_info {
+            processor = processor.with_original_torrent_info(torrent_info.clone());
+        }
 
         // Add classification if available
         if let Some(classification) = classification {
             if let Some(category) = &classification.category {
+                // Format category and source_type properly for tracker mapping
+                let formatted_category = if category.starts_with("VideoCategory::") || 
+                                            category.starts_with("AudioCategory::") || 
+                                            category.starts_with("GameCategory::") ||
+                                            category.starts_with("EbookCategory::") ||
+                                            category.starts_with("HobbyCategory::") {
+                    // Already formatted
+                    Some(category.clone())
+                } else {
+                    // Infer media type from category and format appropriately
+                    if category == "TvShow" || category == "Movie" || category == "MusicVideo" || category == "StandupComedy" {
+                        Some(format!("VideoCategory::{}", category))
+                    } else if category == "Music" || category == "Audiobook" || category == "Podcast" {
+                        Some(format!("AudioCategory::{}", category))
+                    } else if category == "PC" || category == "PlayStation" || category == "Xbox" || category == "Nintendo" {
+                        Some(format!("GameCategory::{}", category))
+                    } else if category == "Fiction" || category == "NonFiction" || category == "Textbook" {
+                        Some(format!("EbookCategory::{}", category))
+                    } else {
+                        // Default to VideoCategory for unknown categories since most content is video
+                        Some(format!("VideoCategory::{}", category))
+                    }
+                };
+
+                let formatted_source_type = if let Some(source_type) = &classification.source_type {
+                    if source_type.starts_with("VideoSourceType::") || 
+                       source_type.starts_with("AudioSourceType::") ||
+                       source_type.starts_with("GameSourceType::") {
+                        // Already formatted
+                        Some(source_type.clone())
+                    } else {
+                        // Infer media type from source type and format appropriately
+                        if source_type == "Encode" || source_type == "Remux" || source_type == "WebRip" || 
+                           source_type == "WebDL" || source_type == "HDTV" || source_type == "Bluray" ||
+                           source_type == "DVD" || source_type == "HDDVD" || source_type == "TV" {
+                            Some(format!("VideoSourceType::{}", source_type))
+                        } else if source_type == "CD" || source_type == "WEB" || source_type == "Vinyl" {
+                            Some(format!("AudioSourceType::{}", source_type))
+                        } else {
+                            // Default to VideoSourceType for unknown source types since most content is video
+                            Some(format!("VideoSourceType::{}", source_type))
+                        }
+                    }
+                } else {
+                    None
+                };
+
                 processor = processor.with_media_classification(
-                    Some(category.clone()),
-                    classification.source_type.clone(),
+                    formatted_category,
+                    formatted_source_type,
                 );
             }
         }
 
-        processor.process()
+        info!("🚨 DEBUG: About to call UploadProcessor.process() - this should NOT trigger video processing");
+        let result = processor.process();
+        info!("🚨 DEBUG: UploadProcessor.process() completed with result: {:?}", result.is_ok());
+        result
     }
 
     /// Generate preflight check data
@@ -1307,11 +1796,24 @@ impl ProcessBuilder {
             metadata
         };
 
-        let title = effective_metadata
-            .get("title")
-            .and_then(|t| t.as_str())
-            .unwrap_or("Unknown")
-            .to_string();
+        let title = match media_type {
+            crate::core::MediaType::Ebook(_) => {
+                // For ebooks, prioritize filename (release name) over extracted PDF title
+                effective_metadata
+                    .get("filename")
+                    .and_then(|t| t.as_str())
+                    .or_else(|| effective_metadata.get("title").and_then(|t| t.as_str()))
+                    .unwrap_or("Unknown")
+                    .to_string()
+            }
+            _ => {
+                effective_metadata
+                    .get("title")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("Unknown")
+                    .to_string()
+            }
+        };
         info!("Extracted title for preflight: '{}'", title);
 
         // Generate release name
@@ -1750,6 +2252,60 @@ impl ProcessBuilder {
             "Not Available".to_string()
         }
     }
+    
+    /// Rename EPUB file to standard naming convention "lastname, firstname - title.epub"
+    fn rename_epub_file(&self, epub_path: &std::path::Path) -> Result<(), String> {
+        // Extract metadata from EPUB to get proper title and author
+        let (title_opt, author_opt) = crate::media::ebook::extract_metadata_from_epub(
+            epub_path.to_str().unwrap_or("")
+        ).map_err(|e| format!("Failed to extract EPUB metadata: {}", e))?;
+        
+        let title = title_opt.unwrap_or_else(|| {
+            // Fallback to input path name if title extraction fails
+            std::path::Path::new(&self.input_path)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Unknown Title")
+                .to_string()
+        });
+        let author = author_opt.unwrap_or_else(|| "Unknown Author".to_string());
+        
+        info!("📚 Renaming EPUB file with metadata - Title: '{}', Author: '{}'", title, author);
+        
+        // Format author as "lastname, firstname"
+        let sanitized_author = {
+            let parts: Vec<&str> = author.split_whitespace().collect();
+            if parts.len() > 1 {
+                format!("{}, {}", parts.last().unwrap(), parts[..parts.len() - 1].join(" "))
+            } else {
+                author.to_string()
+            }
+        };
+        
+        // Sanitize title for filename
+        let sanitized_title = title
+            .replace(".", " ")
+            .replace(":", " ")
+            .replace("'", "")
+            .replace("/", " ")
+            .replace("\\", " ")
+            .replace("&", "and")
+            .replace("?", "")
+            .replace("*", "");
+        
+        let new_filename = format!("{} - {}.epub", sanitized_author, sanitized_title);
+        let new_path = epub_path.with_file_name(&new_filename);
+        
+        info!("📚 Renaming EPUB: '{}' -> '{}'", 
+              epub_path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown"),
+              new_filename);
+        
+        std::fs::rename(epub_path, &new_path)
+            .map_err(|e| format!("Failed to rename EPUB file: {}", e))?;
+        
+        info!("✅ Successfully renamed EPUB file");
+        Ok(())
+    }
 }
 
 /// Create a process builder configured for preflight checks
@@ -1766,7 +2322,7 @@ pub fn preflight_builder(input_path: &str, config: Arc<Config>) -> ProcessBuilde
 /// Create a process builder configured for full upload
 pub fn upload_builder(input_path: &str, config: Arc<Config>) -> ProcessBuilder {
     ProcessBuilder::new(input_path, config)
-        .with_classification(false) // Disabled by default - enable only when needed
+        .with_classification(true) // Enable classification for proper category/type mapping
         .with_upload_builder(true)
         .with_upload_processing(true)
         .with_duplicate_check(true)

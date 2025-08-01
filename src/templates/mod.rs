@@ -364,17 +364,27 @@ impl TemplateProcessor {
         // Process conditional sections
         for conditional in &template.conditionals {
             if self.evaluate_condition(&conditional.condition, metadata, enriched_metadata) {
-                // Process the conditional section similar to regular sections
-                // This is a simplified version - you could expand this
-                if let Some(content) =
-                    self.resolve_variable(&conditional.section.content, metadata, enriched_metadata)
-                {
-                    let format = match conditional.section.format.as_str() {
-                        "quoted" => SectionFormat::Quoted,
-                        "spoiler" => SectionFormat::Spoiler,
-                        _ => SectionFormat::Plain,
-                    };
-                    builder = builder.custom_section(&conditional.section.name, &content, format);
+                // Process the conditional section based on its section_type
+                match conditional.section.section_type.as_str() {
+                    "raw" => {
+                        if let Some(content) =
+                            self.resolve_variable(&conditional.section.content, metadata, enriched_metadata)
+                        {
+                            builder = builder.raw(&content);
+                        }
+                    }
+                    "custom" | _ => {
+                        if let Some(content) =
+                            self.resolve_variable(&conditional.section.content, metadata, enriched_metadata)
+                        {
+                            let format = match conditional.section.format.as_str() {
+                                "quoted" => SectionFormat::Quoted,
+                                "spoiler" => SectionFormat::Spoiler,
+                                _ => SectionFormat::Plain,
+                            };
+                            builder = builder.custom_section(&conditional.section.name, &content, format);
+                        }
+                    }
                 }
             }
         }

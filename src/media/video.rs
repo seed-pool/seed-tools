@@ -59,6 +59,7 @@ pub struct UploadData {
     pub tmdb_id: Option<u32>,
     pub imdb_id: Option<String>,
     pub tvdb_id: Option<u32>,
+    pub igdb_id: Option<u64>,
     pub cover_url: Option<String>,
     // TV show specific fields
     pub season: Option<u32>,
@@ -80,6 +81,7 @@ impl UploadData {
             tmdb_id: None,
             imdb_id: None,
             tvdb_id: None,
+            igdb_id: None,
             cover_url: None,
             season: None,
             episode: None,
@@ -467,6 +469,13 @@ pub fn generate_description_with_metadata(
         builder = builder.trailer(trailer_url, "YouTube");
     }
 
+    // Add custom description if available
+    if let Some(custom_desc) = get_value("custom_description") {
+        if !custom_desc.is_empty() {
+            builder = builder.raw(custom_desc);
+        }
+    }
+
     // Create video information table
     let mut info_rows = Vec::new();
 
@@ -545,20 +554,35 @@ fn process_directory_recursive(
         let entry_path = entry.path();
 
         if entry_path.is_dir() {
+            // Skip proof directories and other unwanted directories
+            if let Some(dir_name) = entry_path.file_name().and_then(|n| n.to_str()) {
+                let dir_name_lower = dir_name.to_lowercase();
+                if dir_name_lower == "proof" || dir_name_lower == "sample" || dir_name_lower == "screens" || dir_name_lower == "screenshots" {
+                    info!("Skipping directory: {}", dir_name);
+                    continue;
+                }
+            }
             // Recursively process subdirectories
             process_directory_recursive(&entry_path, results, rejected_files)?;
         } else if entry_path.is_file() {
             if let Some(extension) = entry_path.extension().and_then(|ext| ext.to_str()) {
                 if let Some(video_type) = VideoType::from_extension(extension) {
-                    let video_file = VideoFile {
-                        path: entry_path.clone(),
-                        video_type,
-                    };
-
                     let filename = entry_path
                         .file_name()
                         .and_then(|name| name.to_str())
                         .unwrap_or("");
+                    
+                    // Skip sample files and other unwanted files
+                    let filename_lower = filename.to_lowercase();
+                    if filename_lower.contains("sample") || filename_lower.contains("proof") {
+                        info!("Skipping sample/proof file: {}", filename);
+                        continue;
+                    }
+
+                    let video_file = VideoFile {
+                        path: entry_path.clone(),
+                        video_type,
+                    };
 
                     // Pass the full path for classification
                     let metadata = classify_video_content(entry_path.to_str().unwrap_or(filename));
@@ -662,70 +686,6 @@ pub fn process_video(
         }
     } else {
         return Err("Path is neither a file nor a directory".to_string());
-    }
-
-    // After we have the results, build the upload data if we have videos
-    if !results.is_empty() {
-        use crate::processing::upload::UploadBuilder;
-        use std::sync::Arc;
-
-        let (video_file, metadata) = &results[0];
-
-        // Build upload data directly using UploadBuilder
-        // DescriptionConfig import already at top of file
-        use crate::core::ImageLayout;
-
-        // Configure description for video
-        let mut desc_config = DescriptionConfig::default();
-        desc_config.image_layout = ImageLayout::Grid2x2; // Videos use 2x2 grid for screenshots
-        desc_config.max_images = 8;
-
-        let _upload_data = UploadBuilder::new(
-            &processing_path,
-            MediaType::Video(video_file.video_type.clone()),
-            Arc::new((*_config).clone()),
-        )
-        .with_extensions(VideoType::all_extensions())
-        .with_video_metadata(metadata.clone())
-        .with_description_config(desc_config)
-        .with_nfo()
-        .with_mediainfo()
-        .with_screenshots(4)
-        .with_sample()
-        .with_duplicate_check()
-        .with_tmdb_lookup()
-        .dry_run(_dry_run)
-        .build()?;
-
-        info!("Built upload data for video processing");
-
-        // Create the upload processor - it will auto-detect the active tracker
-        let mut processor = crate::processing::upload::UploadProcessor::new(
-            _upload_data,
-            std::sync::Arc::new(_config.clone()),
-        )
-        .dry_run(_dry_run);
-
-        // Get media classification for mapping
-        if !results.is_empty() {
-            let (_, metadata) = &results[0];
-            let category_str = format!("VideoCategory::{:?}", metadata.category);
-            let source_str = Some(format!("VideoSourceType::{:?}", metadata.source_type));
-
-            processor = processor.with_media_classification(Some(category_str), source_str);
-        }
-
-        // Process the upload - it handles tracker detection and mapping internally
-        let upload_result = processor.process()?;
-
-        if upload_result.success {
-            info!("Upload completed successfully to {}", upload_result.tracker);
-            if let Some(torrent_id) = upload_result.torrent_id {
-                info!("Torrent ID: {}", torrent_id);
-            }
-        } else {
-            warn!("Upload failed: {}", upload_result.message);
-        }
     }
 
     Ok(results)

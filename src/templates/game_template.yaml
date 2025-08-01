@@ -11,7 +11,7 @@ layout:
     details: "#117A65"
     companies: "#2E86C1"
     default: "#2E86C1"
-  image_layout: "two_column"
+  image_layout: "grid2x2"
   image_width: 720
   max_images: 6
   include_footer: true
@@ -19,15 +19,15 @@ layout:
 sections:
   - name: "title"
     section_type: "title"
-    content: "{{igdb_name}}"
+    content: "{{igdb_title}}"
     order: 1
-    required_fields: ["title"]
+    required_fields: ["igdb_title"]
 
   - name: "developer"
     section_type: "author"
-    content: "{{igdb_developers}}"
+    content: "{{igdb_developer}}"
     order: 2
-    required_fields: ["igdb_developers"]
+    required_fields: ["igdb_developer"]
 
   - name: "summary"
     section_type: "synopsis"
@@ -48,23 +48,23 @@ sections:
       - label: "Platform"
         field: "igdb_platforms"
       - label: "Release Date"
-        field: "igdb_first_release_date"
+        field: "igdb_release_year"
       - label: "Game Modes"
         field: "igdb_game_modes"
       - label: "Rating"
-        field: "igdb_total_rating"
+        field: "igdb_rating"
         format: "{{value}}/100"
-      - label: "Age Rating"
-        field: "igdb_age_ratings"
+      - label: "Publisher"
+        field: "igdb_publisher"
       - label: "Category"
         field: "category"
 
-  - name: "companies"
+  - name: "websites"
     section_type: "custom"
-    content: "{{igdb_involved_companies}}"
+    content: "{{igdb_websites}}"
     format: "quoted"
     order: 6
-    required_fields: ["igdb_involved_companies"]
+    required_fields: ["igdb_websites"]
 
 conditionals:
   - name: "storyline"
@@ -82,3 +82,12 @@ conditionals:
       section_type: "custom"
       content: "{{igdb_multiplayer_modes}}"
       format: "quoted"
+      order: 8
+
+  - name: "custom_description"
+    condition: "field_exists:custom_description"
+    section:
+      name: "custom_description"
+      section_type: "raw"
+      content: "{{custom_description}}"
+      order: 9

@@ -846,5 +846,12 @@ pub fn generate_description_with_enriched_metadata(
         builder = builder.custom_section("Repack Information", repack_info, SectionFormat::Plain);
     }
 
+    // Add custom description if available
+    if let Some(custom_desc) = get_value("custom_description") {
+        if !custom_desc.is_empty() {
+            builder = builder.raw(custom_desc);
+        }
+    }
+
     builder.build()
 }

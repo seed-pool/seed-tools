@@ -13,7 +13,7 @@ layout:
     default: "#2E86C1"
   image_layout: "grid2x2"
   image_width: 720
-  max_images: 8
+  max_images: 4
   include_footer: true
 
 sections:
@@ -82,3 +82,12 @@ conditionals:
       name: "trailer"
       section_type: "raw"
       content: "[center][b][url={{tmdb_trailer_url}}][Trailer on YouTube][/url][/b][/center]"
+      order: 8
+
+  - name: "custom_description"
+    condition: "field_exists:custom_description"
+    section:
+      name: "custom_description"
+      section_type: "raw"
+      content: "{{custom_description}}"
+      order: 9

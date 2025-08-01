@@ -254,7 +254,8 @@ impl DescriptionBuilder {
             parts.push(footer);
         }
 
-        parts.join("\n\n")
+        // Wrap entire description in center tags for proper page centering
+        format!("[center]\n{}\n[/center]", parts.join("\n\n"))
     }
 
     /// Format images based on layout
@@ -285,21 +286,21 @@ impl DescriptionBuilder {
             }
 
             ImageLayout::TwoColumn => {
-                let mut result = String::from("[table]\n");
+                let mut result = String::from("[center]\n[table]\n");
                 let mut iter = urls.iter();
 
                 while let Some(url1) = iter.next() {
                     result.push_str("[tr]\n");
-                    result.push_str(&format!("[td][img width={}]{}[/img][/td]\n", width, url1));
+                    result.push_str(&format!("[td][center][img width={}]{}[/img][/center][/td]\n", width, url1));
 
                     if let Some(url2) = iter.next() {
-                        result.push_str(&format!("[td][img width={}]{}[/img][/td]\n", width, url2));
+                        result.push_str(&format!("[td][center][img width={}]{}[/img][/center][/td]\n", width, url2));
                     }
 
                     result.push_str("[/tr]\n");
                 }
 
-                result.push_str("[/table]");
+                result.push_str("[/table]\n[/center]");
                 result
             }
 

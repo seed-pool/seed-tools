@@ -231,7 +231,7 @@ fn extract_comic_images(comic_file: &EbookFile, working_dir: &str) -> Result<Str
 }
 
 /// Extract metadata from PDF files
-fn extract_metadata_from_pdf(pdf_path: &str) -> Result<(Option<String>, Option<String>), String> {
+pub fn extract_metadata_from_pdf(pdf_path: &str) -> Result<(Option<String>, Option<String>), String> {
     use lopdf::{Document, Object};
 
     let doc = Document::load(pdf_path).map_err(|e| format!("Failed to open PDF: {}", e))?;
@@ -263,7 +263,7 @@ fn extract_metadata_from_pdf(pdf_path: &str) -> Result<(Option<String>, Option<S
 }
 
 /// Extract metadata from EPUB files
-fn extract_metadata_from_epub(epub_path: &str) -> Result<(Option<String>, Option<String>), String> {
+pub fn extract_metadata_from_epub(epub_path: &str) -> Result<(Option<String>, Option<String>), String> {
     let epub = EpubDoc::new(epub_path)
         .map_err(|e| format!("Failed to open EPUB file '{}': {}", epub_path, e))?;
 
@@ -351,7 +351,7 @@ fn generate_ebook_description_from_metadata(
     use crate::processing::description::{DescriptionBuilder, DescriptionConfig};
 
     let mut config = DescriptionConfig::default();
-    config.image_layout = ImageLayout::TwoColumn;
+    config.image_layout = ImageLayout::TwoColumn;  // Use 2-column table for ebooks
 
     let mut builder = DescriptionBuilder::with_config(MediaType::Ebook(EbookType::Epub), config);
 
@@ -404,6 +404,13 @@ fn generate_ebook_description_from_metadata(
         }
     }
 
+    // Add custom description if available
+    if let Some(custom_desc) = metadata.get("custom_description").and_then(|d| d.as_str()) {
+        if !custom_desc.is_empty() {
+            builder = builder.raw(custom_desc);
+        }
+    }
+
     Ok(builder.build())
 }
 
@@ -414,6 +421,7 @@ pub fn generate_ebook_description(
     remote_path: &str,
     public_image_path: &str,
     dry_run: bool,
+    config: &crate::core::Config,
 ) -> Result<String, String> {
     use std::fs;
     use std::path::Path;
@@ -515,7 +523,374 @@ pub fn generate_ebook_description(
                 image_urls.push(cdn_url);
             }
         }
+        "epub" => {
+            // For EPUB files, extract cover and generate rich description with Open Library
+            use reqwest::blocking::Client;
+            
+            let path = Path::new(ebook_path);
+            let parent_dir = path
+                .parent()
+                .ok_or_else(|| "Cannot determine parent directory".to_string())?;
+
+            // Extract EPUB images using existing function
+            match extract_epub_images(ebook_path, parent_dir) {
+                Ok(image_paths) => {
+                    if let Some(cover) = image_paths.first() {
+                        let image_name = format!("{}-cover.jpg", torrent_name);
+                        let temp_image_path =
+                            format!("{}/{}", std::env::temp_dir().to_string_lossy(), image_name);
+
+                        // Copy cover to temp with standardized name
+                        fs::copy(&cover, &temp_image_path).map_err(|e| {
+                            format!("Failed to copy EPUB cover '{}': {}", cover.display(), e)
+                        })?;
+
+                        // Set permissions to 777
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            fs::set_permissions(&temp_image_path, fs::Permissions::from_mode(0o777))
+                                .map_err(|e| {
+                                    format!("Failed to set permissions for '{}': {}", temp_image_path, e)
+                                })?;
+                        }
+
+                        // SCP to CDN (skip during dry run)
+                        if !dry_run {
+                            let scp_status = std::process::Command::new("scp")
+                                .arg(&temp_image_path)
+                                .arg(format!(
+                                    "{}/screenshots/",
+                                    remote_path.trim_end_matches('/')
+                                ))
+                                .status()
+                                .map_err(|e| format!("Failed to scp '{}': {}", temp_image_path, e))?;
+                            if !scp_status.success() {
+                                return Err(format!("Failed to scp '{}'", temp_image_path));
+                            }
+                        }
+
+                        // Build public URL
+                        let cdn_url = format!("{}/{}", public_image_path.trim_end_matches('/'), image_name);
+                        image_urls.push(cdn_url);
+                    }
+                }
+                Err(e) => {
+                    info!("Warning: Could not extract EPUB cover: {}", e);
+                    // Continue without cover - this is not a fatal error
+                }
+            }
+
+            // Now generate rich description with Open Library lookup
+            info!("📚 Starting Open Library lookup for EPUB description");
+            
+            // Extract metadata from EPUB
+            let (epub_title, epub_author) = match extract_metadata_from_epub(ebook_path) {
+                Ok((title_opt, author_opt)) => {
+                    let title = title_opt.unwrap_or_else(|| torrent_name.to_string());
+                    let author = author_opt.unwrap_or_else(|| "Unknown Author".to_string());
+                    (title, author)
+                }
+                Err(e) => {
+                    info!("Warning: Could not extract EPUB metadata: {}", e);
+                    (torrent_name.to_string(), "Unknown Author".to_string())
+                }
+            };
+
+            info!("📚 Extracted metadata - Title: '{}', Author: '{}'", epub_title, epub_author);
+
+            // Try Open Library lookup
+            let client = Client::new();
+            
+            // Try multiple Open Library search strategies
+            if epub_title != "Unknown Title" || epub_author != "Unknown Author" {
+                let mut search_queries = Vec::new();
+                
+                // Primary search: title + author
+                if epub_title != "Unknown Title" && epub_author != "Unknown Author" {
+                    search_queries.push(format!(
+                        "https://openlibrary.org/search.json?title={}&author={}",
+                        urlencoding::encode(&epub_title),
+                        urlencoding::encode(&epub_author)
+                    ));
+                }
+                
+                // Fallback searches
+                if epub_title != "Unknown Title" {
+                    // Title only
+                    search_queries.push(format!(
+                        "https://openlibrary.org/search.json?title={}",
+                        urlencoding::encode(&epub_title)
+                    ));
+                    
+                    // Title without subtitle/series info
+                    let clean_title = epub_title.split('(').next().unwrap_or(&epub_title).trim();
+                    if clean_title != epub_title {
+                        search_queries.push(format!(
+                            "https://openlibrary.org/search.json?title={}",
+                            urlencoding::encode(clean_title)
+                        ));
+                    }
+                }
+                
+                if epub_author != "Unknown Author" {
+                    // Author only  
+                    search_queries.push(format!(
+                        "https://openlibrary.org/search.json?author={}",
+                        urlencoding::encode(&epub_author)
+                    ));
+                }
+
+                let mut found_result = false;
+                for (attempt, query) in search_queries.iter().enumerate() {
+                    info!("📚 Open Library search attempt {} of {}: {}", attempt + 1, search_queries.len(), query);
+
+                    match client.get(query).send() {
+                        Ok(response) if response.status().is_success() => {
+                            match response.json::<serde_json::Value>() {
+                                Ok(json) => {
+                                    if let Some(first_result) = json["docs"].as_array().and_then(|docs| docs.get(0)) {
+                                        // Extract Open Library keys
+                                        let open_library_work_key = first_result["key"]
+                                            .as_str()
+                                            .unwrap_or("")
+                                            .trim_start_matches("/works/")
+                                            .to_string();
+                                        let open_library_author_key = first_result["author_key"]
+                                            .as_array()
+                                            .and_then(|keys| keys.get(0))
+                                            .and_then(|key| key.as_str())
+                                            .unwrap_or("")
+                                            .to_string();
+
+                                        if !open_library_work_key.is_empty() && !open_library_author_key.is_empty() {
+                                            // Verify author match before using result
+                                            let ol_author = first_result["author_name"]
+                                                .as_array()
+                                                .and_then(|authors| authors.get(0))
+                                                .and_then(|author| author.as_str())
+                                                .unwrap_or("");
+                                            
+                                            let ol_title = first_result["title"].as_str().unwrap_or("");
+                                            
+                                            // Check if authors are similar (basic name matching)
+                                            let epub_author_clean = epub_author.to_lowercase().replace(".", "").replace(" ", "");
+                                            let ol_author_clean = ol_author.to_lowercase().replace(".", "").replace(" ", "");
+                                            
+                                            let author_similarity = if epub_author_clean.contains(&ol_author_clean) || 
+                                                                      ol_author_clean.contains(&epub_author_clean) ||
+                                                                      epub_author_clean == ol_author_clean {
+                                                true
+                                            } else {
+                                                // Check for reversed name order (A.J. Donovan vs Donovan, A.J.)
+                                                let epub_parts: Vec<&str> = epub_author.split_whitespace().collect();
+                                                let ol_parts: Vec<&str> = ol_author.split_whitespace().collect();
+                                                if epub_parts.len() >= 2 && ol_parts.len() >= 2 {
+                                                    let epub_last = epub_parts.last().unwrap().to_lowercase();
+                                                    let ol_last = ol_parts.last().unwrap().to_lowercase();
+                                                    epub_last == ol_last
+                                                } else {
+                                                    false
+                                                }
+                                            };
+                                            
+                                            // Also check title similarity to avoid matching different books by same author
+                                            let epub_title_clean = epub_title.to_lowercase().replace(".", "").replace(" ", "");
+                                            let ol_title_clean = ol_title.to_lowercase().replace(".", "").replace(" ", "");
+                                            
+                                            let title_similarity = if epub_title_clean.contains(&ol_title_clean) || 
+                                                                     ol_title_clean.contains(&epub_title_clean) ||
+                                                                     epub_title_clean == ol_title_clean {
+                                                true
+                                            } else {
+                                                // Check for partial title matches (first few words)
+                                                let epub_words: Vec<&str> = epub_title.split_whitespace().collect();
+                                                let ol_words: Vec<&str> = ol_title.split_whitespace().collect();
+                                                if epub_words.len() >= 2 && ol_words.len() >= 2 {
+                                                    // Check if first 2 words match
+                                                    let epub_first_two = format!("{} {}", epub_words[0], epub_words[1]).to_lowercase();
+                                                    let ol_first_two = format!("{} {}", ol_words[0], ol_words[1]).to_lowercase();
+                                                    epub_first_two == ol_first_two
+                                                } else {
+                                                    false
+                                                }
+                                            };
+                                            
+                                            // More flexible matching: accept strong author match OR strong title+author match
+                                            let accept_match = if author_similarity && title_similarity {
+                                                info!("📚 Strong match found - both author and title similar");
+                                                true
+                                            } else if author_similarity && attempt == 0 {
+                                                // On first search (title+author), accept author match if title has some overlap
+                                                let title_overlap = epub_title_clean.len() > 3 && ol_title_clean.len() > 3 && 
+                                                                   (epub_title_clean[..3] == ol_title_clean[..3] || 
+                                                                    ol_title_clean.contains(&epub_title_clean[..epub_title_clean.len().min(5)]) ||
+                                                                    epub_title_clean.contains(&ol_title_clean[..ol_title_clean.len().min(5)]));
+                                                if title_overlap {
+                                                    info!("📚 Good match found - strong author similarity with partial title overlap");
+                                                    true
+                                                } else {
+                                                    false
+                                                }
+                                            } else if title_similarity && epub_author != "Unknown Author" && epub_author.len() > 3 {
+                                                // Accept title match if author has some similarity
+                                                let author_partial = epub_author_clean.len() > 2 && ol_author_clean.len() > 2 &&
+                                                                    (epub_author_clean.chars().take(3).collect::<String>() == 
+                                                                     ol_author_clean.chars().take(3).collect::<String>() ||
+                                                                     epub_author.split_whitespace().any(|word| 
+                                                                        ol_author.to_lowercase().contains(&word.to_lowercase())));
+                                                if author_partial {
+                                                    info!("📚 Reasonable match found - strong title similarity with partial author overlap");
+                                                    true
+                                                } else {
+                                                    false
+                                                }
+                                            } else {
+                                                false
+                                            };
+
+                                            if accept_match {
+                                                info!("📚 Accepted Open Library match - Work: '{}', Title: '{}' -> '{}', Author: '{}' -> '{}'", 
+                                                      open_library_work_key, epub_title, ol_title, epub_author, ol_author);
+                                                
+                                                // Generate rich description using existing function
+                                                match generate_ebook_bbcode_description(
+                                                    &epub_title,
+                                                    &epub_author,
+                                                    &open_library_work_key,
+                                                    &open_library_author_key,
+                                                    &client,
+                                                ) {
+                                                    Ok((rich_description, _subjects)) => {
+                                                        info!("✅ Generated rich Open Library description");
+                                                        // Store the rich description globally so it can be used later
+                                                        std::env::set_var("SEEDBRR_RICH_DESCRIPTION", &rich_description);
+                                                        std::env::set_var("SEEDBRR_OPEN_LIBRARY_ATTEMPTED", "true");
+                                                        info!("📚 Stored rich description ({} chars) for later use", rich_description.len());
+                                                        found_result = true;
+                                                        break;
+                                                    }
+                                                    Err(e) => {
+                                                        info!("⚠️ Failed to generate rich description: {}", e);
+                                                    }
+                                                }
+                                            } else {
+                                                info!("📚 Open Library result rejected - insufficient similarity: EPUB '{}' by '{}' vs Open Library '{}' by '{}'", 
+                                                      epub_title, epub_author, ol_title, ol_author);
+                                            }
+                                        } else {
+                                            info!("📚 Open Library result missing work or author keys");
+                                        }
+                                    } else {
+                                        info!("📚 No results found in search attempt {}", attempt + 1);
+                                    }
+                                }
+                                Err(e) => {
+                                    info!("⚠️ Failed to parse Open Library response: {}", e);
+                                }
+                            }
+                        }
+                        Ok(response) => {
+                            info!("⚠️ Open Library API returned status: {}", response.status());
+                        }
+                        Err(e) => {
+                            info!("⚠️ Failed to query Open Library: {}", e);
+                        }
+                    }
+                }
+                
+                if !found_result {
+                    info!("📚 No results found in any Open Library search attempts");
+                    
+                    // Try fallback: search for author-only information to get rich author bio
+                    if epub_author != "Unknown Author" && epub_author.len() > 3 {
+                        info!("📚 Attempting author-only Open Library lookup for rich description");
+                        match generate_author_fallback_description(&epub_title, &epub_author, &client) {
+                            Ok(rich_description) => {
+                                info!("✅ Generated fallback description with author details from Open Library");
+                                // Store the fallback rich description globally 
+                                std::env::set_var("SEEDBRR_RICH_DESCRIPTION", &rich_description);
+                                info!("📚 Stored fallback rich description ({} chars) for later use", rich_description.len());
+                                found_result = true;
+                            }
+                            Err(e) => {
+                                info!("⚠️ Failed to generate author fallback description: {}", e);
+                            }
+                        }
+                    }
+                    
+                    // Set flag to prevent post-upload processing duplication even if no rich description found
+                    std::env::set_var("SEEDBRR_OPEN_LIBRARY_ATTEMPTED", "true");
+                    info!("📚 Marked Open Library processing as attempted to prevent duplication");
+                }
+            } else {
+                info!("📚 Skipping Open Library lookup - insufficient metadata");
+            }
+
+            // Note: Cover image is uploaded to CDN but not included in description per user request
+            
+            // Clean up extracted images from EPUB directory (keep only .epub and .nfo files)
+            info!("📚 Cleaning up extracted EPUB images from directory");
+            let epub_dir = Path::new(ebook_path).parent()
+                .ok_or_else(|| "Cannot determine EPUB parent directory".to_string())?;
+            
+            for entry in fs::read_dir(epub_dir).map_err(|e| format!("Failed to read EPUB directory: {}", e))? {
+                let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+                let entry_path = entry.path();
+                
+                if entry_path.is_file() {
+                    if let Some(extension) = entry_path.extension().and_then(|ext| ext.to_str()) {
+                        let extension_lower = extension.to_lowercase();
+                        
+                        // Remove image files that were extracted from EPUB
+                        let should_remove = match extension_lower.as_str() {
+                            "epub" | "nfo" => false, // Keep EPUB and NFO files
+                            "jpg" | "jpeg" | "png" | "gif" => true, // Remove extracted images
+                            _ => false, // Keep other files (they might be legitimate)
+                        };
+                        
+                        if should_remove {
+                            match fs::remove_file(&entry_path) {
+                                Ok(()) => {
+                                    info!("🗑️ Removed extracted image: {}", entry_path.display());
+                                }
+                                Err(e) => {
+                                    info!("⚠️ Failed to remove extracted image {}: {}", entry_path.display(), e);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Continue to DescriptionBuilder for proper image formatting  
+            // (Don't return early - let DescriptionBuilder handle images)
+            
+            // Check if a rich description was generated and return it immediately
+            if let Ok(stored_description) = std::env::var("SEEDBRR_RICH_DESCRIPTION") {
+                info!("📚 Using rich description generated during EPUB processing ({} chars)", stored_description.len());
+                std::env::remove_var("SEEDBRR_RICH_DESCRIPTION"); // Clean up
+                return Ok(stored_description);
+            }
+            
+            // Check if Open Library was attempted but no rich description was found
+            // In this case, generate a basic description without cover images (per user request)
+            if std::env::var("SEEDBRR_OPEN_LIBRARY_ATTEMPTED").is_ok() {
+                info!("📚 Open Library was attempted but no rich description available, generating basic description without cover");
+                let basic_description = format!(
+                    "[center][b][size=32][color=#2E86C1]{}[/color][/size][/b][/center]\n\n[center][b][size=16][color=#117A65]By:[/color][/size][/b] [i]{}[/i][/center]\n\n[center][b][size=12][color=#757575]Created with mkbrr, ffmpeg, and mediainfo. Posted to this fine tracker with seedbrr.[/color][/size][/b]\n\n[url=https://github.com/seed-pool/seed-tools][img]https://cdn.seedpool.org/sp.png[/img][/url]  [url=https://github.com/autobrr/mkbrr][img]https://cdn.seedpool.org/mkbrr.png[/img][/url]  [url=https://www.rust-lang.org][img]https://cdn.seedpool.org/rust.png[/img][/url][/center]",
+                    epub_title, epub_author
+                );
+                return Ok(basic_description);
+            }
+        }
         "pdf" => {
+            // Get ghostscript path from config
+            let (_, _, _, _, ghostscript_path) = crate::core::Config::get_binary_paths(config);
+            let gs_path_str = ghostscript_path
+                .to_str()
+                .ok_or("Invalid ghostscript path")?;
+
             // For PDF files, use GhostScript to extract pages 3-10
             for page in 3..=10 {
                 let image_name = format!("{}-page{}.jpg", torrent_name, page);
@@ -523,7 +898,7 @@ pub fn generate_ebook_description(
                     format!("{}/{}", std::env::temp_dir().to_string_lossy(), image_name);
 
                 // Extract page as JPEG using GhostScript
-                let output = std::process::Command::new("gs")
+                let output = std::process::Command::new(gs_path_str)
                     .args(&[
                         "-dBATCH",
                         "-dNOPAUSE",
@@ -588,15 +963,44 @@ pub fn generate_ebook_description(
     use crate::processing::description::{DescriptionBuilder, DescriptionConfig};
 
     let mut config = DescriptionConfig::default();
-    config.image_layout = ImageLayout::TwoColumn;
+    config.image_layout = ImageLayout::Grid2x2;  // Use same layout as videos for consistency
     config.title_color = "#2E86C1".to_string();
 
-    let builder = DescriptionBuilder::with_config(
+    // Create proper description config for ebooks with Grid2x2 layout (same as videos)
+    let mut desc_config = crate::processing::description::DescriptionConfig::default();
+    desc_config.image_layout = crate::core::ImageLayout::Grid2x2;
+    desc_config.max_images = 8; // Allow up to 8 images as configured in the function
+    desc_config.image_width = 500; // Larger width to force 2-column layout
+
+    // For EPUBs, extract title and author for richer description  
+    let (final_title, final_author) = if ebook_path.to_lowercase().ends_with(".epub") {
+        match extract_metadata_from_epub(ebook_path) {
+            Ok((title_opt, author_opt)) => {
+                let title = title_opt.unwrap_or_else(|| torrent_name.to_string());
+                let author = author_opt.unwrap_or_else(|| "Unknown Author".to_string());
+                (title, Some(author))
+            }
+            Err(_) => (torrent_name.to_string(), None),
+        }
+    } else {
+        (torrent_name.to_string(), None)
+    };
+
+    let mut builder = DescriptionBuilder::with_config(
         MediaType::Ebook(EbookType::Pdf), // Using PDF as generic for image-based ebooks
-        config,
+        desc_config,
     )
-    .title(torrent_name)
-    .images(image_urls);
+    .title(&final_title);
+    
+    // Add author if available
+    if let Some(author) = final_author {
+        builder = builder.author(&author);
+    }
+    
+    // Add images with proper centering
+    if !image_urls.is_empty() {
+        builder = builder.images(image_urls);
+    }
 
     Ok(builder.build())
 }
@@ -728,6 +1132,155 @@ pub fn generate_ebook_bbcode_description(
     Ok((builder.build(), subjects))
 }
 
+/// Generate fallback BBCode description using author information from Open Library
+pub fn generate_author_fallback_description(
+    title: &str,
+    author: &str, 
+    client: &reqwest::blocking::Client,
+) -> Result<String, String> {
+    use crate::core::{EbookType, MediaType, SectionFormat};
+    use crate::processing::description::DescriptionBuilder;
+    use serde_json::Value;
+
+    // Search for the author to get their key and details
+    let author_search_url = format!(
+        "https://openlibrary.org/search.json?author={}",
+        urlencoding::encode(author)
+    );
+    
+    info!("📚 Fallback author search: {}", author_search_url);
+    
+    let search_response = client
+        .get(&author_search_url)
+        .send()
+        .map_err(|e| format!("Failed to search for author: {}", e))?;
+    
+    let search_json: Value = search_response
+        .json()
+        .map_err(|e| format!("Failed to parse author search: {}", e))?;
+    
+    // Find a good author match
+    if let Some(docs) = search_json["docs"].as_array() {
+        for doc in docs {
+            if let Some(author_key) = doc["author_key"]
+                .as_array()
+                .and_then(|keys| keys.get(0))
+                .and_then(|key| key.as_str()) 
+            {
+                if let Some(ol_author_name) = doc["author_name"]
+                    .as_array()
+                    .and_then(|names| names.get(0))
+                    .and_then(|name| name.as_str())
+                {
+                    // Check if this author matches our target
+                    let author_clean = author.to_lowercase().replace(".", "").replace(" ", "");
+                    let ol_author_clean = ol_author_name.to_lowercase().replace(".", "").replace(" ", "");
+                    
+                    let author_match = author_clean.contains(&ol_author_clean) || 
+                                       ol_author_clean.contains(&author_clean) ||
+                                       author_clean == ol_author_clean;
+                    
+                    if author_match {
+                        info!("📚 Found author match: '{}' -> '{}'", author, ol_author_name);
+                        
+                        // Fetch detailed author information
+                        let author_url = format!("https://openlibrary.org/authors/{}.json", author_key);
+                        let author_response = client
+                            .get(&author_url)
+                            .send()
+                            .map_err(|e| format!("Failed to fetch author details: {}", e))?;
+                        
+                        let author_json: Value = author_response
+                            .json()
+                            .map_err(|e| format!("Failed to parse author details: {}", e))?;
+                        
+                        // Start building rich description
+                        let mut builder = DescriptionBuilder::new(MediaType::Ebook(EbookType::Epub))
+                            .title(title)
+                            .author(ol_author_name);
+                        
+                        // Add author biography if available
+                        if let Some(author_bio) = author_json["bio"]
+                            .as_str()
+                            .or_else(|| author_json["bio"]["value"].as_str())
+                        {
+                            // Clean up the bio
+                            let source_regex = regex::Regex::new(r"\(\[Source\]\[\d+\]\)").unwrap();
+                            let sanitized_bio = source_regex
+                                .replace_all(author_bio, "")
+                                .to_string()
+                                .lines()
+                                .filter(|line| !line.trim().is_empty())
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            
+                            builder = builder.custom_section(
+                                "About the Author",
+                                sanitized_bio.trim(),
+                                SectionFormat::Quoted,
+                            );
+                        }
+                        
+                        // Add author's notable works if available
+                        if let Some(subject_docs) = docs.get(0).and_then(|d| d["subject"].as_array()) {
+                            if !subject_docs.is_empty() {
+                                let subjects: Vec<String> = subject_docs
+                                    .iter()
+                                    .take(10) // Limit to avoid overwhelming
+                                    .filter_map(|s| s.as_str())
+                                    .map(|s| s.to_string())
+                                    .collect();
+                                
+                                if !subjects.is_empty() {
+                                    let subjects_text = subjects.join(", ");
+                                    builder = builder.custom_section(
+                                        "Subjects & Themes",
+                                        &subjects_text,
+                                        SectionFormat::Plain,
+                                    );
+                                }
+                            }
+                        }
+                        
+                        // Look for some notable works by this author
+                        let works_search_url = format!(
+                            "https://openlibrary.org/search.json?author={}&limit=5",
+                            urlencoding::encode(ol_author_name)
+                        );
+                        
+                        if let Ok(works_response) = client.get(&works_search_url).send() {
+                            if let Ok(works_json) = works_response.json::<Value>() {
+                                if let Some(works_docs) = works_json["docs"].as_array() {
+                                    let notable_works: Vec<String> = works_docs
+                                        .iter()
+                                        .filter_map(|doc| doc["title"].as_str())
+                                        .filter(|work_title| work_title != &title) // Don't include current book
+                                        .take(5)
+                                        .map(|work_title| format!("• {}", work_title))
+                                        .collect();
+                                    
+                                    if !notable_works.is_empty() {
+                                        let works_text = notable_works.join("\n");
+                                        builder = builder.custom_section(
+                                            "Other Works by This Author",
+                                            &works_text,
+                                            SectionFormat::Plain,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        
+                        return Ok(builder.build());
+                    }
+                }
+            }
+        }
+    }
+    
+    Err("No matching author found in Open Library".to_string())
+}
+
 /// Main function to process ebook uploads
 pub fn process_ebook_upload(
     input_path: &str,
@@ -844,6 +1397,8 @@ pub fn process_ebook_upload(
     let (title_opt, author_opt) = extract_ebook_metadata(&main_ebook_file)?;
     let mut title = title_opt.unwrap_or_else(|| "Unknown Title".to_string());
     let mut author = author_opt.unwrap_or_else(|| "Unknown Author".to_string());
+    
+
 
     // Extract comic images if we have CBR/CBZ files
     let mut extracted_comic_dir = None;
@@ -865,38 +1420,8 @@ pub fn process_ebook_upload(
         }
     }
 
-    // Sanitize the file name and rename the ebook file if needed
-    let new_ebook_path = if main_ebook_file.ebook_type.needs_renaming() {
-        let sanitized_author = {
-            let parts: Vec<&str> = author.split_whitespace().collect();
-            if parts.len() > 1 {
-                format!(
-                    "{}, {}",
-                    parts.last().unwrap(),
-                    parts[..parts.len() - 1].join(" ")
-                )
-            } else {
-                author.to_string()
-            }
-        };
-        let sanitized_title = title
-            .replace(".", " ")
-            .replace(":", " ")
-            .replace("'", "")
-            .replace("/", " ")
-            .replace("\\", " ")
-            .replace("&", "and")
-            .replace("?", "")
-            .replace("*", "");
-        let new_ext = "epub";
-        let new_ebook_name = format!("{} - {}.{}", sanitized_author, sanitized_title, new_ext);
-        let new_ebook_path = main_ebook_file.path.with_file_name(new_ebook_name);
-        fs::rename(&main_ebook_file.path, &new_ebook_path)
-            .map_err(|e| format!("Failed to rename ebook file: {}", e))?;
-        new_ebook_path
-    } else {
-        main_ebook_file.path.clone() // Don't rename PDF, CBR, CBZ files
-    };
+    // Note: EPUB renaming is now handled by ProcessBuilder during metadata extraction
+    let new_ebook_path = main_ebook_file.path.clone();
 
     // Determine the content path for torrent creation (after any file renaming)
     let actual_content_path = if let Some(comic_dir) = extracted_comic_dir {
@@ -1129,6 +1654,7 @@ pub fn process_ebook_upload(
             &seedpool_config.screenshots.remote_path,
             &seedpool_config.screenshots.image_path,
             dry_run,
+            config,
         )?;
         let keywords = if type_id == "41" {
             "magazine".to_string()
@@ -1228,14 +1754,14 @@ pub fn process_ebook_upload(
     let mut desc_config = DescriptionConfig::default();
     match main_ebook_file.ebook_type {
         EbookType::Cbr | EbookType::Cbz => {
-            desc_config.image_layout = ImageLayout::TwoColumn;
+            desc_config.image_layout = ImageLayout::TwoColumn;  // Use 2-column table for ebooks
             desc_config.max_images = 10;
-            desc_config.image_width = 350;
+            desc_config.image_width = 500; // Larger width to force 2-column layout
         }
         EbookType::Pdf => {
-            desc_config.image_layout = ImageLayout::TwoColumn;
-            desc_config.max_images = 6;
-            desc_config.image_width = 400;
+            desc_config.image_layout = ImageLayout::TwoColumn;  // Use 2-column table layout
+            desc_config.max_images = 8;
+            desc_config.image_width = 500; // Larger width to force 2-column layout
         }
         _ => {
             desc_config.image_layout = ImageLayout::SingleColumn;
@@ -1654,6 +2180,77 @@ pub fn process_ebook_upload(
     Ok(())
 }
 
+/// Generate a cover image for PDF ebooks using Ghostscript
+pub fn generate_pdf_cover(
+    pdf_path: &str,
+    torrent_id: &str,
+    config: &crate::core::Config,
+    dry_run: bool,
+) -> Result<String, String> {
+    use std::fs;
+    use std::path::Path;
+    use std::process::Command;
+
+    info!("📚 Generating PDF cover for torrent ID: {}", torrent_id);
+
+    let pdf_path = Path::new(pdf_path);
+    if !pdf_path.exists() {
+        return Err(format!("PDF file not found: {}", pdf_path.display()));
+    }
+
+    // Create temp directory for cover generation
+    let temp_dir = format!("{}/temp_covers", config.paths.screenshots_dir);
+    fs::create_dir_all(&temp_dir)
+        .map_err(|e| format!("Failed to create temp directory: {}", e))?;
+
+    // Generate cover filename with torrent ID
+    let cover_filename = format!("torrent-cover_{}.jpg", torrent_id);
+    let cover_path = format!("{}/{}", temp_dir, cover_filename);
+
+    if dry_run {
+        info!("🔄 Dry run: Would generate PDF cover at {}", cover_path);
+        return Ok(cover_path);
+    }
+
+    // Get Ghostscript path from config
+    let (_, _, _, _, gs_path) = crate::core::Config::get_binary_paths(config);
+    let gs_path_str = gs_path.to_string_lossy();
+
+    // Use Ghostscript to extract first page as high-quality JPEG
+    let gs_command = Command::new(&*gs_path_str)
+        .args(&[
+            "-dNOPAUSE",
+            "-dBATCH",
+            "-dSAFER",
+            "-sDEVICE=jpeg",
+            "-dJPEGQ=90",
+            "-dGraphicsAlphaBits=4",
+            "-dTextAlphaBits=4",
+            "-dFirstPage=1",
+            "-dLastPage=1",
+            "-r300", // 300 DPI for high quality
+            &format!("-sOutputFile={}", cover_path),
+            pdf_path.to_str().unwrap(),
+        ])
+        .output()
+        .map_err(|e| format!("Failed to run Ghostscript for cover generation: {}", e))?;
+
+    if !gs_command.status.success() {
+        return Err(format!(
+            "Ghostscript failed to generate cover. stderr: {}",
+            String::from_utf8_lossy(&gs_command.stderr)
+        ));
+    }
+
+    // Verify the cover was created
+    if !Path::new(&cover_path).exists() {
+        return Err(format!("Cover image was not created at: {}", cover_path));
+    }
+
+    info!("✅ Successfully generated PDF cover: {}", cover_path);
+    Ok(cover_path)
+}
+
 /// Process ebook file(s) from a path (file or directory) and classify content
 pub fn process_ebook(
     input_path: &str,
@@ -1671,7 +2268,6 @@ pub fn process_ebook(
         process_and_extract_archives(input_path).map_err(|e| format!("{:?}", e))?;
 
     let mut results = Vec::new();
-    let mut rejected_files = Vec::new();
 
     // Update path to use the processing path
     let path = Path::new(&processing_path);
@@ -1696,13 +2292,13 @@ pub fn process_ebook(
             .and_then(|name| name.to_str())
             .unwrap_or("");
 
-        let metadata = classify_ebook_content(filename, extension);
+        let mut metadata = classify_ebook_content(filename, extension);
 
+        // Don't reject files if we have a forced category - this will be overridden later
         if metadata.category == EbookCategory::Unknown {
-            return Err(format!(
-                "Unable to determine ebook category for '{}'. File must have recognizable novel, comic, magazine, technical, educational, or manga patterns in the filename.",
-                filename
-            ));
+            info!("📚 Ebook file '{}' has unknown category, but may be overridden by forced category", filename);
+            // Still include the file - the category will be overridden in ProcessBuilder if forced
+            metadata.category = EbookCategory::Novel; // Default to Novel for processing
         }
 
         results.push((ebook_file, metadata));
@@ -1725,11 +2321,28 @@ pub fn process_ebook(
                             .and_then(|name| name.to_str())
                             .unwrap_or("");
 
-                        let metadata = classify_ebook_content(filename, extension);
+                        let mut metadata = classify_ebook_content(filename, extension);
 
+                        // If classification failed but PDF is forced as comic/magazine, override it
+                        if metadata.category == EbookCategory::Unknown && extension.to_lowercase() == "pdf" {
+                            // Check if filename has comic/magazine indicators
+                            let lower_filename = filename.to_lowercase();
+                            if lower_filename.contains("comic") || lower_filename.contains("commando") || 
+                               lower_filename.contains("magazine") || lower_filename.contains("mag") {
+                                if lower_filename.contains("comic") || lower_filename.contains("commando") {
+                                    metadata.category = EbookCategory::Comic;
+                                } else {
+                                    metadata.category = EbookCategory::Magazine;
+                                }
+                                info!("📚 Forced PDF category to {:?} based on filename patterns", metadata.category);
+                            }
+                        }
+
+                        // Don't reject files if we have a forced category - this will be overridden later
                         if metadata.category == EbookCategory::Unknown {
-                            rejected_files.push(filename.to_string());
-                            continue;
+                            info!("📚 Ebook file '{}' has unknown category, but may be overridden by forced category", filename);
+                            // Still include the file - the category will be overridden in ProcessBuilder if forced
+                            metadata.category = EbookCategory::Novel; // Default to Novel for processing
                         }
 
                         results.push((ebook_file, metadata));
@@ -1738,13 +2351,7 @@ pub fn process_ebook(
             }
         }
 
-        if results.is_empty() && !rejected_files.is_empty() {
-            return Err(format!(
-                "No valid ebook files found. {} file(s) rejected due to unknown category: {}",
-                rejected_files.len(),
-                rejected_files.join(", ")
-            ));
-        }
+        // No longer rejecting files due to unknown category
     }
 
     if results.is_empty() {
@@ -1768,14 +2375,14 @@ pub fn process_ebook(
         // Different layouts for different ebook types
         match metadata.category {
             EbookCategory::Comic => {
-                desc_config.image_layout = ImageLayout::TwoColumn; // Comics use 2 column for preview pages
+                desc_config.image_layout = ImageLayout::TwoColumn; // Comics use 2-column table for preview pages
                 desc_config.max_images = 10; // Show more preview pages
-                desc_config.image_width = 350; // Smaller width for comic pages
+                desc_config.image_width = 500; // Larger width to force 2-column layout
             }
             EbookCategory::Magazine | EbookCategory::Newspaper => {
-                desc_config.image_layout = ImageLayout::TwoColumn; // Magazines/newspapers use 2 column
+                desc_config.image_layout = ImageLayout::TwoColumn; // Magazines/newspapers use 2-column table
                 desc_config.max_images = 6; // Show several pages
-                desc_config.image_width = 400;
+                desc_config.image_width = 500; // Larger width to force 2-column layout
             }
             _ => {
                 desc_config.image_layout = ImageLayout::SingleColumn; // Regular books use single column for cover
@@ -1852,40 +2459,14 @@ pub fn process_ebook(
             // This would be handled by the upload builder's screenshot component
         }
 
-        let _upload_data = builder.build()?;
-
-        info!("Built upload data for ebook processing");
-
-        // Create the upload processor - it will auto-detect the active tracker
-        let mut processor = crate::processing::upload::UploadProcessor::new(
-            _upload_data,
-            std::sync::Arc::new(_config.clone()),
-        )
-        .dry_run(_dry_run);
-
-        // Get media classification for mapping
-        if !results.is_empty() {
-            let (_, metadata) = &results[0];
-            let category_str = format!("EbookCategory::{:?}", metadata.category);
-
-            processor = processor.with_media_classification(
-                Some(category_str),
-                None, // Ebooks don't have source types
-            );
-        }
-
-        // Process the upload - it handles tracker detection and mapping internally
-        let upload_result = processor.process()?;
-
-        if upload_result.success {
-            info!("Upload completed successfully to {}", upload_result.tracker);
-            if let Some(torrent_id) = upload_result.torrent_id {
-                info!("Torrent ID: {}", torrent_id);
-            }
-        } else {
-            warn!("Upload failed: {}", upload_result.message);
-        }
+        // NOTE: Upload processing is now handled by the main ProcessBuilder flow
+        // This function only extracts metadata and returns it for use by ProcessBuilder
+        // The ebook-specific upload builder has been removed to prevent duplicate uploads
+        info!("Ebook metadata extraction completed without upload processing");
     }
+
+    // Cleanup unnecessary files based on ebook type
+    cleanup_ebook_files(&processing_path, &results)?;
 
     Ok(results)
 }
@@ -1895,6 +2476,85 @@ pub fn detect_ebook_files(path: &str) -> Result<Vec<EbookFile>, String> {
     let mut ebook_files = Vec::new();
     detect_ebook_files_recursive(Path::new(path), &mut ebook_files)?;
     Ok(ebook_files)
+}
+
+/// Clean up unnecessary files based on ebook type
+pub fn cleanup_ebook_files(
+    processing_path: &str,
+    results: &[(EbookFile, EbookMetadata)],
+) -> Result<(), String> {
+    let path = Path::new(processing_path);
+    
+    if !path.is_dir() {
+        return Ok(()); // Nothing to clean up for single files
+    }
+    
+    // Check if we have any PDF ebooks (need different cleanup rules)
+    let has_pdf_ebooks = results.iter().any(|(ebook_file, _)| {
+        matches!(ebook_file.ebook_type, EbookType::Pdf)
+    });
+    
+    // Debug: Log what types we actually found
+    for (ebook_file, _) in results {
+        info!("📚 Cleanup: Found ebook type: {:?} at path: {}", ebook_file.ebook_type, ebook_file.path.display());
+    }
+    info!("📚 Cleanup: has_pdf_ebooks = {}", has_pdf_ebooks);
+    
+    if has_pdf_ebooks {
+        info!("📚 Cleaning up unnecessary files for PDF ebooks (keeping only PDF and .nfo files)");
+    } else {
+        info!("📚 Cleaning up unnecessary files for EPUB/CBR/CBZ ebooks (keeping ebook files and .nfo, removing archives)");
+    }
+    
+    // Read directory and remove unwanted files
+    for entry in fs::read_dir(path).map_err(|e| format!("Failed to read directory: {}", e))? {
+        let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+        let entry_path = entry.path();
+        
+        if entry_path.is_file() {
+            if let Some(extension) = entry_path.extension().and_then(|ext| ext.to_str()) {
+                let extension_lower = extension.to_lowercase();
+                
+                // Determine what to keep based on ebook type
+                let should_remove = if has_pdf_ebooks {
+                    // For PDF ebooks: Keep PDF files and NFO files, remove everything else
+                    match extension_lower.as_str() {
+                        "pdf" | "nfo" => false, // Keep these
+                        "rar" | "zip" | "diz" => true, // Remove archives and .diz
+                        ext if ext.starts_with("r") && ext.len() >= 3 => {
+                            // Check if it's a RAR part file (r00, r01, r02, ..., r99, etc.)
+                            ext[1..].chars().all(|c| c.is_ascii_digit())
+                        }
+                        _ => true, // Remove everything else by default for PDF ebooks
+                    }
+                } else {
+                    // For EPUB/CBR/CBZ ebooks: Keep the ebook files and NFO, remove archives
+                    match extension_lower.as_str() {
+                        "epub" | "cbr" | "cbz" | "nfo" => false, // Keep ebook files and NFO
+                        "rar" | "zip" | "diz" => true, // Remove archives and .diz
+                        ext if ext.starts_with("r") && ext.len() >= 3 => {
+                            // Check if it's a RAR part file (r00, r01, r02, ..., r99, etc.)
+                            ext[1..].chars().all(|c| c.is_ascii_digit())
+                        }
+                        _ => true, // Remove everything else by default
+                    }
+                };
+                
+                if should_remove {
+                    match fs::remove_file(&entry_path) {
+                        Ok(()) => {
+                            info!("🗑️ Removed unnecessary file: {}", entry_path.display());
+                        }
+                        Err(e) => {
+                            info!("⚠️ Failed to remove file {}: {}", entry_path.display(), e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok(())
 }
 
 /// Recursively search for ebook files in a directory tree

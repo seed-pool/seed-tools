@@ -1,0 +1,63 @@
+03:21:56 [INFO] Logging initialized.
+03:21:56 [INFO] Executable directory determined as: "/mnt/nvme13n1/beholder/newdev/target/release"
+03:21:56 [INFO] 🔍 Checking required binaries...
+03:21:56 [INFO] 🧪 Testing binary: "/mnt/nvme13n1/beholder/newdev/target/release/bin/ffmpeg" with args: ["-version"]
+03:21:56 [INFO] ✅ Binary test successful: "/mnt/nvme13n1/beholder/newdev/target/release/bin/ffmpeg"
+03:21:56 [INFO] 🧪 Testing binary: "/mnt/nvme13n1/beholder/newdev/target/release/bin/ffprobe" with args: ["-version"]
+03:21:56 [INFO] ✅ Binary test successful: "/mnt/nvme13n1/beholder/newdev/target/release/bin/ffprobe"
+03:21:56 [INFO] 🧪 Testing binary: "/mnt/nvme13n1/beholder/newdev/target/release/bin/mediainfo" with args: ["--version"]
+03:21:56 [INFO] ✅ Binary test successful: "/mnt/nvme13n1/beholder/newdev/target/release/bin/mediainfo"
+03:21:56 [INFO] 🧪 Testing binary: "/mnt/nvme13n1/beholder/newdev/target/release/bin/mkbrr" with args: ["version"]
+03:21:56 [INFO] ✅ Binary test successful: "/mnt/nvme13n1/beholder/newdev/target/release/bin/mkbrr"
+03:21:56 [INFO] ✅ All required binaries are available
+03:21:56 [INFO] Parsing arguments...
+03:21:56 [INFO] Parsed arguments: Cli { sync: false, sp: true, tl: false, custom_cat_type: None, ui: false, pre: false, dry_run: false, command: None, input_path: Some("/home/beholder/downloads/Ireland.with.Simon.Reeve.S01E02.1080p.WEBRip.x264-CBFM") }
+03:21:56 [INFO] Building configuration paths...
+03:21:56 [INFO] Configuration paths built.
+03:21:56 [INFO] Loading configurations...
+03:21:56 [ERROR] Failed to extract binary paths using config "/mnt/nvme13n1/beholder/newdev/target/release/config/config.yaml": Failed to read config file: No such file or directory (os error 2)
+05:00:34 [INFO] Logging initialized. Execution ID: 91bf0c14
+05:00:34 [INFO] Executable directory determined as: "/mnt/nvme13n1/beholder/newdev/target/release"
+05:00:34 [INFO] 🔍 Checking required binaries...
+05:00:34 [INFO] 🧪 Testing binary: "/mnt/nvme13n1/beholder/newdev/target/release/bin/ffmpeg" with args: ["-version"]
+05:00:34 [INFO] ✅ Binary test successful: "/mnt/nvme13n1/beholder/newdev/target/release/bin/ffmpeg"
+05:00:34 [INFO] 🧪 Testing binary: "/mnt/nvme13n1/beholder/newdev/target/release/bin/ffprobe" with args: ["-version"]
+05:00:34 [INFO] ✅ Binary test successful: "/mnt/nvme13n1/beholder/newdev/target/release/bin/ffprobe"
+05:00:34 [INFO] 🧪 Testing binary: "/mnt/nvme13n1/beholder/newdev/target/release/bin/mediainfo" with args: ["--version"]
+05:00:34 [INFO] ✅ Binary test successful: "/mnt/nvme13n1/beholder/newdev/target/release/bin/mediainfo"
+05:00:34 [INFO] 🧪 Testing binary: "/mnt/nvme13n1/beholder/newdev/target/release/bin/mkbrr" with args: ["version"]
+05:00:34 [INFO] ✅ Binary test successful: "/mnt/nvme13n1/beholder/newdev/target/release/bin/mkbrr"
+05:00:34 [INFO] ✅ All required binaries are available
+05:00:34 [INFO] Parsing arguments...
+05:00:41 [INFO] Logging initialized. Execution ID: ab659602
+05:00:41 [INFO] Executable directory determined as: "/mnt/nvme13n1/beholder/newdev/target/release"
+05:00:41 [INFO] 🔍 Checking required binaries...
+05:00:41 [INFO] 🧪 Testing binary: "/mnt/nvme13n1/beholder/newdev/target/release/bin/ffmpeg" with args: ["-version"]
+05:00:41 [INFO] ✅ Binary test successful: "/mnt/nvme13n1/beholder/newdev/target/release/bin/ffmpeg"
+05:00:41 [INFO] 🧪 Testing binary: "/mnt/nvme13n1/beholder/newdev/target/release/bin/ffprobe" with args: ["-version"]
+05:00:41 [INFO] ✅ Binary test successful: "/mnt/nvme13n1/beholder/newdev/target/release/bin/ffprobe"
+05:00:41 [INFO] 🧪 Testing binary: "/mnt/nvme13n1/beholder/newdev/target/release/bin/mediainfo" with args: ["--version"]
+05:00:41 [INFO] ✅ Binary test successful: "/mnt/nvme13n1/beholder/newdev/target/release/bin/mediainfo"
+05:00:41 [INFO] 🧪 Testing binary: "/mnt/nvme13n1/beholder/newdev/target/release/bin/mkbrr" with args: ["version"]
+05:00:41 [INFO] ✅ Binary test successful: "/mnt/nvme13n1/beholder/newdev/target/release/bin/mkbrr"
+05:00:41 [INFO] ✅ All required binaries are available
+05:00:41 [INFO] Parsing arguments...
+05:00:49 [INFO] Logging initialized. Execution ID: a4147abb
+05:00:49 [INFO] Executable directory determined as: "/mnt/nvme13n1/beholder/newdev/target/release"
+05:00:49 [INFO] 🔍 Checking required binaries...
+05:00:49 [INFO] 🧪 Testing binary: "/mnt/nvme13n1/beholder/newdev/target/release/bin/ffmpeg" with args: ["-version"]
+05:00:49 [INFO] ✅ Binary test successful: "/mnt/nvme13n1/beholder/newdev/target/release/bin/ffmpeg"
+05:00:49 [INFO] 🧪 Testing binary: "/mnt/nvme13n1/beholder/newdev/target/release/bin/ffprobe" with args: ["-version"]
+05:00:49 [INFO] ✅ Binary test successful: "/mnt/nvme13n1/beholder/newdev/target/release/bin/ffprobe"
+05:00:49 [INFO] 🧪 Testing binary: "/mnt/nvme13n1/beholder/newdev/target/release/bin/mediainfo" with args: ["--version"]
+05:00:49 [INFO] ✅ Binary test successful: "/mnt/nvme13n1/beholder/newdev/target/release/bin/mediainfo"
+05:00:49 [INFO] 🧪 Testing binary: "/mnt/nvme13n1/beholder/newdev/target/release/bin/mkbrr" with args: ["version"]
+05:00:49 [INFO] ✅ Binary test successful: "/mnt/nvme13n1/beholder/newdev/target/release/bin/mkbrr"
+05:00:49 [INFO] ✅ All required binaries are available
+05:00:49 [INFO] Parsing arguments...
+05:00:49 [INFO] Parsed arguments: Cli { sync: false, sp: true, tl: false, custom_cat_type: None, ui: false, pre: false, dry_run: true, command: None, input_path: Some("/home/beholder/downloads/Slime_Heroes_NSW-VENOM") }
+05:00:49 [INFO] 🚫 DRY RUN MODE ENABLED - No actual uploads or downloads will occur
+05:00:49 [INFO] Building configuration paths...
+05:00:49 [INFO] Configuration paths built.
+05:00:49 [INFO] Loading configurations...
+05:00:49 [ERROR] Failed to extract binary paths using config "/mnt/nvme13n1/beholder/newdev/target/release/config/config.yaml": Failed to read config file: No such file or directory (os error 2)

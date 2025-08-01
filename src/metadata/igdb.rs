@@ -28,21 +28,36 @@ pub fn clean_game_title_for_search(title: &str, config: &Config) -> String {
 
     // First, remove common patterns that won't be in IGDB
     let mut patterns_to_remove = vec![
-        // Version patterns
-        r"(?i)\s+v?\d+[\.\s]\d+[\.\s]\d+[\.\s]\d+\w*".to_string(), // v1.0.2.31110s
-        r"(?i)\s+v?\d+[\.\s]\d+[\.\s]\d+\w*".to_string(),          // v1.0.2
-        r"(?i)\s+v?\d+[\.\s]\d+\w*".to_string(),                   // v1.0
-        r"(?i)\s+v\d+\w*".to_string(),                             // v1
+        // Version patterns (handle various separators and formats)
+        r"(?i)[_\s\.\-]+v?\d+[\.\s]\d+[\.\s]\d+[\.\s]\d+\w*".to_string(), // v1.0.2.31110s
+        r"(?i)[_\s\.\-]+v?\d+[\.\s]\d+[\.\s]\d+\w*".to_string(),          // v1.0.2
+        r"(?i)[_\s\.\-]+v?\d+[\.\s]\d+\w*".to_string(),                   // v1.0
+        r"(?i)[_\s\.\-]+v\d+\w*".to_string(),                             // v1, v2, etc.
+        r"(?i)[_\s\.\-]+\d+[\.\s]\d+[\.\s]\d+\w*".to_string(),            // 1.0.2 (no v prefix)
+        r"(?i)[_\s\.\-]+\d+[\.\s]\d+\w*".to_string(),                     // 1.0 (no v prefix)
 
-        // Build/Update patterns
-        r"(?i)\s+build\s*\d+".to_string(),
-        r"(?i)\s+build\d+".to_string(),     // Build911 (no space)
-        r"(?i)\s+update\s*\d+".to_string(),
-        r"(?i)\s+patch\s*\d+".to_string(),
-        r"(?i)\s+hotfix\s*\d+".to_string(),
+        // Build/Update patterns (handle various separators)
+        r"(?i)[_\s\.\-]+build\s*\d+".to_string(),
+        r"(?i)[_\s\.\-]+build\d+".to_string(),     // Build911 (no space)
+        r"(?i)[_\s\.\-]+update\s*\d*".to_string(), // update, update1, etc.
+        r"(?i)[_\s\.\-]+patch\s*\d*".to_string(),  // patch, patch1, etc.
+        r"(?i)[_\s\.\-]+hotfix\s*\d*".to_string(), // hotfix, hotfix1, etc.
+        r"(?i)[_\s\.\-]+fix\s*\d*".to_string(),    // fix, fix1, etc.
+        r"(?i)[_\s\.\-]+dlc\b".to_string(),        // DLC indicators
 
-        // Platform/Store patterns
+        // Platform/Store patterns (PC)
         r"(?i)\s*[\(\[]?(steam|epic|origin|uplay|battle\.net|gog)[\s\-]?(rip|version)?[\)\]]?".to_string(),
+        
+        // Console platform patterns (handle various separators: space, underscore, dash, dot)
+        r"(?i)[_\s\.\-]+NSW\b".to_string(),         // Nintendo Switch (NSW)
+        r"(?i)[_\s\.\-]+XCI\b".to_string(),         // Nintendo Switch XCI format
+        r"(?i)[_\s\.\-]+NSP\b".to_string(),         // Nintendo Switch NSP format
+        r"(?i)[_\s\.\-]+PS[1-5]\b".to_string(),     // PlayStation consoles
+        r"(?i)[_\s\.\-]+XBOX\b".to_string(),        // Xbox
+        r"(?i)[_\s\.\-]+3DS\b".to_string(),         // Nintendo 3DS
+        r"(?i)[_\s\.\-]+CIA\b".to_string(),         // 3DS CIA format
+        r"(?i)[_\s\.\-]+WII\b".to_string(),         // Nintendo Wii
+        r"(?i)[_\s\.\-]+(NES|SNES)\b".to_string(),  // Retro Nintendo consoles
 
         // Edition patterns (but keep some like "Game of the Year")
         r"(?i)\s+digital\s+deluxe(\s+edition)?".to_string(),
@@ -70,6 +85,20 @@ pub fn clean_game_title_for_search(title: &str, config: &Config) -> String {
         r"(?i)\s+cracked".to_string(),
     ];
 
+    // Add common console release groups that might not be in the config
+    let console_release_groups = vec![
+        "VENOM", "SUXXORS", "LONGDUCK", "ABSTRAKT", "LIGHTFORCE", 
+        "BigBlueBox", "XCiSO", "NSPii", "DARKZER0", "PRELUDE",
+        "CARAVAN", "SQUiRE", "EURASIA", "PUSSYCAT", "HR", "XCI",
+        "ELAMIGOS", "DODI", "FitGirl", "KaOs"  // Multi-platform repackers
+    ];
+    
+    // Add console release group patterns  
+    for group in &console_release_groups {
+        patterns_to_remove.push(format!(r"(?i)\s*-{}.*$", group));
+        patterns_to_remove.push(format!(r"(?i)\s+{}.*$", group));
+    }
+
     // Add release group patterns from config
     if !release_groups.is_empty() {
         // Match release groups with dash (keep the dash format: -GROUP)
@@ -85,10 +114,15 @@ pub fn clean_game_title_for_search(title: &str, config: &Config) -> String {
         }
     }
 
-    // Clean up any remaining artifacts
+    // Clean up any remaining artifacts and normalize spacing
     cleaned = cleaned
+        .replace('_', " ")  // Convert underscores to spaces first
+        .replace('.', " ")  // Convert dots to spaces  
+        .replace('-', " ")  // Convert dashes to spaces
         .trim_matches(|c: char| !c.is_alphanumeric()) // Remove trailing punctuation
-        .replace("  ", " ") // Remove double spaces
+        .split_whitespace() // Split on any whitespace and rejoin to normalize
+        .collect::<Vec<&str>>()
+        .join(" ")
         .trim()
         .to_string();
 
@@ -104,6 +138,35 @@ pub fn clean_game_title_for_search(title: &str, config: &Config) -> String {
             }
         }
         cleaned = simple_title.trim().to_string();
+    }
+
+    // Special handling for updates/patches - search for base game name
+    if cleaned.to_lowercase().contains("update") {
+        cleaned = cleaned
+            .replace("Update", "")
+            .replace("update", "")
+            .split_whitespace()
+            .collect::<Vec<&str>>()
+            .join(" ")
+            .trim()
+            .to_string();
+    }
+
+    // Aggressive version truncation - cut off everything after version patterns
+    let version_cutoff_patterns = [
+        r"(?i)\s+v\d+",        // v1, v2, v3, etc.
+        r"(?i)\s+\d+\.\d+",    // 2.0, 1.5, etc. (standalone numbers)
+        r"(?i)\.v\d+",         // .v1, .v2 (dots before version)
+        r"(?i)[_\-]v\d+",      // _v1, -v1 (underscore/dash before version)
+    ];
+    
+    for pattern in &version_cutoff_patterns {
+        if let Ok(re) = Regex::new(pattern) {
+            if let Some(mat) = re.find(&cleaned) {
+                cleaned = cleaned[..mat.start()].trim().to_string();
+                break; // Stop at first version pattern found
+            }
+        }
     }
 
     info!(

@@ -8,6 +8,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use uuid::Uuid;
 
 use seedbrr::clients::sync;
 use seedbrr::core::{
@@ -138,7 +139,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .append(true) // Append to the file instead of truncating it
             .open(&log_path)?,
     )])?;
-    info!("Logging initialized.");
+    let execution_id = Uuid::new_v4().to_string()[..8].to_string();
+    info!("Logging initialized. Execution ID: {}", execution_id);
 
     // Determine the executable directory
     let exe_dir = std::env::current_exe()
@@ -382,6 +384,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     },
                     torrent_info.category_name()
                 ))
+                .with_original_torrent_info(torrent_info.clone())
                 .dry_run(cli.dry_run)
                 .build()
             {
@@ -403,18 +406,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 input_path_str
             );
 
+            info!("Starting upload processing with execution ID: {}", execution_id);
             match process_builder::upload_builder(input_path_str, Arc::new(main_config.clone()))
                 .dry_run(cli.dry_run)
                 .build()
             {
                 Ok(result) => {
                     info!(
-                        "Upload processing completed successfully for: {}",
-                        result.title
+                        "Upload processing completed successfully for: {} (Execution ID: {})",
+                        result.title, execution_id
                     );
                 }
                 Err(e) => {
-                    error!("Error processing upload: {}", e);
+                    error!("Error processing upload: {} (Execution ID: {})", e, execution_id);
                     return Err(e.into());
                 }
             }
@@ -427,6 +431,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         return Ok(()); // Exit cleanly
     }
 
-    info!("seedbrr finished.");
+    info!("seedbrr finished. Execution ID: {}", execution_id);
     Ok(())
 }

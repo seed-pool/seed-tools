@@ -577,6 +577,7 @@ pub struct PathsConfig {
     pub ffprobe: String,
     pub mkbrr: String,
     pub mediainfo: String,
+    pub ghostscript: String,
     pub screenshots: Option<Screenshots>,
 }
 
@@ -734,10 +735,11 @@ pub struct Config {
 
 impl Config {
     /// Get binary paths from a config instance
-    /// Returns (ffmpeg, ffprobe, mkbrr, mediainfo)
+    /// Returns (ffmpeg, ffprobe, mkbrr, mediainfo, ghostscript)
     pub fn get_binary_paths(
         config: &Config,
     ) -> (
+        std::path::PathBuf,
         std::path::PathBuf,
         std::path::PathBuf,
         std::path::PathBuf,
@@ -748,6 +750,7 @@ impl Config {
             std::path::PathBuf::from(&config.paths.ffprobe),
             std::path::PathBuf::from(&config.paths.mkbrr),
             std::path::PathBuf::from(&config.paths.mediainfo),
+            std::path::PathBuf::from(&config.paths.ghostscript),
         )
     }
 }
@@ -769,6 +772,7 @@ impl Default for Config {
                 ffprobe: String::new(),
                 mkbrr: String::new(),
                 mediainfo: String::new(),
+                ghostscript: String::new(),
                 screenshots: None,
             },
             qbittorrent: Vec::new(),

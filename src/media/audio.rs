@@ -773,8 +773,12 @@ pub fn generate_description_with_enriched_metadata(
         builder = builder.custom_section("MediaInfo", mi, SectionFormat::Quoted);
     }
 
-    // Add any custom description
-    if let Some(description) = base_metadata.get("description").and_then(|d| d.as_str()) {
+    // Add custom description if available (prefer custom_description from tracker config)
+    if let Some(custom_desc) = get_value("custom_description") {
+        if !custom_desc.is_empty() {
+            builder = builder.raw(custom_desc);
+        }
+    } else if let Some(description) = base_metadata.get("description").and_then(|d| d.as_str()) {
         builder = builder.raw(description);
     }
 

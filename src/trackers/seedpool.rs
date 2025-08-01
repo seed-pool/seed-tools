@@ -25,6 +25,8 @@ impl SeedpoolCategory {
         match code {
             1 => Some(SeedpoolCategory::Movie),
             2 => Some(SeedpoolCategory::TvShow),
+            3 => Some(SeedpoolCategory::Games), // Alternative Games category code
+            4 => Some(SeedpoolCategory::Games), // Alternative Games category code
             5 => Some(SeedpoolCategory::Music),
             6 => Some(SeedpoolCategory::Anime),
             7 => Some(SeedpoolCategory::Ebook),
@@ -92,6 +94,8 @@ impl SeedpoolCategory {
         vec![
             (1, "Movie"),
             (2, "TV Show"),
+            (3, "Games"),
+            (4, "NSW Games"),
             (5, "Music"),
             (6, "Anime"),
             (7, "E-Book"),
@@ -364,6 +368,8 @@ impl SeedpoolType {
 pub struct SeedpoolTorrentInfo {
     pub category: SeedpoolCategory,
     pub torrent_type: SeedpoolType,
+    pub original_category_code: Option<u8>,
+    pub original_type_code: Option<u8>,
 }
 
 impl SeedpoolTorrentInfo {
@@ -371,15 +377,31 @@ impl SeedpoolTorrentInfo {
         Self {
             category,
             torrent_type,
+            original_category_code: None,
+            original_type_code: None,
+        }
+    }
+
+    pub fn new_with_codes(
+        category: SeedpoolCategory, 
+        torrent_type: SeedpoolType,
+        original_category_code: u8,
+        original_type_code: u8,
+    ) -> Self {
+        Self {
+            category,
+            torrent_type,
+            original_category_code: Some(original_category_code),
+            original_type_code: Some(original_type_code),
         }
     }
 
     pub fn category_code(&self) -> u8 {
-        self.category.to_code()
+        self.original_category_code.unwrap_or_else(|| self.category.to_code())
     }
 
     pub fn type_code(&self) -> u8 {
-        self.torrent_type.to_code()
+        self.original_type_code.unwrap_or_else(|| self.torrent_type.to_code())
     }
 
     pub fn description(&self) -> String {
@@ -408,7 +430,7 @@ pub fn parse_seedpool_category_type(arg: &str) -> Result<SeedpoolTorrentInfo, St
     let torrent_type = SeedpoolType::from_code(type_code)
         .ok_or_else(|| format!("Unknown Seedpool type code: {:02}", type_code))?;
 
-    Ok(SeedpoolTorrentInfo::new(category, torrent_type))
+    Ok(SeedpoolTorrentInfo::new_with_codes(category, torrent_type, category_code, type_code))
 }
 
 /// Print all available Seedpool categories and types
@@ -621,7 +643,7 @@ pub fn check_seedpool_dupes(name: &str, seedpool_api_key: &str) -> Result<Option
     let raw_response = search_response
         .text()
         .unwrap_or_else(|_| "Failed to read response body".to_string());
-    info!("Seedpool API Response: {}", raw_response);
+    // Seedpool API response logging removed for cleaner output
 
     let search_results: serde_json::Value = serde_json::from_str(&raw_response)
         .map_err(|e| format!("Failed to parse Seedpool response for '{}': {}", name, e))?;

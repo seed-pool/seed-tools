@@ -75,3 +75,12 @@ conditionals:
       section_type: "custom"
       content: "{{tutorial_steps}}"
       format: "quoted"
+      order: 7
+
+  - name: "custom_description"
+    condition: "field_exists:custom_description"
+    section:
+      name: "custom_description"
+      section_type: "raw"
+      content: "{{custom_description}}"
+      order: 8

@@ -700,5 +700,12 @@ pub fn generate_description(metadata: &serde_json::Value) -> String {
         builder = builder.custom_section("Usage Notes", usage_notes, SectionFormat::Spoiler);
     }
 
+    // Add custom description if available
+    if let Some(custom_desc) = metadata.get("custom_description").and_then(|d| d.as_str()) {
+        if !custom_desc.is_empty() {
+            builder = builder.raw(custom_desc);
+        }
+    }
+
     builder.build()
 }

@@ -34,6 +34,7 @@ pub struct UploadData {
     pub tmdb_id: Option<u32>,
     pub imdb_id: Option<String>,
     pub tvdb_id: Option<u32>,
+    pub igdb_id: Option<u64>,
     pub anonymous: bool,
     // TV show specific fields
     pub resolution_id: Option<String>,

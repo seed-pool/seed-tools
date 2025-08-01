@@ -52,7 +52,7 @@ pub fn generate_screenshots(
     let mut thumbnails_list = Vec::new();
 
     // Get binary paths from config
-    let (_ffmpeg_path, ffprobe_path, _mkbrr_path, _mediainfo_path) =
+    let (_ffmpeg_path, ffprobe_path, _mkbrr_path, _mediainfo_path, _ghostscript_path) =
         Config::get_binary_paths(config);
     let ffmpeg_path = _ffmpeg_path
         .to_str()

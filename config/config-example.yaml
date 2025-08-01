@@ -29,6 +29,8 @@ paths:
   mkbrr: "/path/to/bin/mkbrr"
   # Path to mediainfo binary (for detailed media information)
   mediainfo: "/path/to/bin/mediainfo"
+  # Path to ghostscript binary (for PDF page extraction)
+  ghostscript: "/path/to/bin/gs"
 
 # qBittorrent configuration (supports multiple instances)
 qbittorrent:
