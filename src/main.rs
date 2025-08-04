@@ -16,6 +16,7 @@ use seedbrr::core::{
     Config,
 };
 use seedbrr::processing::naming::generate_release_name;
+use seedbrr::media::video::{looks_like_video_release, is_full_disc_release};
 use seedbrr::processing::{
     preflight::{preflight_check, print_preflight_results},
     process_builder,
@@ -30,6 +31,7 @@ use seedbrr::ui::tui::launch_ui;
 use seedbrr::utils::{
     binary_manager::setup_binaries_if_needed, load_tracker_config, validate_file_path,
 };
+
 
 fn load_yaml_config<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, String> {
     let content = fs::read_to_string(path)
@@ -110,6 +112,13 @@ struct Cli {
     )]
     dry_run: bool,
 
+    #[arg(
+        long,
+        value_name = "DIR",
+        help = "Custom config directory path (defaults to ./config relative to executable)"
+    )]
+    config_dir: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 
@@ -177,11 +186,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // --- Build Configuration Paths ---
     info!("Building configuration paths...");
-    let config_dir = exe_dir.join("config");
+    let config_dir = if let Some(custom_config_dir) = cli.config_dir.as_ref() {
+        info!("Using custom config directory: {:?}", custom_config_dir);
+        custom_config_dir.clone()
+    } else {
+        info!("Using default config directory relative to executable");
+        exe_dir.join("config")
+    };
     let main_config_path = config_dir.join("config.yaml");
     let seedpool_config_path = config_dir.join("trackers/seedpool.yaml");
     let torrentleech_config_path = config_dir.join("trackers/torrentleech.yaml");
-    info!("Configuration paths built.");
+    info!("Configuration paths built: config_dir={:?}", config_dir);
 
     // --- Load Configurations ---
     info!("Loading configurations...");
@@ -329,14 +344,41 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         info!("Processing input path: {}", input_path_str);
 
-        // Generate release name
-        let sanitized_name = generate_release_name(
-            &input_path
+        // Generate release name - for ISO files, use parent directory name if it looks like a video release
+        let base_name_for_release = if input_path.extension().and_then(|ext| ext.to_str()) == Some("iso") {
+            if let Some(parent_dir) = input_path.parent() {
+                if let Some(parent_name) = parent_dir.file_name().and_then(|n| n.to_str()) {
+                    // Check if parent directory looks like a video release
+                    if looks_like_video_release(parent_name) || is_full_disc_release(parent_name) {
+                        info!("Using parent directory name for ISO release: {}", parent_name);
+                        parent_name.to_string()
+                    } else {
+                        input_path.file_name()
+                            .ok_or("Could not get filename from input path")?
+                            .to_string_lossy()
+                            .to_string()
+                    }
+                } else {
+                    input_path.file_name()
+                        .ok_or("Could not get filename from input path")?
+                        .to_string_lossy()
+                        .to_string()
+                }
+            } else {
+                input_path.file_name()
+                    .ok_or("Could not get filename from input path")?
+                    .to_string_lossy()
+                    .to_string()
+            }
+        } else {
+            input_path
                 .file_name()
                 .ok_or("Could not get filename from input path")?
                 .to_string_lossy()
-                .to_string(),
-        );
+                .to_string()
+        };
+
+        let sanitized_name = generate_release_name(&base_name_for_release);
         info!("Generated sanitized release name: {}", sanitized_name);
 
         // Validate tracker selection

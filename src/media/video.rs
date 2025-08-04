@@ -544,6 +544,7 @@ pub fn generate_description_with_metadata(
 /// Recursively process a directory for video files
 fn process_directory_recursive(
     dir: &Path,
+    root_dir: &Path,
     results: &mut Vec<(VideoFile, VideoMetadata)>,
     rejected_files: &mut Vec<String>,
 ) -> Result<(), String> {
@@ -563,10 +564,48 @@ fn process_directory_recursive(
                 }
             }
             // Recursively process subdirectories
-            process_directory_recursive(&entry_path, results, rejected_files)?;
+            process_directory_recursive(&entry_path, root_dir, results, rejected_files)?;
         } else if entry_path.is_file() {
             if let Some(extension) = entry_path.extension().and_then(|ext| ext.to_str()) {
-                if let Some(video_type) = VideoType::from_extension(extension) {
+                let ext_lower = extension.to_lowercase();
+                
+                // Handle special disc formats
+                if ext_lower == "iso" || ext_lower == "m2ts" {
+                    let filename = entry_path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("");
+                    let parent_dir_name = root_dir.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("");
+                    
+                    // Check if this looks like a video disc
+                    if looks_like_video_release(filename) || 
+                       looks_like_video_release(parent_dir_name) ||
+                       is_full_disc_release(filename) ||
+                       is_full_disc_release(parent_dir_name) {
+                        
+                        info!("Found disc file indicating full disc release: {} ({})", filename, ext_lower);
+                        
+                        let video_file = VideoFile {
+                            path: entry_path.clone(),
+                            video_type: VideoType::Directory, // Treat as disc content
+                        };
+
+                        // Use the root directory path for classification to get proper release info
+                        let metadata = classify_video_content(root_dir.to_str().unwrap_or(filename));
+
+                        if metadata.category != VideoCategory::Unknown {
+                            info!(
+                                "Processed disc file: {} -> Category: {:?}, Source: {:?}",
+                                filename, metadata.category, metadata.source_type
+                            );
+
+                            results.push((video_file, metadata));
+                            return Ok(()); // Found disc indicator, no need to process more files
+                        }
+                    }
+                } else if let Some(video_type) = VideoType::from_extension(extension) {
                     let filename = entry_path
                         .file_name()
                         .and_then(|name| name.to_str())
@@ -584,8 +623,8 @@ fn process_directory_recursive(
                         video_type,
                     };
 
-                    // Pass the full path for classification
-                    let metadata = classify_video_content(entry_path.to_str().unwrap_or(filename));
+                    // Use the root directory path for classification to get proper release info
+                    let metadata = classify_video_content(root_dir.to_str().unwrap_or(filename));
 
                     if metadata.category == VideoCategory::Unknown {
                         rejected_files.push(filename.to_string());
@@ -631,24 +670,42 @@ pub fn process_video(
     let path = Path::new(&processing_path);
 
     if path.is_file() {
-        // Single file case (non-archive video file)
+        // Single file case (non-archive video file or movie ISO)
         let extension = path
             .extension()
             .and_then(|ext| ext.to_str())
             .ok_or_else(|| "Could not determine file extension".to_string())?;
 
-        let video_type = VideoType::from_extension(extension)
-            .ok_or_else(|| format!("Unsupported video file type: {}", extension))?;
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+
+        // Handle ISO files specially for movie discs
+        let video_type = if extension.to_lowercase() == "iso" {
+            // Check if this ISO looks like a movie release using parent directory context
+            let parent_dir_name = path.parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+                
+            if looks_like_video_release(filename) || 
+               looks_like_video_release(parent_dir_name) ||
+               is_full_disc_release(filename) ||
+               is_full_disc_release(parent_dir_name) {
+                VideoType::Directory // Treat movie ISO as a disc image
+            } else {
+                return Err(format!("ISO file '{}' doesn't appear to be a movie disc based on naming patterns", filename));
+            }
+        } else {
+            VideoType::from_extension(extension)
+                .ok_or_else(|| format!("Unsupported video file type: {}", extension))?
+        };
 
         let video_file = VideoFile {
             path: path.to_path_buf(),
             video_type,
         };
-
-        let filename = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("");
 
         // Pass the full path for classification
         let metadata = classify_video_content(path.to_str().unwrap_or(filename));
@@ -663,15 +720,48 @@ pub fn process_video(
         results.push((video_file, metadata));
     } else if path.is_dir() {
         // Handle directory - recursively process all video files
-        process_directory_recursive(path, &mut results, &mut rejected_files)?;
+        process_directory_recursive(path, path, &mut results, &mut rejected_files)?;
 
         if results.is_empty() {
-            if !rejected_files.is_empty() {
-                return Err(format!(
-                    "No valid video files found. {} file(s) rejected due to unrecognizable naming patterns: {}",
-                    rejected_files.len(),
-                    rejected_files.join(", ")
-                ));
+            // Check if this is a full disc/complete release before failing
+            if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
+                if is_full_disc_release(dir_name) {
+                    info!("Detected full disc release: {}", dir_name);
+                    
+                    // Create a virtual video file entry for the full disc
+                    let video_file = VideoFile {
+                        path: path.to_path_buf(),
+                        video_type: VideoType::Directory,
+                    };
+                    
+                    // Classify using the directory name
+                    let metadata = classify_video_content(path.to_str().unwrap_or(dir_name));
+                    
+                    if metadata.category == VideoCategory::Unknown {
+                        return Err(format!(
+                            "Unable to determine video category for full disc release '{}'. Directory must have recognizable movie or TV show patterns.",
+                            dir_name
+                        ));
+                    }
+                    
+                    info!(
+                        "Processed full disc: {} -> Category: {:?}, Source: {:?}",
+                        dir_name, metadata.category, metadata.source_type
+                    );
+                    
+                    results.push((video_file, metadata));
+                } else {
+                    // Original error handling for non-full-disc directories
+                    if !rejected_files.is_empty() {
+                        return Err(format!(
+                            "No valid video files found. {} file(s) rejected due to unrecognizable naming patterns: {}",
+                            rejected_files.len(),
+                            rejected_files.join(", ")
+                        ));
+                    } else {
+                        return Err("No video files found in directory".to_string());
+                    }
+                }
             } else {
                 return Err("No video files found in directory".to_string());
             }
@@ -691,10 +781,152 @@ pub fn process_video(
     Ok(results)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_looks_like_video_release_with_patterns() {
+        let test_cases = vec![
+            // Generic movie patterns - year + technical specs
+            ("Movie.Title.1960.2160p.UHD.Blu-ray.SDR.HEVC.DTS-HD.MA.2.0-GROUP", true),
+            ("Film.Name.1969.2160p.COMPLETE.UHD.BLURAY-TEAM", true),
+            ("Title.Here.2021.UHD.BluRay.2160p.HEVC.Atmos.TrueHD7.1-RELEASE", true),
+            ("Movie.2025.ITA.COMPLETE.BLURAY-GROUP", true),
+            ("Film.1987.2160p.COMPLETE.UHD.BLURAY-TEAM", true),
+            ("Title 1973 2160p USA UHD Blu-ray DV HDR HEVC DTS-HD MA 1.0-GROUP", true),
+            ("Long.Movie.Title.2003.2160p.USA.UHD.Blu-ray.DV.HDR.HEVC.TrueHD.7.1.Atmos-TEAM", true),
+            ("Film.Title.1969.1080p.Blu-ray.AVC.DTS-HD.MA.2.0-GROUP", true),
+            ("Movie.Name.1991.2160p.MULTI.COMPLETE.UHD.BLURAY-TEAM", true),
+            ("Title.1997.Blu-ray.1080i.AVC.DTS-HD.5.1", true),
+            // Test some non-video examples
+            ("random_folder", false),
+            ("documents_2023", false),
+            ("vacation_photos", false),
+        ];
+
+        for (test_case, expected) in test_cases {
+            let result = looks_like_video_release(test_case);
+            assert_eq!(
+                result, expected,
+                "Test failed for '{}': expected {}, got {}",
+                test_case, expected, result
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_full_disc_release() {
+        let test_cases = vec![
+            // Full disc patterns - GENERIC PATTERNS ONLY
+            ("Movie.Title.1993.Bluray.1080p.AVC.DTS-HDMA5.1-GROUP", true),
+            ("Film.Name.1969.2160p.COMPLETE.UHD.BLURAY-TEAM", true),
+            ("Title.2025.ITA.COMPLETE.BLURAY-GROUP", true),
+            ("Movie.1991.2160p.MULTI.COMPLETE.UHD.BLURAY-TEAM", true),
+            ("Film.2020.UHD.Blu-ray.COMPLETE.DISC", true),
+            ("Movie.2021.BDMV.COMPLETE", true),
+            
+            // Test generic patterns for various formats
+            ("Title.2023.UHD.BluRay.2160p.HEVC.DTS-HD.MA.7.1-GROUP", true),
+            ("Film.1995.COMPLETE.BLURAY-TEAM", true),
+            ("Movie.2020.Blu.ray.1080p.AVC.TrueHD.5.1-GROUP", true),
+            ("Title.2024.UHD.Blu-ray.COMPLETE.DISC.DV.HDR-TEAM", true),
+            ("Film.2022.BDMV.COMPLETE-GROUP", true),
+            ("Movie.2021.Full.Disc.1080p.AVC-TEAM", true),
+            
+            // Non-full-disc releases (encoded videos)
+            ("Movie.2020.1080p.x264-GROUP", false),
+            ("Show.S01E01.720p.HDTV.x264-GROUP", false),
+            ("Documentary.2021.WEB-DL.1080p", false),
+            ("random_folder", false),
+        ];
+
+        for (test_case, expected) in test_cases {
+            let result = is_full_disc_release(test_case);
+            assert_eq!(
+                result, expected,
+                "Full disc test failed for '{}': expected {}, got {}",
+                test_case, expected, result
+            );
+        }
+    }
+
+    #[test]
+    fn test_full_disc_classification() {
+        // Test generic full disc example
+        let metadata = classify_video_content("Movie.Title.1993.Bluray.1080p.AVC.DTS-HDMA5.1-GROUP");
+        
+        assert_eq!(metadata.category, VideoCategory::Movie, "Should be classified as Movie");
+        assert_eq!(metadata.source_type, VideoSourceType::FullDisc, "Should be classified as FullDisc");
+        assert_eq!(metadata.year, Some(1993), "Should extract year 1993");
+        assert!(metadata.title.contains("Movie"), "Should extract title");
+        
+        // Test another full disc example
+        let metadata2 = classify_video_content("Film.Name.1969.2160p.COMPLETE.UHD.BLURAY-TEAM");
+        assert_eq!(metadata2.category, VideoCategory::Movie, "Should be classified as Movie");
+        assert_eq!(metadata2.source_type, VideoSourceType::FullDisc, "Should be classified as FullDisc");
+        assert_eq!(metadata2.year, Some(1969), "Should extract year 1969");
+    }
+
+    #[test]
+    fn test_iso_movie_detection() {
+        // Test that movie ISOs are detected as video files
+        let temp_dir = std::env::temp_dir();
+        let test_dir = temp_dir.join("Movie Title 2011 Blu-ray AVC 1080p DTS-HD 7.1");
+        std::fs::create_dir_all(&test_dir).unwrap();
+        
+        let iso_file = test_dir.join("MOVIE_TITLE.iso");
+        std::fs::write(&iso_file, b"fake iso content").unwrap();
+        
+        // Test detection on the ISO file directly
+        let result = detect_video_files(iso_file.to_str().unwrap());
+        
+        // Clean up
+        std::fs::remove_dir_all(&test_dir).ok();
+        
+        assert!(result.is_ok(), "Should detect ISO as video file");
+        let video_files = result.unwrap();
+        assert!(!video_files.is_empty(), "Should find at least one video file");
+        assert_eq!(video_files[0].video_type, VideoType::Directory, "ISO should be treated as Directory type");
+        
+        // Test classification - use the directory path which has the year and blu-ray pattern
+        let metadata = classify_video_content("Movie Title 2011 Blu-ray AVC 1080p DTS-HD 7.1");
+        assert_eq!(metadata.category, VideoCategory::Movie, "Directory should be classified as Movie");
+        assert_eq!(metadata.source_type, VideoSourceType::FullDisc, "Directory should be classified as FullDisc");
+        
+        // Test ISO file with parent directory context (the real scenario)
+        let iso_with_context = classify_video_content("Movie Title 2011 Blu-ray AVC 1080p DTS-HD 7.1/MOVIE_TITLE.iso");
+        assert_eq!(iso_with_context.category, VideoCategory::Movie, "ISO with context should be classified as Movie");
+        assert_eq!(iso_with_context.source_type, VideoSourceType::FullDisc, "ISO with context should be classified as FullDisc");
+        
+        // Test generic ISO without context - should fall back gracefully
+        println!("Testing generic ISO classification...");
+        let iso_metadata = classify_video_content("MOVIE_TITLE.iso");
+        println!("Result: category={:?}, source_type={:?}", iso_metadata.category, iso_metadata.source_type);
+    }
+}
+
 /// Detect video files in a path (without classification)
 pub fn detect_video_files(path: &str) -> Result<Vec<VideoFile>, String> {
     let mut video_files = Vec::new();
     detect_video_files_recursive(Path::new(path), &mut video_files)?;
+    
+    // If no actual video files found, check if directory name looks like video content
+    if video_files.is_empty() {
+        let path_obj = Path::new(path);
+        if path_obj.is_dir() {
+            if let Some(dir_name) = path_obj.file_name().and_then(|n| n.to_str()) {
+                if looks_like_video_release(dir_name) {
+                    // Create a virtual video file entry for the directory
+                    video_files.push(VideoFile {
+                        path: path_obj.to_path_buf(),
+                        video_type: VideoType::Directory, // We'll need to add this variant
+                    });
+                }
+            }
+        }
+    }
+    
     Ok(video_files)
 }
 
@@ -710,6 +942,25 @@ fn detect_video_files_recursive(
                     path: path.to_path_buf(),
                     video_type,
                 });
+            } else if extension.to_lowercase() == "iso" || extension.to_lowercase() == "m2ts" {
+                // Check if this disc file (ISO/M2TS) looks like a movie release
+                if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+                    // Check both the filename and parent directory for movie patterns
+                    let parent_dir_name = path.parent()
+                        .and_then(|p| p.file_name())
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("");
+                    
+                    if looks_like_video_release(filename) || 
+                       looks_like_video_release(parent_dir_name) ||
+                       is_full_disc_release(filename) ||
+                       is_full_disc_release(parent_dir_name) {
+                        video_files.push(VideoFile {
+                            path: path.to_path_buf(),
+                            video_type: VideoType::Directory, // Treat disc files as disc content
+                        });
+                    }
+                }
             }
         }
     } else if path.is_dir() {
@@ -725,6 +976,77 @@ fn detect_video_files_recursive(
     }
 
     Ok(())
+}
+
+/// Check if a directory name indicates a full disc/complete release
+pub fn is_full_disc_release(dir_name: &str) -> bool {
+    use regex::Regex;
+    
+    // Patterns that indicate full disc releases
+    let full_disc_regex = Regex::new(r"(?i)\b(complete|full\.?disc|complete\.?disc|bdmv|disc\.?image)\b").unwrap();
+    let bluray_regex = Regex::new(r"(?i)\b(blu.?ray|bluray|uhdbd|uhd\.?blu.?ray)\b").unwrap();
+    let year_regex = Regex::new(r"\b(19|20)\d{2}\b").unwrap();
+    
+    // Strong indicators of full disc releases
+    if full_disc_regex.is_match(dir_name) {
+        return true;
+    }
+    
+    // Movie with bluray + year is likely a full disc if it contains "bluray" or "complete"
+    if year_regex.is_match(dir_name) && bluray_regex.is_match(dir_name) {
+        return true;
+    }
+    
+    false
+}
+
+/// Check if a directory name looks like a video release based on common patterns
+pub fn looks_like_video_release(dir_name: &str) -> bool {
+    use regex::Regex;
+    
+    // Initialize regex patterns for video content detection
+    let season_episode_regex = Regex::new(r"(?i)S(\d{1,2})E(\d{1,3})").unwrap();
+    let season_only_regex = Regex::new(r"(?i)S(\d{1,2})").unwrap();
+    let episode_only_regex = Regex::new(r"(?i)\bE(\d{1,4})\b").unwrap();
+    let year_regex = Regex::new(r"\b(19|20)\d{2}\b").unwrap();
+    let resolution_regex = Regex::new(r"(?i)\b(2160p|1080p|720p|480p|4K|UHD|HD)\b").unwrap();
+    let source_regex = Regex::new(r"(?i)\b(BluRay|Blu-ray|WebDL|WEB-DL|WebRip|WEB-Rip|HDTV|DVDRip|Remux|UHDBluRay)\b").unwrap();
+    let codec_regex = Regex::new(r"(?i)\b(HEVC|x265|x264|AVC|H\.264|H\.265)\b").unwrap();
+    let audio_regex = Regex::new(r"(?i)\b(DTS|DTS-HD|TrueHD|DD|AC3|AAC|FLAC|Atmos)\b").unwrap();
+    let quality_regex = Regex::new(r"(?i)\b(COMPLETE|PROPER|REPACK|INTERNAL|LIMITED|UNCUT|EXTENDED|DIRECTORS?\.CUT)\b").unwrap();
+    
+    // Check for TV show patterns (strong indicators)
+    if season_episode_regex.is_match(dir_name) 
+        || episode_only_regex.is_match(dir_name)
+        || season_only_regex.is_match(dir_name) {
+        return true;
+    }
+    
+    // Check for movie patterns (year + technical specs)
+    let has_year = year_regex.is_match(dir_name);
+    let has_resolution = resolution_regex.is_match(dir_name);
+    let has_source = source_regex.is_match(dir_name);
+    let has_codec = codec_regex.is_match(dir_name);
+    let has_audio = audio_regex.is_match(dir_name);
+    let has_quality = quality_regex.is_match(dir_name);
+    
+    // Strong movie indicators: year + at least 2 technical specs
+    if has_year && [has_resolution, has_source, has_codec, has_audio, has_quality].iter().filter(|&&x| x).count() >= 2 {
+        return true;
+    }
+    
+    // Medium confidence: year + resolution (common for movies)
+    if has_year && has_resolution {
+        return true;
+    }
+    
+    // Check for common scene group suffixes
+    let group_regex = Regex::new(r"(?i)-([A-Z0-9]+)$").unwrap();
+    if has_year && group_regex.is_match(dir_name) {
+        return true;
+    }
+    
+    false
 }
 
 /// Convert VideoFile to MediaFile
@@ -750,12 +1072,29 @@ pub fn classify_video_content(path: &str) -> VideoMetadata {
             .to_string_lossy()
             .to_string()
     } else {
-        // Use filename for single files
-        path_obj
+        // For files, check if it's an ISO and use parent directory if available
+        let filename = path_obj
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
-            .to_string()
+            .to_string();
+            
+        // If this is an ISO file, try to use parent directory for better classification
+        if filename.to_lowercase().ends_with(".iso") {
+            if let Some(parent_dir) = path_obj.parent().and_then(|p| p.file_name()) {
+                let parent_name = parent_dir.to_string_lossy().to_string();
+                // Use parent directory if it looks like a video release
+                if looks_like_video_release(&parent_name) || is_full_disc_release(&parent_name) {
+                    parent_name
+                } else {
+                    filename
+                }
+            } else {
+                filename
+            }
+        } else {
+            filename
+        }
     };
     let filename = filename_str.as_str();
 
@@ -829,7 +1168,7 @@ pub fn classify_video_content(path: &str) -> VideoMetadata {
         metadata.episode = Some(0); // Season pack has no specific episode
         metadata.is_boxset = true; // Season-only pattern indicates a boxset/season pack
         metadata.title = extract_title_before_pattern(filename, &season_only_regex);
-    } else if boxset_regex.is_match(filename) {
+    } else if boxset_regex.is_match(filename) && !is_full_disc_release(filename) {
         info!("Matched boxset keywords in filename: {}", filename);
         metadata.category = VideoCategory::TvShow;
         metadata.is_boxset = true;
@@ -909,7 +1248,7 @@ pub fn classify_video_content(path: &str) -> VideoMetadata {
     // First check if this is a boxset/season pack
     if metadata.is_boxset {
         metadata.source_type = VideoSourceType::SeasonPack;
-    } else if iso_regex.is_match(filename) || full_disc_regex.is_match(filename) {
+    } else if iso_regex.is_match(filename) || full_disc_regex.is_match(filename) || is_full_disc_release(filename) {
         metadata.source_type = VideoSourceType::FullDisc;
     } else if uhd_bluray_regex.is_match(filename) {
         metadata.source_type = VideoSourceType::UHDBluRay;

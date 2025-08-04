@@ -2403,6 +2403,12 @@ impl UploadProcessor {
             form = form.text("keywords", keywords.clone());
         }
 
+        // Add mediainfo if present
+        if let Some(mediainfo) = form_data.get("mediainfo") {
+            info!("  mediainfo: included ({} chars)", mediainfo.len());
+            form = form.text("mediainfo", mediainfo.clone());
+        }
+
         // Add TV show specific fields
         if let Some(resolution_id) = form_data.get("resolution_id") {
             info!("  resolution_id: {}", resolution_id);

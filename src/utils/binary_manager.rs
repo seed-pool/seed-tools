@@ -466,7 +466,7 @@ impl BinaryManager {
         build_dir: &Path,
         install_prefix: &Path,
     ) -> Result<(), String> {
-        let libzen_url = "https://mediaarea.net/download/binary/libzen0/0.4.41/libzen_0.4.41_GNU_FromSource.tar.xz";
+        let libzen_url = "https://mediaarea.net/download/source/libzen/0.4.41/libzen_0.4.41.tar.xz";
         let libzen_archive = build_dir.join("libzen.tar.xz");
 
         // Download libzen
@@ -498,7 +498,7 @@ impl BinaryManager {
             .map_err(|e| format!("Failed to extract libzen: {}", e))?;
 
         // Find libzen source directory
-        let libzen_source = libzen_extract_dir.join("ZenLib_GNU_FromSource/Project/GNU/Library");
+        let libzen_source = libzen_extract_dir.join("ZenLib/Project/GNU/Library");
         if !libzen_source.exists() {
             return Err("libzen source directory not found".to_string());
         }
@@ -581,7 +581,7 @@ impl BinaryManager {
         libzen_prefix: &Path,
         install_prefix: &Path,
     ) -> Result<(), String> {
-        let libmediainfo_url = "https://mediaarea.net/download/binary/libmediainfo0/25.04/libmediainfo_25.04_GNU_FromSource.tar.xz";
+        let libmediainfo_url = "https://mediaarea.net/download/source/libmediainfo/25.07/libmediainfo_25.07.tar.xz";
         let libmediainfo_archive = build_dir.join("libmediainfo.tar.xz");
 
         // Download libmediainfo
@@ -617,7 +617,7 @@ impl BinaryManager {
 
         // Find libmediainfo source directory
         let libmediainfo_source =
-            libmediainfo_extract_dir.join("MediaInfoLib_GNU_FromSource/Project/GNU/Library");
+            libmediainfo_extract_dir.join("MediaInfoLib/Project/GNU/Library");
         if !libmediainfo_source.exists() {
             return Err("libmediainfo source directory not found".to_string());
         }

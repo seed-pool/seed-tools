@@ -16,6 +16,7 @@ pub enum VideoType {
     Ts,
     Mpg,
     Mpeg,
+    Directory, // For directories identified as video content by name patterns
 }
 
 impl VideoType {

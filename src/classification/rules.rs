@@ -28,6 +28,21 @@ pub fn classify_video_rules(metadata: &JsonValue) -> Option<String> {
     let year_regex = Regex::new(r"\b(19|20)\d{2}\b").unwrap();
     let full_date_regex =
         Regex::new(r"\b((19|20)\d{2})[.\-](0[1-9]|1[0-2])[.\-](0[1-9]|[12][0-9]|3[01])\b").unwrap();
+    
+    // Full disc detection patterns to prevent misclassification of movie discs as TV boxsets
+    let full_disc_regex = Regex::new(r"(?i)\b(complete|full\.?disc|complete\.?disc|bdmv|disc\.?image)\b").unwrap();
+    let bluray_year_regex = Regex::new(r"(?i)\b(blu.?ray|bluray|uhdbd|uhd\.?blu.?ray)\b").unwrap();
+    
+    // Helper function to check if this is a full disc release
+    let is_full_disc = || {
+        if full_disc_regex.is_match(filename) {
+            return true;
+        }
+        if year_regex.is_match(filename) && bluray_year_regex.is_match(filename) {
+            return true;
+        }
+        false
+    };
 
     // Content type patterns
     let anime_regex = Regex::new(r"(?i)\b(anime|dubbed|subbed|jpn|japanese|[Ss]ub|[Dd]ub|naruto|one\.piece|attack\.on\.titan|bleach|dragon\.ball|demon\.slayer|jujutsu\.kaisen|my\.hero\.academia|boku\.no\.hero|death\.note|hunter\.x\.hunter|fullmetal\.alchemist|sword\.art\.online|tokyo\.ghoul|steins\.gate|evangelion|cowboy\.bebop|one\.punch\.man|mob\.psycho|chainsaw\.man|spy\.x\.family|vinland\.saga|haikyuu|fairy\.tail|black\.clover|boruto|shippuden|kimetsu\.no\.yaiba)\b").unwrap();
@@ -46,7 +61,7 @@ pub fn classify_video_rules(metadata: &JsonValue) -> Option<String> {
     let category = if season_episode_regex.is_match(filename)
         || episode_only_regex.is_match(filename)
         || season_only_regex.is_match(filename)
-        || boxset_regex.is_match(filename)
+        || (boxset_regex.is_match(filename) && !is_full_disc()) // Don't treat full disc releases as TV boxsets
         || full_date_regex.is_match(filename)
     {
         // TV Show patterns take priority
