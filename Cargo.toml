@@ -39,6 +39,10 @@ zip = "2.1"
 which = "6.0"
 async-trait = "0.1.88"
 uuid = { version = "1.10", features = ["v4"] }
+# Image generation dependencies
+image = "0.25"
+imageproc = "0.25"
+ab_glyph = "0.2"
 
 [package.metadata.bundle]
 resources = ["binaries/"]

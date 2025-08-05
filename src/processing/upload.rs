@@ -1,5 +1,5 @@
 use crate::core::{Config, MediaType, UploadComponent};
-use crate::metadata::tmdb::{fetch_external_ids, fetch_tmdb_id, fetch_youtube_trailer};
+use crate::metadata::tmdb::{fetch_external_ids, fetch_tmdb_id};
 use crate::processing::components::mediainfo_utils::generate_mediainfo;
 use crate::processing::description::DescriptionConfig;
 use crate::utils::{check_all_duplicates, find_and_read_nfo};
@@ -69,6 +69,7 @@ pub struct UploadConfig {
     pub skip_tmdb: bool,
     pub skip_torrent_creation: bool,
     pub skip_cover_art: bool,
+    pub enable_alt_description: bool,
     pub screenshot_count: usize,
     pub announce_url: Option<String>,
 }
@@ -85,6 +86,7 @@ impl Default for UploadConfig {
             skip_tmdb: false,
             skip_torrent_creation: false,
             skip_cover_art: false,
+            enable_alt_description: false,
             screenshot_count: 4,
             announce_url: None,
         }
@@ -323,6 +325,7 @@ impl UploadBuilder {
             self.upload_config.skip_tmdb = !seedpool_config.settings.enable_tmdb;
             self.upload_config.skip_torrent_creation =
                 !seedpool_config.settings.enable_torrent_creation;
+            self.upload_config.enable_alt_description = seedpool_config.settings.enable_alt_description;
             self.upload_config.screenshot_count = seedpool_config.settings.screenshot_count;
 
             if seedpool_config.settings.enable_torrent_creation {
@@ -367,6 +370,7 @@ impl UploadBuilder {
             self.upload_config.skip_tmdb = !torrentleech_config.settings.enable_tmdb;
             self.upload_config.skip_torrent_creation =
                 !torrentleech_config.settings.enable_torrent_creation;
+            self.upload_config.enable_alt_description = torrentleech_config.settings.enable_alt_description;
             self.upload_config.screenshot_count = torrentleech_config.settings.screenshot_count;
 
             if torrentleech_config.settings.enable_torrent_creation
@@ -656,34 +660,47 @@ impl UploadBuilder {
                                     },
                                 );
 
-                                // Fetch YouTube trailer if YouTube API key is configured
-                                if let Some(ref youtube_api_key) =
-                                    self.config.general.youtube_api_key
-                                {
-                                    if !youtube_api_key.is_empty() {
-                                        match fetch_youtube_trailer(
-                                            &metadata.title,
-                                            metadata.year.map(|y| y.to_string()).as_deref(),
-                                            youtube_api_key,
-                                        ) {
-                                            Ok(trailer_url) => {
-                                                info!("Found YouTube trailer: {}", trailer_url);
-                                                self.components.insert(
-                                                    "trailer".to_string(),
-                                                    UploadComponent::Trailer {
-                                                        url: trailer_url,
-                                                        platform: "YouTube".to_string(),
-                                                    },
-                                                );
-                                            }
-                                            Err(e) => {
-                                                info!("No YouTube trailer found: {}", e);
-                                            }
-                                        }
-                                    }
-                                }
+
                             }
                             Err(e) => info!("Failed to fetch TMDB ID: {}", e),
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fetch YouTube trailer if YouTube API key is configured and we have video content
+        if !self.upload_config.skip_tmdb && matches!(self.media_type, MediaType::Video(_)) {
+            if let Some(ref youtube_api_key) = self.config.general.youtube_api_key {
+                if !youtube_api_key.is_empty() && !self.components.contains_key("trailer") {
+                    // Get title and year from video metadata or TMDB component
+                    let (title, year) = if let Some(metadata) = &self.video_metadata {
+                        (metadata.title.clone(), metadata.year.map(|y| y.to_string()))
+                    } else if let Some(UploadComponent::TmdbData { title, year, .. }) = self.components.get("tmdb") {
+                        (title.clone(), year.clone())
+                    } else {
+                        (String::new(), None)
+                    };
+
+                    if !title.is_empty() {
+                        match crate::metadata::tmdb::fetch_youtube_trailer(
+                            &title,
+                            year.as_deref(),
+                            youtube_api_key,
+                        ) {
+                            Ok(trailer_url) => {
+                                info!("Found YouTube trailer: {}", trailer_url);
+                                self.components.insert(
+                                    "trailer".to_string(),
+                                    UploadComponent::Trailer {
+                                        url: trailer_url,
+                                        platform: "YouTube".to_string(),
+                                    },
+                                );
+                            }
+                            Err(e) => {
+                                info!("No YouTube trailer found: {}", e);
+                            }
                         }
                     }
                 }
@@ -1690,7 +1707,29 @@ impl UploadBuilder {
             metadata["trailer_platform"] = serde_json::json!(platform);
         }
 
-        // Add any TMDB data if available
+        // 🚨 DEBUG: Verify this code is running
+        log::info!("🚨 ALT_DESC_FIX: Starting TMDB extraction from cached_metadata");
+        
+        // Add ALL TMDB data from cached_metadata (this contains the rich data)
+        if let Some(cached_metadata) = &self.cached_metadata {
+            log::info!("🚨 ALT_DESC_FIX: cached_metadata exists");
+            if let Some(cached_obj) = cached_metadata.as_object() {
+                log::info!("🚨 ALT_DESC_FIX: cached_metadata is object with {} keys", cached_obj.len());
+                // Extract all TMDB-related fields from cached metadata
+                for (key, value) in cached_obj {
+                    if key.starts_with("tmdb_") {
+                        metadata[key] = value.clone();
+                        log::info!("🔄 EXTRACTED TMDB field '{}': {:?}", key, value);
+                    }
+                }
+            } else {
+                log::info!("🚨 ALT_DESC_FIX: cached_metadata is NOT an object: {:?}", cached_metadata);
+            }
+        } else {
+            log::info!("🚨 ALT_DESC_FIX: cached_metadata is None");
+        }
+        
+        // Add basic TMDB data from TmdbData component (if any are missing)
         if let Some(UploadComponent::TmdbData {
             tmdb_id,
             imdb_id,
@@ -1700,16 +1739,26 @@ impl UploadBuilder {
             ..
         }) = self.components.get("tmdb")
         {
-            metadata["tmdb_id"] = serde_json::json!(tmdb_id);
+            if metadata.get("tmdb_id").is_none() {
+                metadata["tmdb_id"] = serde_json::json!(tmdb_id);
+            }
             if let Some(imdb) = imdb_id {
-                metadata["tmdb_imdb_id"] = serde_json::json!(imdb);
+                if metadata.get("tmdb_imdb_id").is_none() {
+                    metadata["tmdb_imdb_id"] = serde_json::json!(imdb);
+                }
             }
             if let Some(tvdb) = tvdb_id {
-                metadata["tmdb_tvdb_id"] = serde_json::json!(tvdb);
+                if metadata.get("tmdb_tvdb_id").is_none() {
+                    metadata["tmdb_tvdb_id"] = serde_json::json!(tvdb);
+                }
             }
-            metadata["tmdb_title"] = serde_json::json!(title);
+            if metadata.get("tmdb_title").is_none() {
+                metadata["tmdb_title"] = serde_json::json!(title);
+            }
             if let Some(y) = year {
-                metadata["tmdb_year"] = serde_json::json!(y);
+                if metadata.get("tmdb_year").is_none() {
+                    metadata["tmdb_year"] = serde_json::json!(y);
+                }
             }
         }
 
@@ -1735,9 +1784,9 @@ impl UploadBuilder {
                 }
             }
 
-            // Create DescriptionComponent only if one doesn't already exist
+            // Create DescriptionComponent only if one doesn't already exist  
             let mut desc_component =
-                DescriptionComponent::new(self.input_path.clone(), self.media_type.clone(), metadata);
+                DescriptionComponent::new(self.input_path.clone(), self.media_type.clone(), metadata.clone());
 
             // Add screenshots and thumbnails together
             let screenshots =
@@ -1773,25 +1822,248 @@ impl UploadBuilder {
                 desc_component = desc_component.with_template(template.clone());
             }
 
-            // Process the component to generate description
-            match desc_component.process() {
-                Ok(result) => {
-                    if let Some(description) = result.data {
+            // Check if alt description (image) mode is enabled
+            if self.upload_config.enable_alt_description {
+                // 🚨 DEBUG: Log what metadata is being passed to alt_description
+                log::info!("🚨 ALT_DESC_FIX: Final metadata keys being passed to alt_description: {:?}", 
+                          metadata.as_object().map(|obj| obj.keys().collect::<Vec<_>>()).unwrap_or_default());
+                
+                // Use new image-based description generation
+                let description_result = self.generate_alt_description(&metadata)?;
+                
+                match description_result {
+                    crate::processing::DescriptionResult::Image { path, filename } => {
+                        // Upload the image description to CDN/ImgBB and get the final description
+                        let final_description = self.upload_and_build_alt_description(&path, &filename)?;
+                        
+                        self.components.insert(
+                            "description".to_string(),
+                            UploadComponent::Description(final_description),
+                        );
+                        
+                        info!("📸 Generated and uploaded image-based description: {}", filename);
+                    }
+                    crate::processing::DescriptionResult::BBCode(description) => {
                         self.components.insert(
                             "description".to_string(),
                             UploadComponent::Description(description),
                         );
-                    } else {
-                        return Err("Description component returned no data".to_string());
                     }
                 }
-                Err(e) => return Err(format!("Failed to generate description: {:?}", e)),
+            } else {
+                // Use traditional BBCode description generation
+                match desc_component.process() {
+                    Ok(result) => {
+                        if let Some(description) = result.data {
+                            self.components.insert(
+                                "description".to_string(),
+                                UploadComponent::Description(description),
+                            );
+                        } else {
+                            return Err("Description component returned no data".to_string());
+                        }
+                    }
+                    Err(e) => return Err(format!("Failed to generate description: {:?}", e)),
+                }
             }
         } else {
             info!("📝 Description component already exists, skipping template-based generation");
         }
 
         Ok(())
+    }
+    
+    /// Generate alt description (image-based) from metadata
+    fn generate_alt_description(
+        &self,
+        metadata: &serde_json::Value,
+    ) -> Result<crate::processing::DescriptionResult, String> {
+        // Get the output directory - use screenshots directory or temp
+        let output_dir = if let Some(UploadComponent::Metadata(tracker_metadata)) = self.components.get("tracker_config") {
+            tracker_metadata.get("screenshots_dir").cloned().unwrap_or_else(|| "/tmp".to_string())
+        } else {
+            "/tmp".to_string()
+        };
+        
+        // Generate filename based on the actual release name (input path), not title
+        let release_name = std::path::Path::new(&self.input_path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| {
+                // Remove file extension but preserve all dots in the release name
+                if let Some(dot_pos) = s.rfind('.') {
+                    s[..dot_pos].to_string()
+                } else {
+                    s.to_string()
+                }
+            })
+            .unwrap_or_else(|| "description".to_string());
+        
+        // Use the alt_description module to generate from metadata
+        crate::processing::alt_description::generate_from_metadata(
+            metadata,
+            &self.upload_config,
+            &output_dir,
+            &release_name,
+        )
+    }
+    
+    /// Upload description image and build final description with screenshots and samples
+    fn upload_and_build_alt_description(
+        &self,
+        image_path: &str,
+        filename: &str,
+    ) -> Result<String, String> {
+        // Get tracker configuration for upload settings
+        let (has_imgbb, imgbb_api_key, has_cdn, remote_path, image_base_url) = 
+            if let Some(UploadComponent::Metadata(tracker_metadata)) = self.components.get("tracker_config") {
+                let imgbb_key = tracker_metadata.get("imgbb_api_key").cloned();
+                let has_imgbb = imgbb_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false);
+                
+                let remote = tracker_metadata.get("remote_path").cloned();
+                let image_url = tracker_metadata.get("image_path").cloned();
+                let has_cdn = remote.as_ref().map(|r| !r.is_empty()).unwrap_or(false) 
+                    && image_url.as_ref().map(|i| !i.is_empty()).unwrap_or(false);
+                
+                (has_imgbb, imgbb_key, has_cdn, remote, image_url)
+            } else {
+                (false, None, false, None, None)
+            };
+        
+        // Upload the description image
+        let image_url = if has_imgbb {
+            // Upload to ImgBB
+            let api_key = imgbb_api_key.as_ref().unwrap();
+            info!("Uploading description image to ImgBB: {}", filename);
+            
+            let (full_url, _thumb_url) = crate::utils::upload_to_imgbb(
+                image_path, 
+                api_key, 
+                self.upload_config.dry_run
+            ).map_err(|e| format!("Failed to upload description image to ImgBB: {}", e))?;
+            
+            full_url
+        } else if has_cdn {
+            // Upload to CDN
+            let remote = remote_path.as_ref().unwrap();
+            let base_url = image_base_url.as_ref().unwrap();
+            
+            info!("Uploading description image to CDN: {}", filename);
+            
+            let remote_file_path = format!("{}/screenshots/{}", remote.trim_end_matches('/'), filename);
+            
+            if !self.upload_config.dry_run {
+                crate::utils::upload_to_cdn(image_path, &remote_file_path)
+                    .map_err(|e| format!("Failed to upload description image to CDN: {}", e))?;
+            } else {
+                info!("[DRY RUN] Would upload description image to CDN: {}", remote_file_path);
+            }
+            
+            format!("{}/{}", base_url.trim_end_matches('/'), filename)
+        } else {
+            return Err("No image upload method available (no ImgBB API key or CDN configuration)".to_string());
+        };
+        
+        // Build the final description combining image + screenshots + samples (using exact regular description format)
+        let mut final_description = format!("[img]{}[/img]\n\n", image_url);
+        
+        // Add screenshots if available (using EXACT format from regular descriptions)
+        if let Some(UploadComponent::Screenshots(screenshots)) = self.components.get("screenshots") {
+            if !screenshots.is_empty() {
+                let thumbnails = if let Some(UploadComponent::Thumbnails(thumbs)) = self.components.get("thumbnails") {
+                    thumbs.clone()
+                } else {
+                    Vec::new()
+                };
+                
+                // Use the EXACT Grid2x2 format from regular descriptions (lines 264-285 in description.rs)
+                final_description.push_str("[tr]\n");
+                
+                for (i, screenshot_url) in screenshots.iter().enumerate() {
+                    // Use thumbnail if available, otherwise use full screenshot
+                    let thumb_url = thumbnails.get(i).unwrap_or(screenshot_url);
+                    
+                    final_description.push_str(&format!(
+                        "        [td][url={}][img width=720]{}[/img][/url][/td]\n",
+                        screenshot_url, thumb_url
+                    ));
+                    
+                    // Add new row every 2 images
+                    if (i + 1) % 2 == 0 && i + 1 < screenshots.len() {
+                        final_description.push_str("    [/tr]\n    [tr]\n");
+                    }
+                }
+                
+                // Close the last row properly
+                if screenshots.len() % 2 != 0 {
+                    final_description.push_str("    [/tr]\n\n");
+                } else {
+                    final_description.push_str("    [/tr]\n\n");
+                }
+            }
+        }
+        
+        // Add sample if available
+        if let Some(UploadComponent::Sample { url, filename: sample_filename }) = self.components.get("sample") {
+            final_description.push_str(&format!("[b][spoiler=Sample: {}]{}[/spoiler][/b]\n\n", sample_filename, url));
+        }
+        
+        // Add trailer if available (check both component and cached metadata)
+        let trailer_added = if let Some(UploadComponent::Trailer { url, platform }) = self.components.get("trailer") {
+            final_description.push_str(&format!("[center][b][url={}][Trailer on {}][/url][/b][/center]\n\n", url, platform));
+            true
+        } else {
+            false
+        };
+        
+        // Also check for trailer in cached metadata (from TMDB data)
+        if !trailer_added {
+            if let Some(ref cached_metadata) = self.cached_metadata {
+                if let Some(obj) = cached_metadata.as_object() {
+                    if let Some(trailer_url) = obj.get("tmdb_trailer_url").and_then(|v| v.as_str()) {
+                        info!("🎬 Adding trailer from cached metadata: {}", trailer_url);
+                        final_description.push_str(&format!("[center][b][url={}][Trailer on YouTube][/url][/b][/center]\n\n", trailer_url));
+                    } else {
+                        info!("⚠️ No tmdb_trailer_url found in cached metadata");
+                    }
+                } else {
+                    info!("⚠️ Cached metadata is not an object");
+                }
+            } else {
+                info!("⚠️ No cached metadata available for trailer check");
+            }
+        } else {
+            info!("✅ Trailer already added from component");
+        }
+        
+        // Add custom description if available
+        if let Some(UploadComponent::Metadata(tracker_metadata)) = self.components.get("tracker_config") {
+            if let Some(custom_desc) = tracker_metadata.get("custom_description") {
+                if !custom_desc.is_empty() {
+                    info!("📝 Adding custom description from tracker config: {} chars", custom_desc.len());
+                    final_description.push_str(&format!("{}\n\n", custom_desc));
+                }
+            }
+        }
+        
+        // Add default footer (same as regular descriptions)
+        let default_footer = format!(
+            "[center][b][size=12][color=#757575]Created with mkbrr, ffmpeg, and mediainfo. Posted to this fine tracker with seedbrr.[/color][/size][/b]\n\n[url=https://github.com/seed-pool/seed-tools][img]https://cdn.seedpool.org/sp.png[/img][/url]  [url=https://github.com/autobrr/mkbrr][img]https://cdn.seedpool.org/mkbrr.png[/img][/url]  [url=https://www.rust-lang.org][img]https://cdn.seedpool.org/rust.png[/img][/url][/center]"
+        );
+        final_description.push_str(&default_footer);
+        
+        // Clean up the generated image file
+        if !self.upload_config.dry_run {
+            if let Err(e) = std::fs::remove_file(image_path) {
+                info!("Warning: Failed to clean up description image file {}: {}", image_path, e);
+            }
+        }
+        
+        // Wrap entire description in center tags like regular descriptions
+        let centered_description = format!("[center]\n{}\n[/center]", final_description);
+        
+        info!("📸 Final description created with image URL: {}", image_url);
+        Ok(centered_description)
     }
 }
 
@@ -1819,6 +2091,7 @@ impl TrackerUploadExt for UploadBuilder {
         self.upload_config.skip_tmdb = !seedpool_config.settings.enable_tmdb;
         self.upload_config.skip_torrent_creation =
             !seedpool_config.settings.enable_torrent_creation;
+        self.upload_config.enable_alt_description = seedpool_config.settings.enable_alt_description;
         self.upload_config.screenshot_count = seedpool_config.settings.screenshot_count;
 
         // Add announce URL for torrent creation if enabled
@@ -1854,6 +2127,7 @@ impl TrackerUploadExt for UploadBuilder {
         self.upload_config.skip_sample = !tl_config.settings.enable_sample;
         self.upload_config.skip_tmdb = !tl_config.settings.enable_tmdb;
         self.upload_config.skip_torrent_creation = !tl_config.settings.enable_torrent_creation;
+        self.upload_config.enable_alt_description = tl_config.settings.enable_alt_description;
         self.upload_config.screenshot_count = tl_config.settings.screenshot_count;
 
         // Add announce URL for torrent creation if enabled

@@ -635,6 +635,8 @@ pub struct SeedpoolSettings {
     pub enable_torrent_creation: bool,
     #[serde(default = "default_duplicate_check_setting")]
     pub enable_duplicate_check: bool,
+    #[serde(default = "default_false")]
+    pub enable_alt_description: bool,
     #[serde(default = "default_screenshot_count")]
     pub screenshot_count: usize,
 }
@@ -685,6 +687,8 @@ pub struct TorrentLeechSettings {
     pub enable_torrent_creation: bool,
     #[serde(default = "default_true")]
     pub enable_duplicate_check: bool,
+    #[serde(default = "default_false")]
+    pub enable_alt_description: bool,
     #[serde(default = "default_screenshot_count")]
     pub screenshot_count: usize,
 }

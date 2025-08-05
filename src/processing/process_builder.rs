@@ -1265,6 +1265,11 @@ impl ProcessBuilder {
         let mut builder =
             UploadBuilder::new(&self.input_path, media_type.clone(), self.config.clone());
         info!("ProcessBuilder: build_upload_data - UploadBuilder created successfully");
+        
+        // 🚨 FIX: Pass the metadata to UploadBuilder so it can access rich TMDB data
+        builder = builder.with_cached_metadata(metadata.clone());
+        info!("ProcessBuilder: build_upload_data - Set cached metadata with {} fields", 
+              metadata.as_object().map(|obj| obj.len()).unwrap_or(0));
 
         // Apply description config if provided
         if let Some(desc_config) = &self.description_config {

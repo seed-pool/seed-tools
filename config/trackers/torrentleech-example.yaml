@@ -20,6 +20,7 @@ settings:
   enable_tmdb: true
   enable_torrent_creation: false
   enable_duplicate_check: true
+  enable_alt_description: false  # Generate image-based description instead of BBCode
   screenshot_count: 4
 
 # TorrentLeech category IDs

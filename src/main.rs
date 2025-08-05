@@ -289,13 +289,93 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // --- Handle Commands ---
     if let Some(command) = cli.command {
         match command {
-            Commands::Check { input_path } => {
-                let input_path_str = input_path.to_str().ok_or("Invalid input path string")?;
+            Commands::Check { mut input_path } => {
+                let mut input_path_str = input_path.to_str().ok_or("Invalid input path string")?;
                 info!("Running duplicate check for input path: {}", input_path_str);
 
                 // Validate input path
                 validate_file_path(input_path_str)
                     .map_err(|e| format!("Input path validation failed: {}", e))?;
+
+                // Check if we should move a single file from its containing directory to parent directory
+                let should_move_file = if input_path.is_dir() {
+                    // Case 1: User provided a directory path - check if it contains only one file
+                    let entries: Vec<_> = fs::read_dir(&input_path)
+                        .map_err(|e| format!("Failed to read directory: {}", e))?
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| format!("Failed to read directory entries: {}", e))?;
+                    
+                    // Filter to only files (not subdirectories)
+                    let files: Vec<_> = entries.iter()
+                        .filter(|entry| entry.path().is_file())
+                        .collect();
+                    
+                    files.len() == 1
+                } else if input_path.is_file() {
+                    // Case 2: User provided a file path - check if this file is the only file in its parent directory
+                    if let Some(parent_dir) = input_path.parent() {
+                        let entries: Vec<_> = fs::read_dir(parent_dir)
+                            .map_err(|e| format!("Failed to read parent directory: {}", e))?
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(|e| format!("Failed to read parent directory entries: {}", e))?;
+                        
+                        // Filter to only files (not subdirectories)
+                        let files: Vec<_> = entries.iter()
+                            .filter(|entry| entry.path().is_file())
+                            .collect();
+                        
+                        files.len() == 1
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                if should_move_file {
+                    let (source_file_path, target_parent_dir) = if input_path.is_dir() {
+                        // Directory case: get the single file in the directory
+                        let entries: Vec<_> = fs::read_dir(&input_path)
+                            .map_err(|e| format!("Failed to read directory: {}", e))?
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(|e| format!("Failed to read directory entries: {}", e))?;
+                        
+                        let single_file = entries.iter()
+                            .find(|entry| entry.path().is_file())
+                            .ok_or("No file found in directory")?;
+                        
+                        let file_path = single_file.path();
+                        let target_dir = input_path.parent()
+                            .ok_or("Directory has no parent")?;
+                        
+                        (file_path, target_dir)
+                    } else {
+                        // File case: move the file from its current directory to grandparent
+                        let current_dir = input_path.parent()
+                            .ok_or("File has no parent directory")?;
+                        let target_dir = current_dir.parent()
+                            .ok_or("Parent directory has no parent")?;
+                        
+                        (input_path.clone(), target_dir)
+                    };
+
+                    let file_name = source_file_path.file_name()
+                        .ok_or("Could not get filename")?;
+                    let new_file_path = target_parent_dir.join(file_name);
+                    
+                    info!("Moving single file '{}' to '{}'", 
+                          source_file_path.display(), new_file_path.display());
+                    
+                    // Move the file to parent directory
+                    fs::rename(&source_file_path, &new_file_path)
+                        .map_err(|e| format!("Failed to move file to parent directory: {}", e))?;
+                    
+                    // Update input_path to point to the moved file
+                    input_path = new_file_path;
+                    input_path_str = input_path.to_str().ok_or("Invalid moved file path string")?;
+                    
+                    info!("File moved successfully. Now processing: {}", input_path_str);
+                }
 
                 // Use the process builder for duplicate checking
                 match process_builder::duplicate_check_builder(
@@ -335,12 +415,92 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     // --- Handle Input Path Dependent Modes ---
-    if let Some(input_path) = cli.input_path {
-        let input_path_str = input_path.to_str().ok_or("Invalid input path string")?;
+    if let Some(mut input_path) = cli.input_path {
+        let mut input_path_str = input_path.to_str().ok_or("Invalid input path string")?;
 
         // Validate input path
         validate_file_path(input_path_str)
             .map_err(|e| format!("Input path validation failed: {}", e))?;
+
+        // Check if we should move a single file from its containing directory to parent directory
+        let should_move_file = if input_path.is_dir() {
+            // Case 1: User provided a directory path - check if it contains only one file
+            let entries: Vec<_> = fs::read_dir(&input_path)
+                .map_err(|e| format!("Failed to read directory: {}", e))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("Failed to read directory entries: {}", e))?;
+            
+            // Filter to only files (not subdirectories)
+            let files: Vec<_> = entries.iter()
+                .filter(|entry| entry.path().is_file())
+                .collect();
+            
+            files.len() == 1
+        } else if input_path.is_file() {
+            // Case 2: User provided a file path - check if this file is the only file in its parent directory
+            if let Some(parent_dir) = input_path.parent() {
+                let entries: Vec<_> = fs::read_dir(parent_dir)
+                    .map_err(|e| format!("Failed to read parent directory: {}", e))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| format!("Failed to read parent directory entries: {}", e))?;
+                
+                // Filter to only files (not subdirectories)
+                let files: Vec<_> = entries.iter()
+                    .filter(|entry| entry.path().is_file())
+                    .collect();
+                
+                files.len() == 1
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if should_move_file {
+            let (source_file_path, target_parent_dir) = if input_path.is_dir() {
+                // Directory case: get the single file in the directory
+                let entries: Vec<_> = fs::read_dir(&input_path)
+                    .map_err(|e| format!("Failed to read directory: {}", e))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| format!("Failed to read directory entries: {}", e))?;
+                
+                let single_file = entries.iter()
+                    .find(|entry| entry.path().is_file())
+                    .ok_or("No file found in directory")?;
+                
+                let file_path = single_file.path();
+                let target_dir = input_path.parent()
+                    .ok_or("Directory has no parent")?;
+                
+                (file_path, target_dir)
+            } else {
+                // File case: move the file from its current directory to grandparent
+                let current_dir = input_path.parent()
+                    .ok_or("File has no parent directory")?;
+                let target_dir = current_dir.parent()
+                    .ok_or("Parent directory has no parent")?;
+                
+                (input_path.clone(), target_dir)
+            };
+
+            let file_name = source_file_path.file_name()
+                .ok_or("Could not get filename")?;
+            let new_file_path = target_parent_dir.join(file_name);
+            
+            info!("Moving single file '{}' to '{}'", 
+                  source_file_path.display(), new_file_path.display());
+            
+            // Move the file to parent directory
+            fs::rename(&source_file_path, &new_file_path)
+                .map_err(|e| format!("Failed to move file to parent directory: {}", e))?;
+            
+            // Update input_path to point to the moved file
+            input_path = new_file_path;
+            input_path_str = input_path.to_str().ok_or("Invalid moved file path string")?;
+            
+            info!("File moved successfully. Now processing: {}", input_path_str);
+        }
 
         info!("Processing input path: {}", input_path_str);
 
