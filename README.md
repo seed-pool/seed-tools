@@ -31,17 +31,17 @@ cargo install --path .
 # Run interactive mode
 ./seedbrr
 
-# Upload a movie
-./seedbrr upload /path/to/movie.mkv --tracker seedpool
+# Upload to Seedpool
+./seedbrr /path/to/movie.mkv --SP
 
 # Upload with specific category (using 4-digit code)
-./seedbrr upload /path/to/content -t seedpool --code 0740
+./seedbrr /path/to/content --SP -c 0740
 
 # Dry run to preview without uploading
-./seedbrr upload /path/to/content -t seedpool --dry-run
+./seedbrr /path/to/content --SP --dry-run
 
 # Preflight check
-./seedbrr upload /path/to/content -t seedpool --pre
+./seedbrr /path/to/content --pre
 ```
 
 ## Installation
@@ -56,7 +56,6 @@ cd seedbrr
 # Build release version
 cargo build --release
 # The binary will be at target/release/seedbrr
-./build.sh # will generate you a seedbrr binary at your location
 ```
 
 ### Setup
@@ -83,10 +82,7 @@ seedbrr/
 
 ## Usage Examples
 
-### Interactive UI Mode
-```bash
-./seedbrr
-```
+
 Navigate with arrow keys, select content, and upload with a few clicks!
 
 ### Command Line Mode
@@ -94,52 +90,52 @@ Navigate with arrow keys, select content, and upload with a few clicks!
 #### Video Uploads (Movies/TV Shows)
 ```bash
 # Upload to Seedpool
-./seedbrr upload /path/to/movie.mkv --tracker seedpool
+./seedbrr /path/to/movie.mkv --SP
 
-# Upload to multiple trackers
-./seedbrr upload /path/to/movie.mkv -t seedpool -t torrentleech
+# Upload to TorrentLeech
+./seedbrr /path/to/movie.mkv --TL
 
 # Preflight check (preview without uploading)
-./seedbrr upload /path/to/movie.mkv -t seedpool --pre
+./seedbrr /path/to/movie.mkv --pre
 
 # Dry run (full process without final upload)
-./seedbrr upload /path/to/movie.mkv -t seedpool --dry-run
+./seedbrr /path/to/movie.mkv --SP --dry-run
 ```
 
 #### Music Uploads
 ```bash
 # Upload album with automatic MusicBrainz lookup
-./seedbrr upload "/path/to/Artist - Album [FLAC]" -t seedpool
+./seedbrr "/path/to/Artist - Album [FLAC]" --SP
 
 # Upload with specific audio category
-./seedbrr upload /path/to/album -t seedpool --code 0140
+./seedbrr /path/to/album --SP -c 0140
 ```
 
 #### E-Book Uploads
 ```bash
 # Upload ebook with Open Library integration
-./seedbrr upload /path/to/book.epub -t seedpool
+./seedbrr /path/to/book.epub --SP
 
 # Upload comic book archive
-./seedbrr upload /path/to/comic.cbz -t seedpool --code 0740
+./seedbrr /path/to/comic.cbz --SP -c 0740
 
 # Upload with specific ebook category
-./seedbrr upload /path/to/book.pdf -t seedpool --code 0720
+./seedbrr /path/to/book.pdf --SP -c 0720
 ```
 
 #### Game Uploads
 ```bash
 # Upload PC game with IGDB integration
-./seedbrr upload "/path/to/Game.Name-GROUP" -t seedpool
+./seedbrr "/path/to/Game.Name-GROUP" --SP
 
 # Upload console game
-./seedbrr upload /path/to/game.iso -t seedpool --code 1614
+./seedbrr /path/to/game.iso --SP -c 1614
 ```
 
 #### General Files (Hobby)
 ```bash
 # Upload with specific category code
-./seedbrr upload /path/to/files -t seedpool --code 5040
+./seedbrr /path/to/files --SP -c 5040
 ```
 
 ### Advanced Features
@@ -176,10 +172,10 @@ sections:
 #### Cross-Seeding
 ```bash
 # Find cross-seed opportunities
-./seedbrr sync
+./seedbrr --sync
 
 # Check specific content across trackers
-./seedbrr cross-seed /path/to/content
+./seedbrr check /path/to/content
 ```
 
 ## Media Type Support
