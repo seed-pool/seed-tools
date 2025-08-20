@@ -43,6 +43,10 @@ uuid = { version = "1.10", features = ["v4"] }
 image = "0.25"
 imageproc = "0.25"
 ab_glyph = "0.2"
+# Barcode generation
+qrcode = "0.14"
+# CRC calculation for PNG pHYs chunk
+crc32fast = "1.2"
 
 [package.metadata.bundle]
 resources = ["binaries/"]

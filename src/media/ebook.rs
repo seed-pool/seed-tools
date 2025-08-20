@@ -866,16 +866,17 @@ pub fn generate_ebook_description(
             // Continue to DescriptionBuilder for proper image formatting  
             // (Don't return early - let DescriptionBuilder handle images)
             
-            // Check if a rich description was generated and return it immediately
+            // Check if a rich description was generated and return it
             if let Ok(stored_description) = std::env::var("SEEDBRR_RICH_DESCRIPTION") {
                 info!("📚 Using rich description generated during EPUB processing ({} chars)", stored_description.len());
-                std::env::remove_var("SEEDBRR_RICH_DESCRIPTION"); // Clean up
+                info!("🔍 DEBUG: Rich description preview: {}...", &stored_description[..std::cmp::min(200, stored_description.len())]);
+                // Don't clean up here - let UploadBuilder clean it up when it uses it
                 return Ok(stored_description);
             }
             
             // Check if Open Library was attempted but no rich description was found
             // In this case, generate a basic description without cover images (per user request)
-            if std::env::var("SEEDBRR_OPEN_LIBRARY_ATTEMPTED").is_ok() {
+            if std::env::var("SEEDBRR_OPEN_LIBRARY_ATTEMPTED").is_ok() && std::env::var("SEEDBRR_RICH_DESCRIPTION").is_err() {
                 info!("📚 Open Library was attempted but no rich description available, generating basic description without cover");
                 let basic_description = format!(
                     "[center][b][size=32][color=#2E86C1]{}[/color][/size][/b][/center]\n\n[center][b][size=16][color=#117A65]By:[/color][/size][/b] [i]{}[/i][/center]\n\n[center][b][size=12][color=#757575]Created with mkbrr, ffmpeg, and mediainfo. Posted to this fine tracker with seedbrr.[/color][/size][/b]\n\n[url=https://github.com/seed-pool/seed-tools][img]https://cdn.seedpool.org/sp.png[/img][/url]  [url=https://github.com/autobrr/mkbrr][img]https://cdn.seedpool.org/mkbrr.png[/img][/url]  [url=https://www.rust-lang.org][img]https://cdn.seedpool.org/rust.png[/img][/url][/center]",
@@ -1032,7 +1033,7 @@ pub fn generate_ebook_bbcode_description(
         .json()
         .map_err(|e| format!("Failed to parse book details: {}", e))?;
 
-    // Extract subjects (categories) but do not add them to the description
+    // Extract subjects (categories) and add them to the description
     if let Some(subjects_array) = work_json["subjects"].as_array() {
         subjects = subjects_array
             .iter()
@@ -1107,6 +1108,12 @@ pub fn generate_ebook_bbcode_description(
         }
     }
 
+    // Store subjects/categories as metadata for use in upload keywords instead of description
+    if !subjects.is_empty() {
+        info!("📚 Storing {} Open Library subjects for upload keywords", subjects.len());
+        std::env::set_var("SEEDBRR_OPEN_LIBRARY_SUBJECTS", subjects.join(","));
+    }
+
     // Add author bio
     if let Some(author_bio) = author_json["bio"]
         .as_str()
@@ -1127,6 +1134,41 @@ pub fn generate_ebook_bbcode_description(
             sanitized_bio.trim(),
             SectionFormat::Quoted,
         );
+    }
+
+    // Search for other works by the same author
+    let author_search_url = format!(
+        "https://openlibrary.org/search.json?author={}&limit=10",
+        urlencoding::encode(final_author)
+    );
+    
+    if let Ok(author_works_response) = client.get(&author_search_url).send() {
+        if let Ok(author_works_json) = author_works_response.json::<Value>() {
+            if let Some(docs) = author_works_json["docs"].as_array() {
+                let mut other_works = Vec::new();
+                
+                for doc in docs.iter().take(8) { // Limit to 8 other works
+                    if let (Some(work_title), Some(first_publish_year)) = (
+                        doc["title"].as_str(),
+                        doc["first_publish_year"].as_i64()
+                    ) {
+                        // Skip the current book
+                        if work_title.to_lowercase() != final_title.to_lowercase() {
+                            other_works.push(format!("• {} ({})", work_title, first_publish_year));
+                        }
+                    }
+                }
+                
+                if !other_works.is_empty() {
+                    let works_content = other_works.join("\n");
+                    builder = builder.custom_section(
+                        "Other Works by This Author",
+                        &works_content,
+                        SectionFormat::Plain,
+                    );
+                }
+            }
+        }
     }
 
     Ok((builder.build(), subjects))
@@ -1428,8 +1470,14 @@ pub fn process_ebook_upload(
         // Use the extracted comic directory
         comic_dir
     } else if is_file {
-        // If processing a single non-comic file, use the (possibly renamed) file path
-        new_ebook_path.to_string_lossy().to_string()
+        // For EPUB files, always preserve the folder structure by using the working directory
+        // This ensures that if an EPUB is inside a folder, the folder structure is maintained
+        if main_ebook_file.ebook_type == EbookType::Epub {
+            working_dir.clone()
+        } else {
+            // For non-EPUB files, use the file path as before
+            new_ebook_path.to_string_lossy().to_string()
+        }
     } else {
         // If processing a directory, use the directory path
         working_dir.clone()
@@ -1771,12 +1819,17 @@ pub fn process_ebook_upload(
     }
 
     // Build upload data using UploadBuilder
+    // Create extensions list that includes ebook files plus additional files that should be preserved
+    let mut accepted_extensions = EbookType::all_extensions().iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    // Add additional extensions that should be preserved for ebooks
+    accepted_extensions.extend_from_slice(&["diz".to_string(), "nfo".to_string()]);
+    
     let mut builder = UploadBuilder::new(
         &actual_content_path,
         MediaType::Ebook(main_ebook_file.ebook_type.clone()),
         Arc::new(config.clone()),
     )
-    .with_extensions(EbookType::all_extensions())
+    .with_extensions(accepted_extensions.iter().map(|s| s.as_str()).collect::<Vec<_>>())
     .with_description_config(desc_config)
     .dry_run(dry_run);
 
@@ -2260,7 +2313,9 @@ pub fn process_ebook(
     let path = Path::new(input_path);
 
     if !path.exists() {
-        return Err(format!("Path not found: {}", input_path));
+        // For preflight mode with non-existent paths, return empty results
+        info!("Path '{}' does not exist, returning empty ebook results for preflight mode", input_path);
+        return Ok(Vec::new());
     }
 
     // Extract any archives first and get the path to process
@@ -2392,12 +2447,17 @@ pub fn process_ebook(
         }
 
         // Create the upload builder with ebook-specific components
+        // Create extensions list that includes ebook files plus additional files that should be preserved
+        let mut accepted_extensions = EbookType::all_extensions().iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // Add additional extensions that should be preserved for ebooks
+        accepted_extensions.extend_from_slice(&["diz".to_string(), "nfo".to_string()]);
+        
         let mut builder = UploadBuilder::new(
             &processing_path,
             MediaType::Ebook(ebook_file.ebook_type.clone()),
             Arc::new((*_config).clone()),
         )
-        .with_extensions(EbookType::all_extensions())
+        .with_extensions(accepted_extensions.iter().map(|s| s.as_str()).collect::<Vec<_>>())
         .with_description_config(desc_config)
         .dry_run(_dry_run);
 
@@ -2517,10 +2577,10 @@ pub fn cleanup_ebook_files(
                 
                 // Determine what to keep based on ebook type
                 let should_remove = if has_pdf_ebooks {
-                    // For PDF ebooks: Keep PDF files and NFO files, remove everything else
+                    // For PDF ebooks: Keep PDF files, NFO files, and .diz files, remove everything else
                     match extension_lower.as_str() {
-                        "pdf" | "nfo" => false, // Keep these
-                        "rar" | "zip" | "diz" => true, // Remove archives and .diz
+                        "pdf" | "nfo" | "diz" => false, // Keep these
+                        "rar" | "zip" => true, // Remove archives
                         ext if ext.starts_with("r") && ext.len() >= 3 => {
                             // Check if it's a RAR part file (r00, r01, r02, ..., r99, etc.)
                             ext[1..].chars().all(|c| c.is_ascii_digit())
@@ -2528,10 +2588,28 @@ pub fn cleanup_ebook_files(
                         _ => true, // Remove everything else by default for PDF ebooks
                     }
                 } else {
-                    // For EPUB/CBR/CBZ ebooks: Keep the ebook files and NFO, remove archives
+                    // For EPUB/CBR/CBZ ebooks: Keep the ebook files, NFO, and .diz files, remove archives
                     match extension_lower.as_str() {
-                        "epub" | "cbr" | "cbz" | "nfo" => false, // Keep ebook files and NFO
-                        "rar" | "zip" | "diz" => true, // Remove archives and .diz
+                        "diz" => false, // Always keep .diz files
+                        "epub" | "cbr" | "cbz" => {
+                            // For EPUB files, keep the main one and remove duplicates
+                            if extension_lower == "epub" {
+                                // Check if this is one of the main ebook files we detected
+                                let is_main_ebook = results.iter().any(|(ebook_file, _)| {
+                                    ebook_file.path == entry_path
+                                });
+                                
+                                if is_main_ebook {
+                                    false // Keep the main EPUB file
+                                } else {
+                                    // This is a duplicate EPUB, remove it
+                                    true
+                                }
+                            } else {
+                                false // Keep CBR/CBZ files
+                            }
+                        }
+                        "rar" | "zip" => true, // Remove archives
                         ext if ext.starts_with("r") && ext.len() >= 3 => {
                             // Check if it's a RAR part file (r00, r01, r02, ..., r99, etc.)
                             ext[1..].chars().all(|c| c.is_ascii_digit())

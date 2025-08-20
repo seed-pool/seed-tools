@@ -38,3 +38,56 @@ pub fn generate_release_name(base_name: &str) -> String {
     // Remove leading dots
     release_name.trim_start_matches('.').to_string()
 }
+
+/// Sanitize a filename to be URL-friendly by removing or replacing problematic characters
+pub fn sanitize_filename_for_url(filename: &str) -> String {
+    let mut sanitized = filename.to_string();
+    
+    // Replace spaces with underscores
+    sanitized = sanitized.replace(" ", "_");
+    
+    // Replace special characters that are problematic in URLs
+    sanitized = sanitized.replace("(", "");
+    sanitized = sanitized.replace(")", "");
+    sanitized = sanitized.replace("[", "");
+    sanitized = sanitized.replace("]", "");
+    sanitized = sanitized.replace("{", "");
+    sanitized = sanitized.replace("}", "");
+    sanitized = sanitized.replace("'", "");
+    sanitized = sanitized.replace("\"", "");
+    sanitized = sanitized.replace(":", "");
+    sanitized = sanitized.replace(";", "");
+    sanitized = sanitized.replace("?", "");
+    sanitized = sanitized.replace("!", "");
+    sanitized = sanitized.replace("&", "and");
+    sanitized = sanitized.replace("@", "at");
+    sanitized = sanitized.replace("#", "");
+    sanitized = sanitized.replace("%", "");
+    sanitized = sanitized.replace("*", "");
+    sanitized = sanitized.replace("+", "plus");
+    sanitized = sanitized.replace("=", "");
+    sanitized = sanitized.replace("/", "_");
+    sanitized = sanitized.replace("\\", "_");
+    sanitized = sanitized.replace("|", "_");
+    sanitized = sanitized.replace("<", "");
+    sanitized = sanitized.replace(">", "");
+    sanitized = sanitized.replace("$", "");
+    sanitized = sanitized.replace("^", "");
+    sanitized = sanitized.replace("`", "");
+    sanitized = sanitized.replace("~", "");
+    
+    // Replace multiple underscores with single underscore
+    if let Ok(re) = Regex::new(r"_{2,}") {
+        sanitized = re.replace_all(&sanitized, "_").to_string();
+    }
+    
+    // Remove leading and trailing underscores
+    sanitized = sanitized.trim_start_matches('_').trim_end_matches('_').to_string();
+    
+    // Ensure we don't return an empty string
+    if sanitized.is_empty() {
+        "description".to_string()
+    } else {
+        sanitized
+    }
+}

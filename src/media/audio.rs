@@ -58,7 +58,9 @@ pub fn process_audio(
     let path = Path::new(input_path);
 
     if !path.exists() {
-        return Err(format!("Path not found: {}", input_path));
+        // For preflight mode with non-existent paths, return empty results
+        info!("Path '{}' does not exist, returning empty audio results for preflight mode", input_path);
+        return Ok(Vec::new());
     }
 
     // Extract any archives first and get the path to process

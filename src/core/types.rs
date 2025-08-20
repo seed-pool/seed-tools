@@ -613,6 +613,8 @@ pub struct DelugeConfig {
 pub struct SeedpoolSettings {
     pub stripshit_from_videos: bool,
     pub announce_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub announce_url_secondary: Option<String>,
     pub upload_url: String,
     pub custom_description: String,
     #[serde(default = "default_true")]

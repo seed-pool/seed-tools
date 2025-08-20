@@ -140,9 +140,9 @@ pub enum SeedpoolType {
     Audiobook = 21,
     Movie = 22,
     Movie4K = 23,
-    TvShow = 24,
+    Episode = 24,
     LinuxGame = 25,
-    BoxSet = 26,
+    Season = 26,
     Anime = 27,
     PS4 = 28,
     MusicPack = 29,
@@ -162,6 +162,7 @@ pub enum SeedpoolType {
     Karaoke = 43,
     Wii = 44,
     NES = 45,
+    MusicVideo = 55,
 }
 
 impl SeedpoolType {
@@ -189,9 +190,9 @@ impl SeedpoolType {
             21 => Some(SeedpoolType::Audiobook),
             22 => Some(SeedpoolType::Movie),
             23 => Some(SeedpoolType::Movie4K),
-            24 => Some(SeedpoolType::TvShow),
+            24 => Some(SeedpoolType::Episode),
             25 => Some(SeedpoolType::LinuxGame),
-            26 => Some(SeedpoolType::BoxSet),
+            26 => Some(SeedpoolType::Season),
             27 => Some(SeedpoolType::Anime),
             28 => Some(SeedpoolType::PS4),
             29 => Some(SeedpoolType::MusicPack),
@@ -211,6 +212,7 @@ impl SeedpoolType {
             43 => Some(SeedpoolType::Karaoke),
             44 => Some(SeedpoolType::Wii),
             45 => Some(SeedpoolType::NES),
+            55 => Some(SeedpoolType::MusicVideo),
             _ => None,
         }
     }
@@ -239,9 +241,9 @@ impl SeedpoolType {
             SeedpoolType::Audiobook => 21,
             SeedpoolType::Movie => 22,
             SeedpoolType::Movie4K => 23,
-            SeedpoolType::TvShow => 24,
+            SeedpoolType::Episode => 24,
             SeedpoolType::LinuxGame => 25,
-            SeedpoolType::BoxSet => 26,
+            SeedpoolType::Season => 26,
             SeedpoolType::Anime => 27,
             SeedpoolType::PS4 => 28,
             SeedpoolType::MusicPack => 29,
@@ -261,6 +263,7 @@ impl SeedpoolType {
             SeedpoolType::Karaoke => 43,
             SeedpoolType::Wii => 44,
             SeedpoolType::NES => 45,
+            SeedpoolType::MusicVideo => 55,
         }
     }
 
@@ -288,9 +291,9 @@ impl SeedpoolType {
             SeedpoolType::Audiobook => "Audiobook",
             SeedpoolType::Movie => "Movie",
             SeedpoolType::Movie4K => "4K Movie",
-            SeedpoolType::TvShow => "TV Show",
+            SeedpoolType::Episode => "Episode",
             SeedpoolType::LinuxGame => "Linux Game",
-            SeedpoolType::BoxSet => "BoxSet",
+            SeedpoolType::Season => "Season",
             SeedpoolType::Anime => "Anime",
             SeedpoolType::PS4 => "PS4",
             SeedpoolType::MusicPack => "Music Pack",
@@ -310,6 +313,7 @@ impl SeedpoolType {
             SeedpoolType::Karaoke => "Karaoke",
             SeedpoolType::Wii => "Wii",
             SeedpoolType::NES => "NES",
+            SeedpoolType::MusicVideo => "Music Video",
         }
     }
 
@@ -337,9 +341,9 @@ impl SeedpoolType {
             (21, "Audiobook"),
             (22, "Movie"),
             (23, "4K Movie"),
-            (24, "TV Show"),
+            (24, "Episode"),
             (25, "Linux Game"),
-            (26, "BoxSet"),
+            (26, "Season"),
             (27, "Anime"),
             (28, "PS4"),
             (29, "Music Pack"),
@@ -359,6 +363,7 @@ impl SeedpoolType {
             (43, "Karaoke"),
             (44, "Wii"),
             (45, "NES"),
+            (55, "Music Video"),
         ]
     }
 }
@@ -495,14 +500,20 @@ impl super::TorrentInfo for SeedpoolTorrentInfo {
     }
 
     fn is_video_category(&self) -> bool {
-        matches!(
+        // Check if category is a video category
+        let is_video_category = matches!(
             self.category,
             SeedpoolCategory::Movie
                 | SeedpoolCategory::TvShow
                 | SeedpoolCategory::Movie4K
                 | SeedpoolCategory::Anime
                 | SeedpoolCategory::JPTV
-        )
+        );
+        
+        // Also check if type is MusicVideo (which should go through video pipeline)
+        let is_music_video_type = matches!(self.torrent_type, SeedpoolType::MusicVideo);
+        
+        is_video_category || is_music_video_type
     }
 
     fn is_audiobook_category(&self) -> bool {
@@ -559,7 +570,10 @@ pub fn create_seedpool_field_mapping() -> crate::processing::upload::TrackerFiel
         .add_mapping("tvdb", "tvdb")
         .add_mapping("season", "season_number")
         .add_mapping("episode", "episode_number")
-        .add_mapping("resolution", "resolution_id");
+        .add_mapping("resolution", "resolution_id")
+        .add_mapping("sticky", "sticky")
+        .add_mapping("featured", "featured")
+        .add_mapping("internal", "internal");
 
     // Required fields for Seedpool
     mapping
@@ -579,7 +593,10 @@ pub fn create_seedpool_field_mapping() -> crate::processing::upload::TrackerFiel
         .add_optional("tvdb")
         .add_optional("season_number")
         .add_optional("episode_number")
-        .add_optional("resolution_id");
+        .add_optional("resolution_id")
+        .add_optional("sticky")
+        .add_optional("featured")
+        .add_optional("internal");
 
     mapping
 }
@@ -682,7 +699,7 @@ pub fn check_seedpool_dupes(name: &str, seedpool_api_key: &str) -> Result<Option
 pub fn map_resolution_to_id(resolution: &str) -> Option<String> {
     match resolution.to_uppercase().as_str() {
         "4320P" | "8K" => Some("1".to_string()),
-        "2160P" | "4K" => Some("2".to_string()),
+        "2160P" | "4K" | "UHD" => Some("2".to_string()),
         "1080P" => Some("3".to_string()),
         "1080I" => Some("4".to_string()),
         "720P" => Some("5".to_string()),
@@ -726,9 +743,31 @@ pub fn create_torrent_info_from_media_strings_with_metadata(
             let seedpool_type = if let Some(type_str) = media_source_type {
                 if let Some(type_name) = type_str.strip_prefix("VideoSourceType::") {
                     match (cat_name, type_name) {
-                        (_, "SeasonPack") => SeedpoolType::BoxSet,
-                        (_, "BoxSet") => SeedpoolType::BoxSet,
+                        (_, "SeasonPack") => SeedpoolType::Other, // SeasonPack fallback when no source type detected
+                        (_, "BoxSet") => SeedpoolType::Other, // BoxSet fallback when no source type detected
+                        ("Movie", "FullDisc") => SeedpoolType::FullDisc,
                         ("Movie", "UHDBluRay") => SeedpoolType::UHDBluRay,
+                        ("Movie", "BluRay") => SeedpoolType::BluRay,
+                        ("Movie", "Remux") => SeedpoolType::Remux,
+                        ("Movie", "WebDL") => SeedpoolType::WebDL,
+                        ("Movie", "WebRip") => SeedpoolType::WebRip,
+                        ("Movie", "HDTV") => SeedpoolType::HDTV,
+                        ("Movie", "DVD") => SeedpoolType::BluRay, // Map DVD to BluRay
+                        ("Movie", "Encode") => SeedpoolType::Encode,
+                        ("Movie", _) => SeedpoolType::Other, // Fallback to type 17
+
+                        ("TvShow", "FullDisc") => SeedpoolType::FullDisc,
+                        ("TvShow", "UHDBluRay") => SeedpoolType::UHDBluRay,
+                        ("TvShow", "Remux") => SeedpoolType::Remux,
+                        ("TvShow", "BluRay") => SeedpoolType::BluRay,
+                        ("TvShow", "WebDL") => SeedpoolType::WebDL,
+                        ("TvShow", "WebRip") => SeedpoolType::WebRip,
+                        ("TvShow", "HDTV") => SeedpoolType::HDTV,
+                        ("TvShow", "DVD") => SeedpoolType::BluRay, // Map DVD to BluRay
+                        ("TvShow", "Encode") => SeedpoolType::Encode,
+                        ("TvShow", _) => SeedpoolType::Other, // All TV shows use fallback type 17 when no source type detected
+                        
+                        // Handle other categories with source types
                         (_, "BluRay") => SeedpoolType::BluRay,
                         (_, "Remux") => SeedpoolType::Remux,
                         (_, "WebDL") => SeedpoolType::WebDL,
@@ -736,8 +775,6 @@ pub fn create_torrent_info_from_media_strings_with_metadata(
                         (_, "HDTV") => SeedpoolType::HDTV,
                         (_, "DVD") => SeedpoolType::BluRay, // Map DVD to BluRay
                         (_, "Encode") => SeedpoolType::Encode,
-                        ("Movie", _) => SeedpoolType::Movie,
-                        ("TvShow", _) => SeedpoolType::TvShow,
                         _ => SeedpoolType::Other,
                     }
                 } else {
@@ -745,8 +782,8 @@ pub fn create_torrent_info_from_media_strings_with_metadata(
                 }
             } else {
                 match cat_name {
-                    "Movie" => SeedpoolType::Movie,
-                    "TvShow" => SeedpoolType::TvShow,
+                    "Movie" => SeedpoolType::Other, // Fallback to type 17
+                    "TvShow" => SeedpoolType::Other, // All TV shows use fallback type 17 when no source type detected
                     "Anime" => SeedpoolType::Anime,
                     "Sports" => SeedpoolType::Sports,
                     _ => SeedpoolType::Other,

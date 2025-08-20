@@ -15,17 +15,24 @@ use std::process::Command;
 /// Runs mediainfo command on a media file (video or audio). If input_path is a directory,
 /// selects a random media file from it. If it's a single file, uses that file.
 /// Automatically detects whether to look for video or audio files based on content.
+/// If the path doesn't exist (for preflight with just names), returns "N/A".
 ///
 /// # Arguments
 /// * `input_path` - Path to a media file or directory containing media files
 /// * `config` - Configuration containing the mediainfo path
 ///
 /// # Returns
-/// * `Ok(String)` - Mediainfo output as text
+/// * `Ok(String)` - Mediainfo output as text or "N/A" if path doesn't exist
 /// * `Err(String)` - Error message if mediainfo fails or no media files found
 pub fn generate_mediainfo(input_path: &str, config: &Config) -> Result<String> {
     let mediainfo_path = &config.paths.mediainfo;
     let path = std::path::Path::new(input_path);
+
+    // Check if path exists - if not, return "N/A" for preflight mode with just names
+    if !path.exists() {
+        info!("Path '{}' does not exist, returning N/A for mediainfo", input_path);
+        return Ok("N/A".to_string());
+    }
 
     // Get all valid video and audio extensions from the type definitions
     let video_extensions = VideoType::all_extensions();
@@ -112,4 +119,124 @@ pub fn generate_mediainfo(input_path: &str, config: &Config) -> Result<String> {
     }
 
     Ok(result)
+}
+
+/// Generate mock mediainfo output for preflight checks when no actual files are present
+///
+/// Creates a placeholder mediainfo output based on the filename/path provided.
+/// This allows preflight checks to run without requiring actual media files.
+///
+/// # Arguments
+/// * `file_name` - Name of the file or folder to generate mock mediainfo for
+/// * `media_type` - Type of media (Video, Audio, etc.) to determine format
+///
+/// # Returns
+/// * `String` - Mock mediainfo output as text
+pub fn generate_mock_mediainfo(file_name: &str, media_type: &crate::core::MediaType) -> String {
+    use std::path::Path;
+    
+    let path = Path::new(file_name);
+    let display_name = path.file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    
+    match media_type {
+        crate::core::MediaType::Video(_) => {
+            format!(
+r#"General
+Complete name                            : {}
+Format                                   : Matroska
+Format version                           : Version 4
+File size                               : [To be calculated from actual file]
+Duration                                : [To be detected from actual file]
+Overall bit rate mode                   : Variable
+Overall bit rate                        : [To be detected from actual file]
+Movie name                              : {}
+Encoded date                            : UTC [To be detected]
+Writing application                     : [To be detected]
+Writing library                         : [To be detected]
+
+Video
+ID                                      : 1
+Format                                  : AVC
+Format/Info                             : Advanced Video Codec
+Format profile                          : High@L4.1
+Format settings                         : CABAC / 4 Ref Frames
+Format settings, CABAC                  : Yes
+Format settings, Reference frames       : 4 frames
+Codec ID                                : V_MPEG4/ISO/AVC
+Duration                                : [To be detected]
+Bit rate                                : [To be detected]
+Width                                   : [To be detected]
+Height                                  : [To be detected]
+Display aspect ratio                    : [To be detected]
+Frame rate mode                         : Constant
+Frame rate                              : [To be detected]
+Color space                             : YUV
+Chroma subsampling                      : 4:2:0
+Bit depth                               : 8 bits
+Scan type                               : Progressive
+Language                                : English
+Default                                 : Yes
+Forced                                  : No
+
+Audio
+ID                                      : 2
+Format                                  : AAC LC
+Format/Info                             : Advanced Audio Codec Low Complexity
+Codec ID                                : A_AAC-2
+Duration                                : [To be detected]
+Bit rate mode                           : Variable
+Bit rate                                : [To be detected]
+Channel(s)                              : [To be detected]
+Channel layout                          : [To be detected]
+Sampling rate                           : 48.0 kHz
+Frame rate                              : 46.875 FPS (1024 SPF)
+Compression mode                        : Lossy
+Language                                : English
+Default                                 : Yes
+Forced                                  : No"#,
+                display_name, display_name
+            )
+        },
+        crate::core::MediaType::Audio(_) => {
+            format!(
+r#"General
+Complete name                            : {}
+Format                                   : [To be detected from actual file]
+File size                               : [To be calculated from actual file]
+Duration                                : [To be detected from actual file]
+Overall bit rate mode                   : [To be detected]
+Overall bit rate                        : [To be detected]
+Album                                   : [To be detected]
+Track name                              : {}
+Performer                               : [To be detected]
+Genre                                   : [To be detected]
+Recorded date                           : [To be detected]
+
+Audio
+Format                                  : [To be detected]
+Format/Info                             : [To be detected]
+Duration                                : [To be detected]
+Bit rate mode                           : [To be detected]
+Bit rate                                : [To be detected]
+Channel(s)                              : [To be detected]
+Sampling rate                           : [To be detected]
+Compression mode                        : [To be detected]"#,
+                display_name, display_name
+            )
+        },
+        _ => {
+            format!(
+r#"General
+Complete name                            : {}
+Format                                   : [To be detected from actual file]
+File size                               : [To be calculated from actual file]
+Duration                                : [To be detected if applicable]
+Overall bit rate                        : [To be detected if applicable]"#,
+                display_name
+            )
+        }
+    }
 }

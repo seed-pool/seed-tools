@@ -222,7 +222,7 @@ pub fn get_musicbrainz_release_details(release_id: &str) -> Result<Value> {
     let client = Client::new();
 
     let url = format!(
-        "https://musicbrainz.org/ws/2/release/{}?fmt=json&inc=artist-credits+labels+recordings+release-groups",
+        "https://musicbrainz.org/ws/2/release/{}?fmt=json&inc=artist-credits+labels+recordings+release-groups+media+genres+tags",
         release_id
     );
 
@@ -291,6 +291,25 @@ pub fn extract_musicbrainz_metadata(
 
     if let Some(barcode) = mb_details["barcode"].as_str() {
         metadata.insert("musicbrainz_barcode".to_string(), barcode.to_string());
+    }
+
+    // Additional release information
+    if let Some(disambiguation) = mb_details["disambiguation"].as_str() {
+        metadata.insert("musicbrainz_disambiguation".to_string(), disambiguation.to_string());
+    }
+
+    if let Some(packaging) = mb_details["packaging"].as_str() {
+        metadata.insert("musicbrainz_packaging".to_string(), packaging.to_string());
+    }
+
+    // Text representation (language/script info)
+    if let Some(text_repr) = mb_details["text-representation"].as_object() {
+        if let Some(language) = text_repr["language"].as_str() {
+            metadata.insert("musicbrainz_language".to_string(), language.to_string());
+        }
+        if let Some(script) = text_repr["script"].as_str() {
+            metadata.insert("musicbrainz_script".to_string(), script.to_string());
+        }
     }
 
     // Artist credits
@@ -364,13 +383,19 @@ pub fn extract_musicbrainz_metadata(
         }
     }
 
-    // Track info (if available)
+    // Track info and media format (if available)
     if let Some(media) = mb_details["media"].as_array() {
         let mut total_tracks = 0;
         let mut total_length = 0;
         let mut track_titles = Vec::new();
+        let mut media_formats = Vec::new();
 
         for medium in media {
+            // Extract media format
+            if let Some(format) = medium["format"].as_str() {
+                media_formats.push(format.to_string());
+            }
+
             if let Some(tracks) = medium["tracks"].as_array() {
                 total_tracks += tracks.len();
 
@@ -383,6 +408,11 @@ pub fn extract_musicbrainz_metadata(
                     }
                 }
             }
+        }
+
+        // Store media formats
+        if !media_formats.is_empty() {
+            metadata.insert("musicbrainz_media_format".to_string(), media_formats.join(" + "));
         }
 
         if total_tracks > 0 {
@@ -406,6 +436,62 @@ pub fn extract_musicbrainz_metadata(
     }
 
     metadata
+}
+
+/// Fetch cover art URL from Cover Art Archive
+pub fn get_cover_art_url(release_id: &str) -> Result<Option<String>> {
+    let client = Client::new();
+    
+    let url = format!("https://coverartarchive.org/release/{}", release_id);
+    
+    info!("🎨 Checking Cover Art Archive for release: {}", release_id);
+    
+    let response = client
+        .get(&url)
+        .header("User-Agent", "seedbrr/1.0 (https://github.com/seed-pool/seed-tools)")
+        .send()
+        .map_err(|e| SeedError::ApiError(format!("Failed to fetch cover art: {}", e)))?;
+    
+    if response.status().as_u16() == 404 {
+        info!("🎨 No cover art found for release: {}", release_id);
+        return Ok(None);
+    }
+    
+    if !response.status().is_success() {
+        return Err(SeedError::ApiError(format!(
+            "Cover Art Archive request failed with status: {}",
+            response.status()
+        )));
+    }
+    
+    let json: Value = response
+        .json()
+        .map_err(|e| SeedError::ApiError(format!("Failed to parse cover art response: {}", e)))?;
+    
+    // Look for front cover art
+    if let Some(images) = json["images"].as_array() {
+        for image in images {
+            if let Some(front) = image["front"].as_bool() {
+                if front {
+                    if let Some(image_url) = image["image"].as_str() {
+                        info!("✅ Found front cover art: {}", image_url);
+                        return Ok(Some(image_url.to_string()));
+                    }
+                }
+            }
+        }
+        
+        // If no front cover found, use the first available image
+        if let Some(first_image) = images.first() {
+            if let Some(image_url) = first_image["image"].as_str() {
+                info!("✅ Found cover art (not marked as front): {}", image_url);
+                return Ok(Some(image_url.to_string()));
+            }
+        }
+    }
+    
+    info!("🎨 No usable cover art found for release: {}", release_id);
+    Ok(None)
 }
 
 /// Search for artist information on MusicBrainz

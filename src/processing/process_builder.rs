@@ -1,9 +1,9 @@
 use crate::{
     classification::{ClassificationResult, MediaClassification},
-    core::{Config, MediaType, PreflightCheckResult, VideoType, AudioType, EbookType, GameType, HobbyType},
+    core::{Config, MediaType, PreflightCheckResult, VideoType, AudioType, EbookType, GameType, HobbyType, SeedpoolConfig, TorrentLeechConfig},
     media::{detector::detect_media_type, video::UploadData},
     processing::{
-        component_config::ComponentConfig, description::DescriptionConfig, upload::UploadBuilder,
+        component_config::ComponentConfig, description::DescriptionConfig, upload::{UploadBuilder, TrackerUploadExt},
     },
 };
 use log::{error, info};
@@ -43,6 +43,10 @@ pub struct ProcessBuilder {
     cached_preflight_data: Option<PreflightCheckResult>,
     cached_classification: Option<ClassificationResult>,
     cached_metadata: Option<JsonValue>,
+
+    // Tracker configurations
+    seedpool_config: Option<Arc<SeedpoolConfig>>,
+    torrentleech_config: Option<Arc<TorrentLeechConfig>>,
 }
 
 /// Result of the process pipeline
@@ -80,6 +84,8 @@ impl ProcessBuilder {
             cached_preflight_data: None,
             cached_classification: None,
             cached_metadata: None,
+            seedpool_config: None,
+            torrentleech_config: None,
         }
     }
 
@@ -264,6 +270,18 @@ impl ProcessBuilder {
     /// Set component configuration
     pub fn with_component_config(mut self, config: ComponentConfig) -> Self {
         self.component_config = Some(config);
+        self
+    }
+
+    /// Set seedpool configuration
+    pub fn with_seedpool_config(mut self, config: Arc<SeedpoolConfig>) -> Self {
+        self.seedpool_config = Some(config);
+        self
+    }
+
+    /// Set torrentleech configuration
+    pub fn with_torrentleech_config(mut self, config: Arc<TorrentLeechConfig>) -> Self {
+        self.torrentleech_config = Some(config);
         self
     }
 
@@ -807,6 +825,24 @@ impl ProcessBuilder {
                                                                 let mb_metadata = crate::metadata::musicbrainz::extract_musicbrainz_metadata(&mb_details);
 
                                                                 info!("📊 Adding {} MusicBrainz fields to metadata", mb_metadata.len());
+                                                                
+                                                                // Store MusicBrainz IDs in environment variables for keyword generation
+                                                                if let Some(release_id) = mb_metadata.get("musicbrainz_release_id") {
+                                                                    std::env::set_var("SEEDBRR_MB_RELEASE_ID", release_id);
+                                                                }
+                                                                if let Some(release_group_id) = mb_metadata.get("musicbrainz_release_group_id") {
+                                                                    std::env::set_var("SEEDBRR_MB_RELEASE_GROUP_ID", release_group_id);
+                                                                }
+                                                                if let Some(artist_ids) = mb_metadata.get("musicbrainz_artist_ids") {
+                                                                    std::env::set_var("SEEDBRR_MB_ARTIST_IDS", artist_ids);
+                                                                }
+                                                                if let Some(barcode) = mb_metadata.get("musicbrainz_barcode") {
+                                                                    std::env::set_var("SEEDBRR_MB_BARCODE", barcode);
+                                                                }
+                                                                if let Some(catalog_numbers) = mb_metadata.get("musicbrainz_catalog_numbers") {
+                                                                    std::env::set_var("SEEDBRR_MB_CATALOG_NUMBERS", catalog_numbers);
+                                                                }
+                                                                
                                                                 for (key, value) in mb_metadata {
                                                                     obj.insert(key, serde_json::Value::String(value));
                                                                 }
@@ -1172,8 +1208,27 @@ impl ProcessBuilder {
                                 
                                 // Rename EPUB files to standard naming convention if needed
                                 if ebook_file.ebook_type == crate::core::EbookType::Epub {
-                                    if let Err(e) = self.rename_epub_file(&ebook_file.path) {
-                                        info!("⚠️ Failed to rename EPUB file: {}", e);
+                                    match self.rename_epub_file(&ebook_file.path) {
+                                        Ok(new_path) => {
+                                            // For single file uploads, store the new path in metadata for UploadBuilder
+                                            // For folder uploads, we keep the original input_path pointing to the folder
+                                            // Check if the input path has a file extension (indicating it's a file, not a folder)
+                                            let input_path = std::path::Path::new(&self.input_path);
+                                            let is_single_file = input_path.extension().is_some();
+                                            
+                                            if is_single_file {
+                                                info!("📚 Single file upload detected - storing renamed path in metadata: {}", new_path.display());
+                                                obj.insert("__renamed_input_path".to_string(), 
+                                                          serde_json::Value::String(new_path.to_string_lossy().to_string()));
+                                            } else {
+                                                info!("📚 Folder upload detected - keeping original input_path: {}", self.input_path);
+                                            }
+                                            
+
+                                        },
+                                        Err(e) => {
+                                            info!("⚠️ Failed to rename EPUB file: {}", e);
+                                        }
                                     }
                                 }
                             }
@@ -1262,8 +1317,24 @@ impl ProcessBuilder {
         _classification: &Option<ClassificationResult>,
     ) -> Result<UploadData, String> {
         info!("ProcessBuilder: build_upload_data - Creating UploadBuilder");
+        
+        // Check if we have a renamed input path from EPUB processing
+        let actual_input_path = if let Some(renamed_path) = metadata.get("__renamed_input_path").and_then(|p| p.as_str()) {
+            // For EPUB files, always preserve the folder structure by using the original folder path
+            // This ensures that if an EPUB is inside a folder, the folder structure is maintained
+            if matches!(media_type, MediaType::Ebook(_)) {
+                info!("ProcessBuilder: build_upload_data - EPUB detected, preserving folder structure using original path: {}", self.input_path);
+                self.input_path.clone()
+            } else {
+                info!("ProcessBuilder: build_upload_data - Using renamed input path: {}", renamed_path);
+                renamed_path.to_string()
+            }
+        } else {
+            self.input_path.clone()
+        };
+        
         let mut builder =
-            UploadBuilder::new(&self.input_path, media_type.clone(), self.config.clone());
+            UploadBuilder::new(&actual_input_path, media_type.clone(), self.config.clone());
         info!("ProcessBuilder: build_upload_data - UploadBuilder created successfully");
         
         // 🚨 FIX: Pass the metadata to UploadBuilder so it can access rich TMDB data
@@ -1676,6 +1747,15 @@ impl ProcessBuilder {
             }
         }
 
+        // Apply tracker-specific configuration
+        if let Some(ref seedpool_config) = self.seedpool_config {
+            info!("ProcessBuilder: build_upload_data - Applying Seedpool tracker configuration");
+            builder = builder.for_seedpool(seedpool_config);
+        } else if let Some(ref torrentleech_config) = self.torrentleech_config {
+            info!("ProcessBuilder: build_upload_data - Applying TorrentLeech tracker configuration");
+            builder = builder.for_torrentleech(torrentleech_config);
+        }
+
         info!("ProcessBuilder: build_upload_data - Calling UploadBuilder.build()");
         let result = builder.build();
         match &result {
@@ -1700,9 +1780,15 @@ impl ProcessBuilder {
         use crate::processing::upload::UploadProcessor;
 
         info!("🚨 DEBUG: Creating UploadProcessor with media_type: {:?}", media_type);
+        // Use actual input path if available (for renamed files), otherwise use original
+        let input_path_for_processor = upload_data.actual_input_path
+            .as_ref()
+            .unwrap_or(&self.input_path)
+            .clone();
+        
         let mut processor =
             UploadProcessor::new(upload_data.clone(), self.config.clone())
-                .with_media_info(media_type.clone(), self.input_path.clone())
+                .with_media_info(media_type.clone(), input_path_for_processor)
                 .dry_run(self.dry_run);
         
         // Pass original torrent info if available
@@ -2259,7 +2345,8 @@ impl ProcessBuilder {
     }
     
     /// Rename EPUB file to standard naming convention "lastname, firstname - title.epub"
-    fn rename_epub_file(&self, epub_path: &std::path::Path) -> Result<(), String> {
+    /// Returns the new path if successful
+    fn rename_epub_file(&self, epub_path: &std::path::Path) -> Result<std::path::PathBuf, String> {
         // Extract metadata from EPUB to get proper title and author
         let (title_opt, author_opt) = crate::media::ebook::extract_metadata_from_epub(
             epub_path.to_str().unwrap_or("")
@@ -2309,7 +2396,7 @@ impl ProcessBuilder {
             .map_err(|e| format!("Failed to rename EPUB file: {}", e))?;
         
         info!("✅ Successfully renamed EPUB file");
-        Ok(())
+        Ok(new_path)
     }
 }
 

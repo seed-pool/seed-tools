@@ -244,15 +244,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if cli.pre {
         info!("Running preflight check mode...");
 
-        // Require input path for preflight check
-        if cli.input_path.is_none() {
-            error!("Input path is required for preflight check.");
-            println!("Error: Please provide an input path for the preflight check.");
+        // Get input path or use a default placeholder for name-only preflight
+        let input_path_str = if let Some(input_path) = &cli.input_path {
+            input_path.to_str().ok_or("Invalid input path string")?
+        } else {
+            println!("Warning: No input path provided. Please provide a file/folder name for preflight check.");
+            println!("Usage: --pre <file_or_folder_name>");
             return Ok(());
-        }
-
-        let input_path = cli.input_path.unwrap();
-        let input_path_str = input_path.to_str().ok_or("Invalid input path string")?;
+        };
 
         // Run the preflight check
         match preflight_check(input_path_str, &main_config, cli.dry_run) {
@@ -570,7 +569,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             };
 
             // Process with the explicit torrent info using process builder
-            match process_builder::upload_builder(input_path_str, Arc::new(main_config.clone()))
+            let mut builder = process_builder::upload_builder(input_path_str, Arc::new(main_config.clone()))
                 .force_category(format!(
                     "{}Category::{}",
                     if torrent_info.is_video_category() {
@@ -587,9 +586,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     torrent_info.category_name()
                 ))
                 .with_original_torrent_info(torrent_info.clone())
-                .dry_run(cli.dry_run)
-                .build()
-            {
+                .dry_run(cli.dry_run);
+
+            // Apply tracker-specific configuration
+            if cli.sp {
+                info!("Applying Seedpool tracker configuration");
+                builder = builder.with_seedpool_config(Arc::new(seedpool_config.clone()));
+            } else if cli.tl {
+                info!("Applying TorrentLeech tracker configuration");
+                builder = builder.with_torrentleech_config(Arc::new(_torrentleech_config.clone()));
+            }
+
+            match builder.build() {
                 Ok(result) => {
                     info!(
                         "Upload processing completed successfully for: {}",
@@ -609,10 +617,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
             );
 
             info!("Starting upload processing with execution ID: {}", execution_id);
-            match process_builder::upload_builder(input_path_str, Arc::new(main_config.clone()))
-                .dry_run(cli.dry_run)
-                .build()
-            {
+            let mut builder = process_builder::upload_builder(input_path_str, Arc::new(main_config.clone()))
+                .dry_run(cli.dry_run);
+
+            // Apply tracker-specific configuration
+            if cli.sp {
+                info!("Applying Seedpool tracker configuration");
+                builder = builder.with_seedpool_config(Arc::new(seedpool_config.clone()));
+            } else if cli.tl {
+                info!("Applying TorrentLeech tracker configuration");
+                builder = builder.with_torrentleech_config(Arc::new(_torrentleech_config.clone()));
+            }
+
+            match builder.build() {
                 Ok(result) => {
                     info!(
                         "Upload processing completed successfully for: {} (Execution ID: {})",

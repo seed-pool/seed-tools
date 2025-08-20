@@ -65,6 +65,8 @@ pub struct UploadData {
     pub season: Option<u32>,
     pub episode: Option<u32>,
     pub resolution: Option<String>,
+    /// Actual input path (may be different from original if file was renamed)
+    pub actual_input_path: Option<String>,
 }
 
 impl UploadData {
@@ -86,6 +88,7 @@ impl UploadData {
             season: None,
             episode: None,
             resolution: None,
+            actual_input_path: None,
         }
     }
 }
@@ -655,7 +658,9 @@ pub fn process_video(
     let path = Path::new(input_path);
 
     if !path.exists() {
-        return Err(format!("Path not found: {}", input_path));
+        // For preflight mode with non-existent paths, return empty results
+        info!("Path '{}' does not exist, returning empty video results for preflight mode", input_path);
+        return Ok(Vec::new());
     }
 
     // Extract any archives first and get the path to process
@@ -1245,19 +1250,17 @@ pub fn classify_video_content(path: &str) -> VideoMetadata {
     }
 
     // 3. Determine source type (priority order matters)
-    // First check if this is a boxset/season pack
-    if metadata.is_boxset {
-        metadata.source_type = VideoSourceType::SeasonPack;
-    } else if iso_regex.is_match(filename) || full_disc_regex.is_match(filename) || is_full_disc_release(filename) {
+    // Check for actual source types first, then fallback to SeasonPack for boxsets
+    if iso_regex.is_match(filename) || full_disc_regex.is_match(filename) || is_full_disc_release(filename) {
         metadata.source_type = VideoSourceType::FullDisc;
     } else if uhd_bluray_regex.is_match(filename) {
         metadata.source_type = VideoSourceType::UHDBluRay;
+    } else if remux_regex.is_match(filename) {
+        metadata.source_type = VideoSourceType::Remux;
     } else if bluray_regex.is_match(filename) {
         metadata.source_type = VideoSourceType::BluRay;
     } else if dvd_regex.is_match(filename) {
         metadata.source_type = VideoSourceType::DVD;
-    } else if remux_regex.is_match(filename) {
-        metadata.source_type = VideoSourceType::Remux;
     } else if web_dl_regex.is_match(filename) {
         metadata.source_type = VideoSourceType::WebDL;
     } else if web_rip_regex.is_match(filename) {
@@ -1273,6 +1276,9 @@ pub fn classify_video_content(path: &str) -> VideoMetadata {
     } else if encode_regex.is_match(filename) {
         // Only set to Encode if no other source type was detected
         metadata.source_type = VideoSourceType::Encode;
+    } else if metadata.is_boxset {
+        // Fallback to SeasonPack for boxsets with no detected source type
+        metadata.source_type = VideoSourceType::SeasonPack;
     } else {
         // Default to Unknown if nothing matches
         metadata.source_type = VideoSourceType::Unknown;

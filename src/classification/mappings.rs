@@ -37,11 +37,17 @@ fn seedpool_categories() -> HashMap<String, String> {
 
 fn seedpool_types() -> HashMap<String, String> {
     let mut map = HashMap::new();
-    map.insert("BluRay".to_string(), "01".to_string());
+    map.insert("FullDisc".to_string(), "01".to_string());
     map.insert("Remux".to_string(), "02".to_string());
     map.insert("Encode".to_string(), "03".to_string());
     map.insert("WEB-DL".to_string(), "04".to_string());
     map.insert("WEBRip".to_string(), "05".to_string());
+    map.insert("HDTV".to_string(), "06".to_string());
+    map.insert("UHDBluRay".to_string(), "07".to_string());
+    map.insert("BluRay".to_string(), "08".to_string());
+    map.insert("Other".to_string(), "17".to_string());
+    map.insert("Episode".to_string(), "24".to_string());
+    // Season type removed - all TV shows use source types or fallback to Other (17)
     // Add more as needed
     map
 }

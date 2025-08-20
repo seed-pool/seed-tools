@@ -145,18 +145,16 @@ pub fn classify_video_source_type(metadata: &JsonValue) -> Option<String> {
     let encode_regex = Regex::new(r"(?i)\b(encode|x264|x265|h264|h265|hevc|xvid|divx)\b").unwrap();
     let upscale_regex = Regex::new(r"(?i)\b(upscale|upscaled|ai.?upscale)\b").unwrap();
 
-    let source_type = if is_boxset {
-        VideoSourceType::SeasonPack
-    } else if iso_regex.is_match(filename) || full_disc_regex.is_match(filename) {
+    let source_type = if iso_regex.is_match(filename) || full_disc_regex.is_match(filename) {
         VideoSourceType::FullDisc
     } else if uhd_bluray_regex.is_match(filename) {
         VideoSourceType::UHDBluRay
+    } else if remux_regex.is_match(filename) {
+        VideoSourceType::Remux
     } else if bluray_regex.is_match(filename) {
         VideoSourceType::BluRay
     } else if dvd_regex.is_match(filename) {
         VideoSourceType::DVD
-    } else if remux_regex.is_match(filename) {
-        VideoSourceType::Remux
     } else if web_dl_regex.is_match(filename) {
         VideoSourceType::WebDL
     } else if web_rip_regex.is_match(filename) {
@@ -171,6 +169,8 @@ pub fn classify_video_source_type(metadata: &JsonValue) -> Option<String> {
         VideoSourceType::Upscale
     } else if encode_regex.is_match(filename) {
         VideoSourceType::Encode
+    } else if is_boxset {
+        VideoSourceType::SeasonPack
     } else {
         VideoSourceType::Unknown
     };

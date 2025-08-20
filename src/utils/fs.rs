@@ -25,10 +25,9 @@ pub fn filter_files_by_extension(
     let path = Path::new(input_path);
 
     if !path.exists() {
-        return Err(SeedError::Validation(format!(
-            "Path not found: {}",
-            input_path
-        )));
+        // For preflight mode with non-existent paths, return empty vector instead of error
+        info!("Path '{}' does not exist, returning empty file list for preflight mode", input_path);
+        return Ok(Vec::new());
     }
 
     let mut matching_files = Vec::new();
@@ -145,10 +144,9 @@ pub fn find_and_read_nfo(working_path: &str) -> Result<Option<(String, Vec<u8>)>
     let path = Path::new(working_path);
 
     if !path.exists() {
-        return Err(SeedError::Validation(format!(
-            "Path not found: {}",
-            working_path
-        )));
+        // For preflight mode with non-existent paths, return None (no NFO found)
+        info!("Path '{}' does not exist, returning None for NFO search in preflight mode", working_path);
+        return Ok(None);
     }
 
     // If it's a single file, check if it's an NFO

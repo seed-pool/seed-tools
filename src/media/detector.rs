@@ -8,12 +8,19 @@ pub fn detect_media_type(path: &str) -> Result<Vec<MediaFile>, String> {
     info!("detect_media_type: Starting detection for path: {}", path);
     let mut media_files = Vec::new();
 
-    // Try each media type detector in priority order
+    // Check if path exists, if not try to infer from filename
+    if !std::path::Path::new(path).exists() {
+        info!("Path doesn't exist, trying to infer media type from filename: {}", path);
+        return detect_media_type_from_name(path);
+    }
 
-    // Check for video files first (highest priority for torrenting)
-    if let Ok(video_files) = video::detect_video_files(path) {
-        for video_file in video_files {
-            media_files.push(video::to_media_file(&video_file));
+    // Try each media type detector in priority order
+    // First, check for actual file extensions to avoid false positives from name patterns
+
+    // Check for audio files first (they're often misidentified as video by name patterns)
+    if let Ok(audio_files) = audio::detect_audio_files(path) {
+        for audio_file in audio_files {
+            media_files.push(audio::to_media_file(&audio_file));
         }
     }
 
@@ -24,10 +31,10 @@ pub fn detect_media_type(path: &str) -> Result<Vec<MediaFile>, String> {
         }
     }
 
-    // Check for audio files
-    if let Ok(audio_files) = audio::detect_audio_files(path) {
-        for audio_file in audio_files {
-            media_files.push(audio::to_media_file(&audio_file));
+    // Check for video files (after audio to avoid music album misidentification)
+    if let Ok(video_files) = video::detect_video_files(path) {
+        for video_file in video_files {
+            media_files.push(video::to_media_file(&video_file));
         }
     }
 
@@ -48,6 +55,85 @@ pub fn detect_media_type(path: &str) -> Result<Vec<MediaFile>, String> {
     }
 
     Ok(media_files)
+}
+
+/// Detect media type from filename patterns when file doesn't exist
+pub fn detect_media_type_from_name(name: &str) -> Result<Vec<MediaFile>, String> {
+    use std::path::PathBuf;
+    use crate::core::types::{VideoType, AudioType, MediaFile, MediaType};
+    
+    info!("Inferring media type from name: {}", name);
+    
+    let name_lower = name.to_lowercase();
+    
+    // Video patterns (most common for torrents)
+    let video_patterns = [
+        // Resolution indicators
+        "1080p", "720p", "480p", "2160p", "4k",
+        // Video codecs
+        "x264", "x265", "h264", "h265", "xvid", "divx",
+        // Video sources
+        "bluray", "web-dl", "webrip", "dvdrip", "brrip", "hdtv", "cam", "ts",
+        // Video containers (as extensions)
+        ".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".webm",
+        // TV show patterns
+        "s01", "s02", "s03", "season", "episode", "e01", "e02",
+        // Movie year patterns (4 digits)
+    ];
+    
+    let audio_patterns = [
+        // Audio formats
+        "flac", "mp3", "aac", "ogg", "wav", "m4a", "wma",
+        // Audio quality indicators  
+        "320kbps", "v0", "v2", "lossless",
+        // Album indicators
+        "album", "discography", "single", "ep", "ost", "soundtrack",
+        // Audio containers
+        ".flac", ".mp3", ".aac", ".ogg", ".wav", ".m4a", ".wma",
+    ];
+    
+    // Check for video patterns
+    for pattern in &video_patterns {
+        if name_lower.contains(pattern) {
+            info!("Detected video pattern '{}' in name", pattern);
+            return Ok(vec![MediaFile {
+                path: PathBuf::from(name),
+                media_type: MediaType::Video(VideoType::Mkv), // Default to MKV for video
+            }]);
+        }
+    }
+    
+    // Check for year patterns (common in movies)
+    if let Some(_) = regex::Regex::new(r"\b(19|20)\d{2}\b")
+        .unwrap()
+        .find(&name_lower) 
+    {
+        if !name_lower.contains("season") && !name_lower.contains("episode") {
+            info!("Detected year pattern in name, assuming movie");
+            return Ok(vec![MediaFile {
+                path: PathBuf::from(name),
+                media_type: MediaType::Video(VideoType::Mkv),
+            }]);
+        }
+    }
+    
+    // Check for audio patterns
+    for pattern in &audio_patterns {
+        if name_lower.contains(pattern) {
+            info!("Detected audio pattern '{}' in name", pattern);
+            return Ok(vec![MediaFile {
+                path: PathBuf::from(name),
+                media_type: MediaType::Audio(AudioType::Flac), // Default to FLAC for audio
+            }]);
+        }
+    }
+    
+    // If no specific patterns found, assume video (most common for torrents)
+    info!("No specific patterns found, defaulting to video type");
+    Ok(vec![MediaFile {
+        path: PathBuf::from(name),
+        media_type: MediaType::Video(VideoType::Mkv),
+    }])
 }
 
 /// Detect the primary media type for a path (returns the most significant type)

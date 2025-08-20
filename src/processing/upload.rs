@@ -200,6 +200,12 @@ impl UploadBuilder {
         self
     }
 
+    /// Update the input path (used when files are renamed during processing)
+    pub fn with_updated_input_path(mut self, new_path: impl Into<String>) -> Self {
+        self.input_path = new_path.into();
+        self
+    }
+
     /// Set template name for description generation
     pub fn with_template(mut self, template_name: impl Into<String>) -> Self {
         self.template_name = Some(template_name.into());
@@ -438,7 +444,14 @@ impl UploadBuilder {
 
         // Process Mediainfo
         if !self.upload_config.skip_mediainfo {
-            match generate_mediainfo(&self.input_path, &self.config) {
+            // For audio content, generate mediainfo for the entire folder/album
+            let mediainfo_result = if matches!(self.media_type, MediaType::Audio(_)) {
+                self.generate_audio_album_mediainfo()
+            } else {
+                generate_mediainfo(&self.input_path, &self.config)
+            };
+            
+            match mediainfo_result {
                 Ok(mediainfo) => {
                     info!("Generated mediainfo");
                     self.components.insert(
@@ -1421,6 +1434,14 @@ impl UploadBuilder {
             }
         }
 
+        // Set actual input path if file was renamed (for EPUB processing)
+        if let Some(cached_metadata) = &self.cached_metadata {
+            if let Some(renamed_path) = cached_metadata.get("__renamed_input_path").and_then(|p| p.as_str()) {
+                upload_data.actual_input_path = Some(renamed_path.to_string());
+                info!("✅ Set actual input path for renamed file: {}", renamed_path);
+            }
+        }
+
         info!("UploadBuilder: Build process completed successfully");
         Ok(upload_data)
     }
@@ -1772,8 +1793,26 @@ impl UploadBuilder {
             info!("No cover art component found");
         }
 
+        // Check if there's a rich description from ebook processing first - this takes priority over everything
+        info!("🔍 DEBUG: Checking for SEEDBRR_RICH_DESCRIPTION environment variable");
+        if let Ok(rich_description) = std::env::var("SEEDBRR_RICH_DESCRIPTION") {
+            info!("📚 Using rich description from ebook processing ({} chars) - OVERRIDING any existing description component", rich_description.len());
+            info!("🔍 DEBUG: Rich description content preview: {}...", &rich_description[..std::cmp::min(100, rich_description.len())]);
+            // Always override any existing description component with the rich one
+            self.components.insert(
+                "description".to_string(),
+                UploadComponent::Description(rich_description),
+            );
+            std::env::remove_var("SEEDBRR_RICH_DESCRIPTION"); // Clean up
+            // Keep SEEDBRR_OPEN_LIBRARY_ATTEMPTED to prevent duplicate processing later
+            // Keep SEEDBRR_OPEN_LIBRARY_SUBJECTS for use in upload keywords
+            return Ok(()); // Early return - we have the rich description, don't need anything else
+        }
+
         // Check if a description component already exists (e.g., from ebook processing)
+        info!("🔍 DEBUG: Checking if description component exists. Current components: {:?}", self.components.keys().collect::<Vec<_>>());
         if !self.components.contains_key("description") {
+            info!("🔍 DEBUG: No description component found, proceeding with generation");
             // Add custom description from tracker config to metadata before creating component
             if let Some(UploadComponent::Metadata(tracker_meta)) = self.components.get("tracker_config") {
                 if let Some(custom_desc) = tracker_meta.get("custom_description") {
@@ -1824,30 +1863,175 @@ impl UploadBuilder {
 
             // Check if alt description (image) mode is enabled
             if self.upload_config.enable_alt_description {
+                info!("🔍 DEBUG: No SEEDBRR_RICH_DESCRIPTION found in environment");
                 // 🚨 DEBUG: Log what metadata is being passed to alt_description
                 log::info!("🚨 ALT_DESC_FIX: Final metadata keys being passed to alt_description: {:?}", 
                           metadata.as_object().map(|obj| obj.keys().collect::<Vec<_>>()).unwrap_or_default());
                 
-                // Use new image-based description generation
-                let description_result = self.generate_alt_description(&metadata)?;
+                // Check if this is an audio/music album - for music, we need both regular AND alt descriptions
+                let is_audio = matches!(self.media_type, crate::core::MediaType::Audio(_));
                 
-                match description_result {
-                    crate::processing::DescriptionResult::Image { path, filename } => {
-                        // Upload the image description to CDN/ImgBB and get the final description
-                        let final_description = self.upload_and_build_alt_description(&path, &filename)?;
+                if is_audio {
+                    // Check if we have meaningful MusicBrainz data for audio content
+                    let has_musicbrainz_data = metadata.get("musicbrainz_release_id").is_some() ||
+                                              metadata.get("musicbrainz_artist").is_some() ||
+                                              metadata.get("musicbrainz_title").is_some();
+                    
+                    if !has_musicbrainz_data {
+                        info!("🎵 Audio content detected but no MusicBrainz data found - skipping alt description, using regular description only");
                         
-                        self.components.insert(
-                            "description".to_string(),
-                            UploadComponent::Description(final_description),
-                        );
-                        
-                        info!("📸 Generated and uploaded image-based description: {}", filename);
+                        // Just generate regular audio description without alt image
+                        match desc_component.process() {
+                            Ok(result) => {
+                                if let Some(description) = result.data {
+                                    // Clean center tags from audio descriptions
+                                    let cleaned_description = self.clean_description_for_audio_combination(&description);
+                                    self.components.insert(
+                                        "description".to_string(),
+                                        UploadComponent::Description(cleaned_description),
+                                    );
+                                } else {
+                                    self.components.insert(
+                                        "description".to_string(),
+                                        UploadComponent::Description("Beta testing".to_string()),
+                                    );
+                                }
+                            }
+                            Err(_) => {
+                                self.components.insert(
+                                    "description".to_string(),
+                                    UploadComponent::Description("Beta testing".to_string()),
+                                );
+                            }
+                        }
+                        return Ok(());
                     }
-                    crate::processing::DescriptionResult::BBCode(description) => {
-                        self.components.insert(
-                            "description".to_string(),
-                            UploadComponent::Description(description),
-                        );
+                    
+                    info!("🎵 Audio content detected with alt_description enabled - generating both regular and alt descriptions");
+                    
+                    // Generate regular audio description first
+                    match desc_component.process() {
+                        Ok(result) => {
+                            let regular_description = if let Some(description) = result.data {
+                                description
+                            } else {
+                                "Regular audio description generation failed".to_string()
+                            };
+                            
+                            // Generate alt description (skip if no MusicBrainz data)
+                            let description_result = match self.generate_alt_description(&metadata) {
+                                Ok(result) => result,
+                                Err(e) if e.contains("no MusicBrainz data") => {
+                                    log::info!("🎵 Skipping alt description generation: {}", e);
+                                    self.components.insert(
+                                        "description".to_string(),
+                                        UploadComponent::Description(regular_description),
+                                    );
+                                    return Ok(());
+                                }
+                                Err(e) => return Err(e),
+                            };
+                            
+                            match description_result {
+                                crate::processing::DescriptionResult::Image { path, filename } => {
+                                    // Upload the image description to CDN/ImgBB and get the alt description
+                                    let alt_description = self.upload_and_build_alt_description(&path, &filename)?;
+                                    
+                                    // For audio content, remove center tags from regular description and combine properly
+                                    let cleaned_regular_description = self.clean_description_for_audio_combination(&regular_description);
+                                    let combined_description = self.insert_alt_image_after_table(&cleaned_regular_description, &alt_description);
+                                    
+                                    self.components.insert(
+                                        "description".to_string(),
+                                        UploadComponent::Description(combined_description),
+                                    );
+                                    
+                                    info!("🎵 Generated combined audio description: regular + alt image ({})", filename);
+                                }
+                                crate::processing::DescriptionResult::BBCode(alt_bbcode) => {
+                                    // For audio content, remove center tags from regular description and combine properly
+                                    let cleaned_regular_description = self.clean_description_for_audio_combination(&regular_description);
+                                    let combined_description = self.insert_alt_image_after_table(&cleaned_regular_description, &alt_bbcode);
+                                    
+                                    self.components.insert(
+                                        "description".to_string(),
+                                        UploadComponent::Description(combined_description),
+                                    );
+                                    
+                                    info!("🎵 Generated combined audio description: regular + alt BBCode");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            info!("⚠️ Failed to generate regular audio description: {:?}, using alt description only", e);
+                            
+                            // Fall back to alt description only (skip if no MusicBrainz data)
+                            let description_result = match self.generate_alt_description(&metadata) {
+                                Ok(result) => result,
+                                Err(e) if e.contains("no MusicBrainz data") => {
+                                    log::info!("🎵 Skipping alt description generation: {}", e);
+                                    self.components.insert(
+                                        "description".to_string(),
+                                        UploadComponent::Description("Beta testing".to_string()),
+                                    );
+                                    return Ok(());
+                                }
+                                Err(e) => return Err(e),
+                            };
+                            
+                            match description_result {
+                                crate::processing::DescriptionResult::Image { path, filename } => {
+                                    let final_description = self.upload_and_build_alt_description(&path, &filename)?;
+                                    
+                                    self.components.insert(
+                                        "description".to_string(),
+                                        UploadComponent::Description(final_description),
+                                    );
+                                    
+                                    info!("📸 Generated alt description only: {}", filename);
+                                }
+                                crate::processing::DescriptionResult::BBCode(description) => {
+                                    self.components.insert(
+                                        "description".to_string(),
+                                        UploadComponent::Description(description),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // For non-audio content, use alt description only (existing behavior)
+                    let description_result = match self.generate_alt_description(&metadata) {
+                        Ok(result) => result,
+                        Err(e) if e.contains("no MusicBrainz data") => {
+                            log::info!("🎵 Skipping alt description generation: {}", e);
+                            self.components.insert(
+                                "description".to_string(),
+                                UploadComponent::Description("Beta testing".to_string()),
+                            );
+                            return Ok(());
+                        }
+                        Err(e) => return Err(e),
+                    };
+                    
+                    match description_result {
+                        crate::processing::DescriptionResult::Image { path, filename } => {
+                            // Upload the image description to CDN/ImgBB and get the final description
+                            let final_description = self.upload_and_build_alt_description(&path, &filename)?;
+                            
+                            self.components.insert(
+                                "description".to_string(),
+                                UploadComponent::Description(final_description),
+                            );
+                            
+                            info!("📸 Generated and uploaded image-based description: {}", filename);
+                        }
+                        crate::processing::DescriptionResult::BBCode(description) => {
+                            self.components.insert(
+                                "description".to_string(),
+                                UploadComponent::Description(description),
+                            );
+                        }
                     }
                 }
             } else {
@@ -1874,6 +2058,126 @@ impl UploadBuilder {
     }
     
     /// Generate alt description (image-based) from metadata
+    /// Clean regular description for audio combination by removing center tags and outer wrapping
+    fn clean_description_for_audio_combination(&self, description: &str) -> String {
+        let mut cleaned = description.to_string();
+        
+        // Remove outer center tags that wrap the entire description
+        if cleaned.starts_with("[center]\n") && cleaned.ends_with("\n[/center]") {
+            cleaned = cleaned.strip_prefix("[center]\n").unwrap_or(&cleaned).to_string();
+            cleaned = cleaned.strip_suffix("\n[/center]").unwrap_or(&cleaned).to_string();
+        }
+        
+        // Also handle cases where center tags don't have newlines
+        if cleaned.starts_with("[center]") && cleaned.ends_with("[/center]") {
+            cleaned = cleaned.strip_prefix("[center]").unwrap_or(&cleaned).to_string();
+            cleaned = cleaned.strip_suffix("[/center]").unwrap_or(&cleaned).to_string();
+        }
+        
+        cleaned
+    }
+    
+    /// Generate mediainfo for all audio files in an album folder
+    fn generate_audio_album_mediainfo(&self) -> Result<String, crate::core::error::SeedError> {
+        use crate::core::types::AudioType;
+        use crate::utils::fs::filter_files_by_extension;
+        use std::process::Command;
+        
+        let mediainfo_path = &self.config.paths.mediainfo;
+        let path = std::path::Path::new(&self.input_path);
+        
+        // Check if path exists
+        if !path.exists() {
+            info!("Path '{}' does not exist, returning N/A for mediainfo", self.input_path);
+            return Ok("N/A".to_string());
+        }
+        
+        // Get all audio files from the directory (recursively)
+        let audio_extensions = AudioType::all_extensions();
+        let audio_files = filter_files_by_extension(&self.input_path, &audio_extensions)
+            .map_err(|e| crate::core::error::SeedError::Other(format!("Failed to find audio files: {}", e)))?;
+        
+        if audio_files.is_empty() {
+            return Err(crate::core::error::SeedError::Validation(format!(
+                "No audio files found in directory '{}' or its subdirectories",
+                self.input_path
+            )));
+        }
+        
+        info!("🎵 Generating mediainfo for {} audio files in album folder", audio_files.len());
+        
+        let mut combined_output = String::new();
+        
+        // Sort files for consistent output
+        let mut sorted_files = audio_files;
+        sorted_files.sort();
+        
+        // Generate mediainfo for each audio file
+        for (index, audio_file) in sorted_files.iter().enumerate() {
+            info!("🎵 Processing file {}/{}: {}", index + 1, sorted_files.len(), audio_file.display());
+            
+            let output = Command::new(mediainfo_path)
+                .args(&["--Output=TEXT", &audio_file.to_string_lossy()])
+                .output()
+                .map_err(|e| crate::core::error::SeedError::Other(format!("Failed to run mediainfo: {}", e)))?;
+            
+            if !output.status.success() {
+                info!("⚠️ Mediainfo failed for file: {}", audio_file.display());
+                continue;
+            }
+            
+            let mut file_output = String::from_utf8(output.stdout)
+                .map_err(|e| crate::core::error::SeedError::Parse(format!("Failed to parse mediainfo output: {}", e)))?;
+            
+            // Sanitize the "Complete name" field to show just the filename
+            if let Some(start) = file_output.find("Complete name") {
+                if let Some(end) = file_output[start..].find('\n') {
+                    let full_line = &file_output[start..start + end];
+                    if let Some(_separator) = full_line.find(':') {
+                        let sanitized_line = format!(
+                            "Complete name                            : {}",
+                            audio_file.file_name().unwrap_or_default().to_string_lossy()
+                        );
+                        file_output = file_output.replace(full_line, &sanitized_line);
+                    }
+                }
+            }
+            
+            // Add the file's mediainfo output
+            if index > 0 {
+                combined_output.push_str("\n\n");
+                combined_output.push_str("========================================\n\n");
+            }
+            combined_output.push_str(&file_output);
+        }
+        
+        info!("✅ Generated combined mediainfo for {} audio files", sorted_files.len());
+        Ok(combined_output)
+    }
+
+    /// Insert alt image/description right after the tracklist table in the regular description
+    fn insert_alt_image_after_table(&self, regular_description: &str, alt_content: &str) -> String {
+        // Look for the end of the table ([/table])
+        if let Some(table_end_pos) = regular_description.find("[/table]") {
+            let table_end_with_tag = table_end_pos + "[/table]".len();
+            
+            // Split the description at the end of the table
+            let before_table_end = &regular_description[..table_end_with_tag];
+            let after_table = &regular_description[table_end_with_tag..];
+            
+            // Trim excess whitespace to avoid multiple empty lines
+            let trimmed_alt_content = alt_content.trim();
+            let trimmed_after_table = after_table.trim_start();
+            
+            // Insert alt content right after the table with controlled spacing
+            format!("{}\n\n{}\n\n{}", before_table_end, trimmed_alt_content, trimmed_after_table)
+        } else {
+            // Fallback: if no table found, append at the end
+            let trimmed_alt_content = alt_content.trim();
+            format!("{}\n\n{}", regular_description, trimmed_alt_content)
+        }
+    }
+    
     fn generate_alt_description(
         &self,
         metadata: &serde_json::Value,
@@ -1891,11 +2195,13 @@ impl UploadBuilder {
             .and_then(|s| s.to_str())
             .map(|s| {
                 // Remove file extension but preserve all dots in the release name
-                if let Some(dot_pos) = s.rfind('.') {
+                let name_without_ext = if let Some(dot_pos) = s.rfind('.') {
                     s[..dot_pos].to_string()
                 } else {
                     s.to_string()
-                }
+                };
+                // Make filename URL-friendly
+                crate::processing::naming::sanitize_filename_for_url(&name_without_ext)
             })
             .unwrap_or_else(|| "description".to_string());
         
@@ -1964,10 +2270,10 @@ impl UploadBuilder {
             return Err("No image upload method available (no ImgBB API key or CDN configuration)".to_string());
         };
         
-        // Build the final description combining image + screenshots + samples (using exact regular description format)
-        let mut final_description = format!("[img]{}[/img]\n\n", image_url);
+        // Build the final description combining image + screenshots + samples (matching the example structure)
+        let mut final_description = format!("[center]\n[img]{}[/img]\n\n", image_url);
         
-        // Add screenshots if available (using EXACT format from regular descriptions)
+        // Add screenshots if available (using EXACT format from your example)
         if let Some(UploadComponent::Screenshots(screenshots)) = self.components.get("screenshots") {
             if !screenshots.is_empty() {
                 let thumbnails = if let Some(UploadComponent::Thumbnails(thumbs)) = self.components.get("thumbnails") {
@@ -1976,36 +2282,39 @@ impl UploadBuilder {
                     Vec::new()
                 };
                 
-                // Use the EXACT Grid2x2 format from regular descriptions (lines 264-285 in description.rs)
-                final_description.push_str("[tr]\n");
-                
+                // Start with proper table structure
                 for (i, screenshot_url) in screenshots.iter().enumerate() {
                     // Use thumbnail if available, otherwise use full screenshot
                     let thumb_url = thumbnails.get(i).unwrap_or(screenshot_url);
                     
+                    if i % 2 == 0 {
+                        // Start a new row
+                        final_description.push_str("[tr]\n        ");
+                    }
+                    
                     final_description.push_str(&format!(
-                        "        [td][url={}][img width=720]{}[/img][/url][/td]\n",
+                        "[td][url={}][img width=720]{}[/img][/url][/td]",
                         screenshot_url, thumb_url
                     ));
                     
-                    // Add new row every 2 images
-                    if (i + 1) % 2 == 0 && i + 1 < screenshots.len() {
-                        final_description.push_str("    [/tr]\n    [tr]\n");
+                    if i % 2 == 1 || i == screenshots.len() - 1 {
+                        // End the row
+                        final_description.push_str("\n    [/tr]\n");
+                        if i < screenshots.len() - 1 {
+                            final_description.push_str("    ");
+                        }
+                    } else {
+                        final_description.push_str("\n        ");
                     }
                 }
                 
-                // Close the last row properly
-                if screenshots.len() % 2 != 0 {
-                    final_description.push_str("    [/tr]\n\n");
-                } else {
-                    final_description.push_str("    [/tr]\n\n");
-                }
+                final_description.push_str("\n");
             }
         }
         
-        // Add sample if available
+        // Add sample if available (with extra line spacing after screenshots)
         if let Some(UploadComponent::Sample { url, filename: sample_filename }) = self.components.get("sample") {
-            final_description.push_str(&format!("[b][spoiler=Sample: {}]{}[/spoiler][/b]\n\n", sample_filename, url));
+            final_description.push_str(&format!("\n[b][spoiler=Sample: {}]{}[/spoiler][/b]\n\n", sample_filename, url));
         }
         
         // Add trailer if available (check both component and cached metadata)
@@ -2036,21 +2345,22 @@ impl UploadBuilder {
             info!("✅ Trailer already added from component");
         }
         
-        // Add custom description if available
-        if let Some(UploadComponent::Metadata(tracker_metadata)) = self.components.get("tracker_config") {
-            if let Some(custom_desc) = tracker_metadata.get("custom_description") {
-                if !custom_desc.is_empty() {
-                    info!("📝 Adding custom description from tracker config: {} chars", custom_desc.len());
-                    final_description.push_str(&format!("{}\n\n", custom_desc));
+        // Add custom description from tracker config if this is for video (not audio combination)
+        let is_audio_combination = matches!(self.media_type, crate::core::MediaType::Audio(_));
+        if !is_audio_combination {
+            if let Some(UploadComponent::Metadata(tracker_meta)) = self.components.get("tracker_config") {
+                if let Some(custom_desc) = tracker_meta.get("custom_description") {
+                    if !custom_desc.is_empty() {
+                        final_description.push_str(&format!("{}\n\n", custom_desc));
+                        info!("📝 Added custom description to alt description: {} chars", custom_desc.len());
+                    }
                 }
             }
+            
+            // Add default seedbrr footer for video content and close the center tag
+            final_description.push_str("[b][size=12][color=#757575]Created with mkbrr, ffmpeg, and mediainfo. Posted to this fine tracker with seedbrr.[/color][/size][/b]\n\n[url=https://github.com/seed-pool/seed-tools][img]https://cdn.seedpool.org/sp.png[/img][/url]  [url=https://github.com/autobrr/mkbrr][img]https://cdn.seedpool.org/mkbrr.png[/img][/url]  [url=https://www.rust-lang.org][img]https://cdn.seedpool.org/rust.png[/img][/url]\n[/center]");
+            info!("📝 Added default seedbrr footer to alt description");
         }
-        
-        // Add default footer (same as regular descriptions)
-        let default_footer = format!(
-            "[center][b][size=12][color=#757575]Created with mkbrr, ffmpeg, and mediainfo. Posted to this fine tracker with seedbrr.[/color][/size][/b]\n\n[url=https://github.com/seed-pool/seed-tools][img]https://cdn.seedpool.org/sp.png[/img][/url]  [url=https://github.com/autobrr/mkbrr][img]https://cdn.seedpool.org/mkbrr.png[/img][/url]  [url=https://www.rust-lang.org][img]https://cdn.seedpool.org/rust.png[/img][/url][/center]"
-        );
-        final_description.push_str(&default_footer);
         
         // Clean up the generated image file
         if !self.upload_config.dry_run {
@@ -2059,11 +2369,11 @@ impl UploadBuilder {
             }
         }
         
-        // Wrap entire description in center tags like regular descriptions
-        let centered_description = format!("[center]\n{}\n[/center]", final_description);
+        // Don't add footer or center tags - the regular description already has these
+        // The alt description will be appended to the regular description which handles formatting
         
         info!("📸 Final description created with image URL: {}", image_url);
-        Ok(centered_description)
+        Ok(final_description)
     }
 }
 
@@ -2501,12 +2811,32 @@ impl UploadProcessor {
 
         // Generate keywords from release name
         if let Some(release_name) = &self.upload_data.release_name {
-            let keywords = release_name
+            let mut keyword_parts = release_name
                 .split(|c: char| !c.is_alphanumeric())
                 .filter(|s| !s.is_empty() && s.len() > 2)
                 .map(|s| s.to_lowercase())
-                .collect::<Vec<_>>()
-                .join(" ");
+                .collect::<Vec<_>>();
+            
+            // Add Open Library subjects for ebooks if available
+            if let Ok(ol_subjects) = std::env::var("SEEDBRR_OPEN_LIBRARY_SUBJECTS") {
+                info!("📚 Adding {} Open Library subjects to upload keywords", ol_subjects.split(',').count());
+                let subject_keywords: Vec<String> = ol_subjects
+                    .split(',')
+                    .map(|subject| {
+                        // Convert subjects to keywords (lowercase, replace spaces with nothing or keep them)
+                        subject.trim().to_lowercase().replace(" ", " ")
+                    })
+                    .collect();
+                keyword_parts.extend(subject_keywords);
+                std::env::remove_var("SEEDBRR_OPEN_LIBRARY_SUBJECTS"); // Clean up
+            }
+            
+            // Add MusicBrainz IDs for audio content if available
+            if matches!(self.media_type, Some(crate::core::MediaType::Audio(_))) {
+                self.add_musicbrainz_keywords(&mut keyword_parts);
+            }
+            
+            let keywords = keyword_parts.join(" ");
             form_data.insert("keywords".to_string(), keywords);
         }
 
@@ -2534,6 +2864,19 @@ impl UploadProcessor {
             // Add episode number
             if let Some(episode) = self.upload_data.episode {
                 form_data.insert("episode_number".to_string(), episode.to_string());
+            }
+        }
+
+        // Check for internal releases (ending with 'seedpool' or 'SPx') and set sticky/featured flags
+        if tracker_name == "seedpool" {
+            if let Some(release_name) = &self.upload_data.release_name {
+                let release_lower = release_name.to_lowercase();
+                if release_lower.ends_with("seedpool") || release_lower.ends_with("spx") {
+                    info!("🎯 Internal release detected: '{}' - enabling sticky, featured, and internal flags", release_name);
+                    form_data.insert("sticky".to_string(), "1".to_string());
+                    form_data.insert("featured".to_string(), "1".to_string());
+                    form_data.insert("internal".to_string(), "1".to_string());
+                }
             }
         }
 
@@ -2697,6 +3040,20 @@ impl UploadProcessor {
             form = form.text("episode_number", episode_number.clone());
         }
 
+        // Add sticky, featured, and internal flags for internal releases
+        if let Some(sticky) = form_data.get("sticky") {
+            info!("  sticky: {}", sticky);
+            form = form.text("sticky", sticky.clone());
+        }
+        if let Some(featured) = form_data.get("featured") {
+            info!("  featured: {}", featured);
+            form = form.text("featured", featured.clone());
+        }
+        if let Some(internal) = form_data.get("internal") {
+            info!("  internal: {}", internal);
+            form = form.text("internal", internal.clone());
+        }
+
         info!("=== END SEEDPOOL UPLOAD REQUEST DATA ===");
 
         // Add NFO file if present
@@ -2760,6 +3117,7 @@ impl UploadProcessor {
                             if std::env::var("SEEDBRR_OPEN_LIBRARY_ATTEMPTED").is_ok() {
                                 info!("📚 Open Library processing already completed during upload, skipping duplicate processing");
                                 std::env::remove_var("SEEDBRR_OPEN_LIBRARY_ATTEMPTED"); // Clean up
+                                std::env::remove_var("SEEDBRR_OPEN_LIBRARY_SUBJECTS"); // Clean up subjects since they were already used in keywords
                             } else {
                                 info!("📚 Starting EPUB Open Library processing...");
                                 if let Err(e) = self.process_ebook_open_library(&torrent_id, &seedpool_config, ebook_type) {
@@ -2795,6 +3153,23 @@ impl UploadProcessor {
                         }
                         _ => {
                             info!("📚 Ebook type {:?} - skipping Open Library processing", ebook_type);
+                        }
+                    }
+                }
+                crate::core::MediaType::Audio(_) => {
+                    // Process audio cover art as torrent cover
+                    info!("🎵 Audio detected, finding and uploading torrent cover art...");
+                    match self.generate_audio_cover_for_upload(&torrent_id, &seedpool_config) {
+                        Ok(cover_url) => {
+                            info!("✅ Audio cover processed successfully: {}", cover_url);
+                            // Upload the cover to Seedpool
+                            match self.upload_cover_to_seedpool(&torrent_id, &cover_url, &seedpool_config) {
+                                Ok(_) => info!("✅ Audio cover uploaded to Seedpool successfully"),
+                                Err(e) => error!("❌ Failed to upload audio cover to Seedpool: {}", e),
+                            }
+                        }
+                        Err(e) => {
+                            error!("❌ Failed to process audio cover: {}", e);
                         }
                     }
                 }
@@ -3151,6 +3526,305 @@ impl UploadProcessor {
         Ok(format!("file://{}", final_cover_path))
     }
 
+    /// Generate audio cover for upload from embedded art or folder images
+    fn generate_audio_cover_for_upload(
+        &self,
+        torrent_id: &str,
+        _seedpool_config: &crate::core::SeedpoolConfig,
+    ) -> Result<String, String> {
+        use std::fs;
+        
+        info!("🎵 Extracting audio cover for torrent ID: {}", torrent_id);
+
+        let input_path = self.input_path.as_ref()
+            .ok_or("No input path available for audio cover processing")?;
+
+        // Create temp directory for cover generation
+        let temp_dir = format!("{}/temp_covers", self.config.paths.screenshots_dir);
+        fs::create_dir_all(&temp_dir)
+            .map_err(|e| format!("Failed to create temp directory: {}", e))?;
+
+        let cover_filename = format!("audio-cover-{}.jpg", torrent_id);
+        let cover_path = format!("{}/{}", temp_dir, cover_filename);
+
+        if self.dry_run {
+            info!("🔄 Dry run: Would generate audio cover at {}", cover_path);
+            return Ok(format!("file://{}", cover_path));
+        }
+
+        // First try to find cover art in the album folder (common image files)
+        if let Some(folder_cover) = self.find_cover_in_folder(input_path)? {
+            info!("📸 Found cover image in folder: {}", folder_cover);
+            
+            // Convert to JPEG format if needed using ffmpeg
+            let (ffmpeg_path, _, _, _, _) = crate::core::Config::get_binary_paths(&self.config);
+            let ffmpeg_path_str = ffmpeg_path.to_str().ok_or("Invalid ffmpeg path")?;
+
+            let convert_output = std::process::Command::new(ffmpeg_path_str)
+                .args(&[
+                    "-i",
+                    &folder_cover,
+                    "-vf",
+                    "scale='min(1000,iw)':'min(1000,ih)'", // Limit to max 1000x1000 like ebook covers
+                    "-q:v",
+                    "2", // High quality JPEG
+                    "-y", // Overwrite output
+                    &cover_path,
+                ])
+                .output()
+                .map_err(|e| format!("Failed to run ffmpeg for audio cover conversion: {}", e))?;
+
+            if !convert_output.status.success() {
+                let stderr = String::from_utf8_lossy(&convert_output.stderr);
+                return Err(format!("Failed to convert audio cover to JPEG: {}", stderr));
+            }
+
+            info!("✅ Successfully converted folder cover to JPEG");
+        } else {
+            // Fall back to embedded artwork extraction
+            if let Some(embedded_cover) = self.extract_embedded_audio_cover(input_path, &cover_path)? {
+                info!("📸 Successfully extracted embedded cover art: {}", embedded_cover);
+            } else {
+                return Err("No cover art found in folder or embedded in audio files".to_string());
+            }
+        }
+
+        // Set permissions to 777 for web server readability
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            info!("Setting permissions to 777 for audio cover: {}", cover_path);
+            fs::set_permissions(&cover_path, fs::Permissions::from_mode(0o777))
+                .map_err(|e| {
+                    format!(
+                        "Failed to set permissions for audio cover '{}': {}",
+                        cover_path, e
+                    )
+                })?;
+            info!("Successfully set permissions to 777 for audio cover: {}", cover_path);
+        }
+
+        info!("✅ Successfully processed audio cover: {}", cover_path);
+        Ok(format!("file://{}", cover_path))
+    }
+
+    /// Find cover image files in the album folder
+    fn find_cover_in_folder(&self, folder_path: &str) -> Result<Option<String>, String> {
+        use std::fs;
+        use std::path::Path;
+
+        let path = Path::new(folder_path);
+        
+        // If it's a single file, check the parent directory
+        let search_dir = if path.is_file() {
+            path.parent().ok_or("Cannot determine parent directory")?
+        } else {
+            path
+        };
+
+        info!("🔍 Searching for cover images in: {}", search_dir.display());
+
+        // Common image extensions and cover file patterns
+        let image_extensions = ["jpg", "jpeg", "png", "bmp", "gif", "webp"];
+        let cover_patterns = [
+            "cover", "front", "folder", "album", "albumart", "albumartwork",
+            "artwork", "art", "thumb", "thumbnail"
+        ];
+
+        let mut found_images = Vec::new();
+
+        // Read directory and look for image files
+        for entry in fs::read_dir(search_dir)
+            .map_err(|e| format!("Failed to read directory: {}", e))?
+        {
+            if let Ok(entry) = entry {
+                let path = entry.path();
+                if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+                    if let Some(extension) = path.extension().and_then(|e| e.to_str()) {
+                        let ext_lower = extension.to_lowercase();
+                        let filename_lower = filename.to_lowercase();
+                        
+                        if image_extensions.contains(&ext_lower.as_str()) {
+                            // Check if filename matches cover patterns
+                            let is_cover = cover_patterns.iter().any(|pattern| {
+                                filename_lower.contains(pattern)
+                            });
+                            
+                            if is_cover {
+                                found_images.push((path.to_string_lossy().to_string(), 0)); // Priority 0 (highest)
+                            } else {
+                                found_images.push((path.to_string_lossy().to_string(), 1)); // Priority 1 (lower)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Sort by priority (0 = highest priority)
+        found_images.sort_by_key(|(_, priority)| *priority);
+
+        if let Some((cover_path, _)) = found_images.first() {
+            info!("📸 Found cover image: {}", cover_path);
+            Ok(Some(cover_path.clone()))
+        } else {
+            info!("No cover images found in folder");
+            Ok(None)
+        }
+    }
+
+    /// Extract embedded cover art from audio files using ffmpeg
+    fn extract_embedded_audio_cover(&self, input_path: &str, output_path: &str) -> Result<Option<String>, String> {
+        use std::path::Path;
+        use std::fs;
+
+        let path = Path::new(input_path);
+        
+        // Find first audio file to extract from
+        let audio_file = if path.is_file() {
+            // If input is a single audio file
+            Some(path.to_string_lossy().to_string())
+        } else {
+            // Find first audio file in directory
+            self.find_first_audio_file(input_path)?
+        };
+
+        let Some(audio_file_path) = audio_file else {
+            return Ok(None);
+        };
+
+        info!("🎵 Attempting to extract embedded artwork from: {}", audio_file_path);
+
+        let (ffmpeg_path, _, _, _, _) = crate::core::Config::get_binary_paths(&self.config);
+        let ffmpeg_path_str = ffmpeg_path.to_str().ok_or("Invalid ffmpeg path")?;
+
+        let output = std::process::Command::new(ffmpeg_path_str)
+            .args(&[
+                "-i",
+                &audio_file_path,
+                "-an", // Disable audio
+                "-vcodec",
+                "copy", // Copy video stream (cover art)
+                "-y", // Overwrite output
+                output_path,
+            ])
+            .output()
+            .map_err(|e| format!("Failed to run ffmpeg for embedded cover extraction: {}", e))?;
+
+        if output.status.success() && Path::new(output_path).exists() {
+            // Verify the file is a valid image
+            let file_size = fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
+
+            if file_size > 0 {
+                info!("✅ Successfully extracted embedded cover art: {} bytes", file_size);
+                return Ok(Some(output_path.to_string()));
+            } else {
+                // Clean up empty file
+                let _ = fs::remove_file(output_path);
+            }
+        }
+
+        info!("No embedded artwork found in audio file");
+        Ok(None)
+    }
+
+    /// Add MusicBrainz IDs as keywords for audio content
+    fn add_musicbrainz_keywords(&self, keyword_parts: &mut Vec<String>) {
+        let mut mb_keywords = Vec::new();
+        let mut mb_count = 0;
+        
+        // Helper function to extract string value from metadata
+        let extract_mb_value = |key: &str| -> Option<String> {
+            // Try to get from audio_metadata component first
+            if let Some(audio_meta) = self.upload_data.description.as_ref() {
+                // Parse metadata from the description if available (fallback)
+                // This is not ideal but may contain some info
+            }
+            
+            // For now, we'll need to access this through environment variables
+            // or through the components that were passed during build
+            None
+        };
+        
+        // Check for MusicBrainz data through environment variables
+        // (This is how other metadata is passed between ProcessBuilder and UploadProcessor)
+        let mb_fields = [
+            ("SEEDBRR_MB_RELEASE_ID", "musicbrainz_release_id"),
+            ("SEEDBRR_MB_RELEASE_GROUP_ID", "musicbrainz_release_group_id"), 
+            ("SEEDBRR_MB_ARTIST_IDS", "musicbrainz_artist_ids"),
+            ("SEEDBRR_MB_BARCODE", "musicbrainz_barcode"),
+            ("SEEDBRR_MB_CATALOG_NUMBERS", "musicbrainz_catalog_numbers"),
+        ];
+        
+        for (env_var, _field_name) in &mb_fields {
+            if let Ok(value) = std::env::var(env_var) {
+                if !value.is_empty() {
+                    // Handle comma-separated values (like artist IDs or catalog numbers)
+                    if env_var.contains("IDS") || env_var.contains("NUMBERS") {
+                        for item in value.split(',') {
+                            let trimmed_item = item.trim();
+                            if !trimmed_item.is_empty() {
+                                mb_keywords.push(trimmed_item.to_string());
+                                mb_count += 1;
+                            }
+                        }
+                    } else {
+                        mb_keywords.push(value);
+                        mb_count += 1;
+                    }
+                }
+            }
+        }
+        
+        if mb_count > 0 {
+            info!("🎵 Adding {} MusicBrainz identifiers as keywords", mb_count);
+            keyword_parts.extend(mb_keywords);
+            
+            // Clean up environment variables
+            for (env_var, _) in &mb_fields {
+                std::env::remove_var(env_var);
+            }
+        } else {
+            info!("🎵 No MusicBrainz identifiers found in environment for keywords");
+        }
+    }
+
+    /// Find the first audio file in a directory
+    fn find_first_audio_file(&self, dir_path: &str) -> Result<Option<String>, String> {
+        use std::fs;
+
+        let audio_extensions = ["mp3", "flac", "m4a", "ogg", "opus", "wav", "aac", "wma"];
+        
+        for entry in fs::read_dir(dir_path)
+            .map_err(|e| format!("Failed to read directory: {}", e))?
+        {
+            if let Ok(entry) = entry {
+                let path = entry.path();
+                if let Some(extension) = path.extension().and_then(|e| e.to_str()) {
+                    if audio_extensions.contains(&extension.to_lowercase().as_str()) {
+                        return Ok(Some(path.to_string_lossy().to_string()));
+                    }
+                }
+            }
+        }
+
+        // Try subdirectories (like CD1, CD2, etc.)
+        for entry in fs::read_dir(dir_path)
+            .map_err(|e| format!("Failed to read directory: {}", e))?
+        {
+            if let Ok(entry) = entry {
+                let path = entry.path();
+                if path.is_dir() {
+                    if let Ok(Some(audio_file)) = self.find_first_audio_file(&path.to_string_lossy()) {
+                        return Ok(Some(audio_file));
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
     /// Generate PDF cover for upload
     fn generate_pdf_cover_for_upload(
         &self,
@@ -3344,31 +4018,63 @@ impl UploadProcessor {
             return Err("No qBittorrent configurations found in config".to_string());
         }
 
-        // Find the first qBittorrent instance with valid configuration
-        let qb_config = main_config
+        // Filter valid qBittorrent configurations
+        let valid_configs: Vec<_> = main_config
             .qbittorrent
             .iter()
-            .find(|config| !config.webui_url.is_empty() && !config.username.is_empty())
-            .ok_or("No valid qBittorrent configuration found")?;
+            .filter(|config| !config.webui_url.is_empty() && !config.username.is_empty())
+            .collect();
+
+        if valid_configs.is_empty() {
+            return Err("No valid qBittorrent configurations found".to_string());
+        }
 
         if self.dry_run {
-            info!(
-                "[DRY RUN] Would add torrent to qBittorrent: {}",
-                qb_config.webui_url
-            );
+            for qb_config in &valid_configs {
+                info!(
+                    "[DRY RUN] Would add torrent to qBittorrent: {}",
+                    qb_config.webui_url
+                );
+            }
             return Ok(());
         }
 
-        // Create qBittorrent client and add torrent
-        let qb_client = QBittorrentClient::new(qb_config.clone())
-            .map_err(|e| format!("Failed to create qBittorrent client: {}", e))?;
+        // Add torrent to all valid qBittorrent instances
+        let mut success_count = 0;
+        let mut errors = Vec::new();
 
-        qb_client
-            .add_torrent_file(torrent_path)
-            .map_err(|e| format!("Failed to add torrent to qBittorrent: {}", e))?;
+        for qb_config in &valid_configs {
+            match QBittorrentClient::new((*qb_config).clone()) {
+                Ok(qb_client) => {
+                    match qb_client.add_torrent_file(torrent_path) {
+                        Ok(_) => {
+                            info!("Successfully added torrent to qBittorrent instance: {}", qb_config.webui_url);
+                            success_count += 1;
+                        }
+                        Err(e) => {
+                            let error_msg = format!("Failed to add torrent to qBittorrent instance {}: {}", qb_config.webui_url, e);
+                            error!("{}", error_msg);
+                            errors.push(error_msg);
+                        }
+                    }
+                }
+                Err(e) => {
+                    let error_msg = format!("Failed to create qBittorrent client for {}: {}", qb_config.webui_url, e);
+                    error!("{}", error_msg);
+                    errors.push(error_msg);
+                }
+            }
+        }
 
-        info!("Successfully added torrent to qBittorrent for seeding");
-        Ok(())
+        if success_count > 0 {
+            info!("Successfully added torrent to {} qBittorrent instance(s) for seeding", success_count);
+            if !errors.is_empty() {
+                info!("Some instances failed: {}", errors.join("; "));
+            }
+            Ok(())
+        } else {
+            Err(format!("Failed to add torrent to any qBittorrent instances: {}", errors.join("; ")))
+        }
     }
 
     /// Process ebook with Open Library lookup and cover extraction

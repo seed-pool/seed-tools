@@ -32,7 +32,7 @@ pub struct Cli {
     pub ui: bool,
 
     /// Run preflight check
-    #[arg(long, conflicts_with_all = ["sync", "sp", "tl", "custom_cat_type"], requires = "input_path")]
+    #[arg(long, conflicts_with_all = ["sync", "sp", "tl", "custom_cat_type"])]
     pub pre: bool,
 
     /// Enable dry-run mode - simulate uploads without actually uploading
