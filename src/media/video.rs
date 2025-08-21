@@ -1284,6 +1284,10 @@ pub fn classify_video_content(path: &str) -> VideoMetadata {
         metadata.source_type = VideoSourceType::Unknown;
     }
 
+    // Validate movie source types using the new validation methods
+    // This automatically converts disallowed types to Encode for movies
+    metadata.source_type = metadata.category.validate_source_type(&metadata.source_type);
+
     // 4. Extract resolution
     if let Some(res_match) = resolution_regex.find(filename) {
         metadata.resolution = Some(res_match.as_str().to_uppercase());

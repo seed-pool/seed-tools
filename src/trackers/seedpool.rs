@@ -95,7 +95,7 @@ impl SeedpoolCategory {
             (1, "Movie"),
             (2, "TV Show"),
             (3, "Games"),
-            (4, "NSW Games"),
+            (4, "Games"), // Now also Games (was NSW Games)
             (5, "Music"),
             (6, "Anime"),
             (7, "E-Book"),
@@ -745,16 +745,15 @@ pub fn create_torrent_info_from_media_strings_with_metadata(
                     match (cat_name, type_name) {
                         (_, "SeasonPack") => SeedpoolType::Other, // SeasonPack fallback when no source type detected
                         (_, "BoxSet") => SeedpoolType::Other, // BoxSet fallback when no source type detected
+                        // Movies are restricted to only FullDisc, Remux, and Encode types
                         ("Movie", "FullDisc") => SeedpoolType::FullDisc,
-                        ("Movie", "UHDBluRay") => SeedpoolType::UHDBluRay,
-                        ("Movie", "BluRay") => SeedpoolType::BluRay,
                         ("Movie", "Remux") => SeedpoolType::Remux,
-                        ("Movie", "WebDL") => SeedpoolType::WebDL,
-                        ("Movie", "WebRip") => SeedpoolType::WebRip,
-                        ("Movie", "HDTV") => SeedpoolType::HDTV,
-                        ("Movie", "DVD") => SeedpoolType::BluRay, // Map DVD to BluRay
                         ("Movie", "Encode") => SeedpoolType::Encode,
-                        ("Movie", _) => SeedpoolType::Other, // Fallback to type 17
+                        ("Movie", _) => {
+                            // For movies, convert all other source types to Encode
+                            eprintln!("Info: Converting movie source type '{}' to Encode", type_name);
+                            SeedpoolType::Encode
+                        }
 
                         ("TvShow", "FullDisc") => SeedpoolType::FullDisc,
                         ("TvShow", "UHDBluRay") => SeedpoolType::UHDBluRay,
@@ -782,7 +781,10 @@ pub fn create_torrent_info_from_media_strings_with_metadata(
                 }
             } else {
                 match cat_name {
-                    "Movie" => SeedpoolType::Other, // Fallback to type 17
+                    "Movie" => {
+                        // Movies without source type default to Encode
+                        SeedpoolType::Encode
+                    }
                     "TvShow" => SeedpoolType::Other, // All TV shows use fallback type 17 when no source type detected
                     "Anime" => SeedpoolType::Anime,
                     "Sports" => SeedpoolType::Sports,
@@ -872,7 +874,8 @@ pub fn create_torrent_info_from_media_strings_with_metadata(
         Some(cat_str) if cat_str.starts_with("GameCategory::") => {
             let cat_name = cat_str.strip_prefix("GameCategory::").unwrap();
             match cat_name {
-                "Retro" => (SeedpoolCategory::Retro, SeedpoolType::Other),
+                "Retro" => (SeedpoolCategory::Games, SeedpoolType::Other), // All games go to category 3
+                "NintendoSwitch" => (SeedpoolCategory::Games, SeedpoolType::NSWGame), // Nintendo Switch games use type 15
                 name if name.starts_with("Software_") => {
                     // Software with platform info like Software_WINDOWS_SOFTWARE
                     let platform_part = name.strip_prefix("Software_").unwrap_or("");

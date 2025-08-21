@@ -145,7 +145,7 @@ pub fn classify_video_source_type(metadata: &JsonValue) -> Option<String> {
     let encode_regex = Regex::new(r"(?i)\b(encode|x264|x265|h264|h265|hevc|xvid|divx)\b").unwrap();
     let upscale_regex = Regex::new(r"(?i)\b(upscale|upscaled|ai.?upscale)\b").unwrap();
 
-    let source_type = if iso_regex.is_match(filename) || full_disc_regex.is_match(filename) {
+    let mut source_type = if iso_regex.is_match(filename) || full_disc_regex.is_match(filename) {
         VideoSourceType::FullDisc
     } else if uhd_bluray_regex.is_match(filename) {
         VideoSourceType::UHDBluRay
@@ -174,6 +174,14 @@ pub fn classify_video_source_type(metadata: &JsonValue) -> Option<String> {
     } else {
         VideoSourceType::Unknown
     };
+
+    // Validate movie source types using the new validation methods
+    // This automatically converts disallowed types to Encode for movies
+    if let Some(category_str) = metadata.get("category").and_then(|c| c.as_str()) {
+        if category_str == "Movie" {
+            source_type = VideoCategory::Movie.validate_source_type(&source_type);
+        }
+    }
 
     Some(format!("VideoSourceType::{:?}", source_type))
 }
@@ -481,7 +489,7 @@ pub fn classify_game_rules(metadata: &JsonValue) -> Option<String> {
     } else {
         match normalized_platform.as_str() {
             "NSW" | "NINTENDO_SWITCH" | "SWITCH" | "XCI" | "NSP" => {
-                "GameCategory::Console".to_string()
+                "GameCategory::NintendoSwitch".to_string()
             }
             "3DS" | "CIA" => "GameCategory::Console".to_string(),
             "PS4" | "PS5" | "XBOX" => "GameCategory::Console".to_string(),

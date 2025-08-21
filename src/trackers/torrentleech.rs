@@ -136,11 +136,15 @@ pub fn get_category_from_media_strings(
                 .unwrap_or("");
 
             match (cat_name, source_name) {
-                ("Movie", "UHDBluRay") => Ok(47),                   // Movies 4K
-                ("Movie", "BluRay") | ("Movie", "Remux") => Ok(13), // Movies BluRay
-                ("Movie", "DVD") => Ok(12),                         // Movies DVDRip
-                ("Movie", "WebDL") | ("Movie", "WebRip") => Ok(37), // Movies Web-DL
-                ("Movie", _) => Ok(14),                             // Movies HD
+                // Movies are restricted to only FullDisc, Remux, and Encode types
+                ("Movie", "FullDisc") => Ok(13),                    // Movies BluRay (FullDisc maps to BluRay)
+                ("Movie", "Remux") => Ok(13),                       // Movies BluRay
+                ("Movie", "Encode") => Ok(14),                      // Movies HD
+                ("Movie", _) => {
+                    // For movies, convert all other source types to Encode
+                    eprintln!("Info: Converting movie source type '{}' to Encode", source_name);
+                    Ok(14) // Movies HD (Encode)
+                }
                 ("TvShow", _) | ("Documentary", _) => Ok(32),       // TV Shows
                 ("Sports", _) => Ok(30),                            // TV Sports
                 ("Anime", _) => Ok(34),                             // TV Animation
@@ -160,12 +164,16 @@ pub fn get_category_from_media_strings(
         }
         Some(cat_str) if cat_str.starts_with("GameCategory::") => {
             let cat_name = cat_str.strip_prefix("GameCategory::").unwrap();
+            // All games go to category 3 (Games)
             match cat_name {
-                "PS4Game" | "PS5Game" => Ok(40), // Games PS
-                "XboxGame" => Ok(41),            // Games Xbox
-                "NintendoSwitch" => Ok(39),      // Games Nintendo
-                "Mobile" => Ok(46),              // Mobile
-                _ => Ok(42),                     // Games (PC)
+                "NintendoSwitch" => {
+                    eprintln!("Info: Nintendo Switch game going to Games category (3) with Nintendo type");
+                    Ok(3) // Games category
+                }
+                _ => {
+                    eprintln!("Info: Game '{}' going to Games category (3)", cat_name);
+                    Ok(3) // Games category for all other games
+                }
             }
         }
         Some(cat_str) if cat_str.starts_with("HobbyCategory::") => {

@@ -55,6 +55,24 @@ pub enum VideoCategory {
     Unknown,
 }
 
+impl VideoCategory {
+    /// Check if this category is a movie type
+    pub fn is_movie(&self) -> bool {
+        matches!(self, VideoCategory::Movie)
+    }
+
+    /// Validate that a source type is compatible with this category
+    /// For movies, automatically convert disallowed types to Encode
+    pub fn validate_source_type(&self, source_type: &VideoSourceType) -> VideoSourceType {
+        if self.is_movie() {
+            source_type.to_valid_movie_type()
+        } else {
+            // Non-movie categories can use any source type
+            source_type.clone()
+        }
+    }
+}
+
 /// Video source types based on common scene naming conventions
 #[derive(Debug, Clone, PartialEq)]
 pub enum VideoSourceType {
@@ -83,6 +101,25 @@ pub enum VideoSourceType {
     SeasonPack,
 
     Unknown,
+}
+
+impl VideoSourceType {
+    /// Validate if this source type is allowed for movies
+    /// Movies can only use FullDisc, Remux, or Encode types
+    pub fn is_valid_for_movies(&self) -> bool {
+        matches!(self, VideoSourceType::FullDisc | VideoSourceType::Remux | VideoSourceType::Encode)
+    }
+
+    /// Get a valid movie source type, converting invalid types to Encode
+    pub fn to_valid_movie_type(&self) -> VideoSourceType {
+        if self.is_valid_for_movies() {
+            self.clone()
+        } else {
+            // Log when converting disallowed types to Encode for movies
+            eprintln!("Info: Converting movie source type {:?} to Encode", self);
+            VideoSourceType::Encode
+        }
+    }
 }
 
 /// Supported audio file types
@@ -1030,5 +1067,68 @@ impl VideoSettings for SeedpoolSettings {
 impl VideoSettings for TorrentLeechSettings {
     fn stripshit_from_videos(&self) -> bool {
         self.stripshit_from_videos
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_movie_source_type_validation() {
+        // Test valid movie source types
+        assert!(VideoSourceType::FullDisc.is_valid_for_movies());
+        assert!(VideoSourceType::Remux.is_valid_for_movies());
+        assert!(VideoSourceType::Encode.is_valid_for_movies());
+
+        // Test invalid movie source types
+        assert!(!VideoSourceType::BluRay.is_valid_for_movies());
+        assert!(!VideoSourceType::UHDBluRay.is_valid_for_movies());
+        assert!(!VideoSourceType::DVD.is_valid_for_movies());
+        assert!(!VideoSourceType::WebDL.is_valid_for_movies());
+        assert!(!VideoSourceType::WebRip.is_valid_for_movies());
+        assert!(!VideoSourceType::HDTV.is_valid_for_movies());
+        assert!(!VideoSourceType::PDTV.is_valid_for_movies());
+        assert!(!VideoSourceType::SDTV.is_valid_for_movies());
+        assert!(!VideoSourceType::Upscale.is_valid_for_movies());
+        assert!(!VideoSourceType::BoxSet.is_valid_for_movies());
+        assert!(!VideoSourceType::SeasonPack.is_valid_for_movies());
+        assert!(!VideoSourceType::Unknown.is_valid_for_movies());
+    }
+
+    #[test]
+    fn test_movie_source_type_conversion() {
+        // Test that valid types remain unchanged
+        assert_eq!(VideoSourceType::FullDisc.to_valid_movie_type(), VideoSourceType::FullDisc);
+        assert_eq!(VideoSourceType::Remux.to_valid_movie_type(), VideoSourceType::Remux);
+        assert_eq!(VideoSourceType::Encode.to_valid_movie_type(), VideoSourceType::Encode);
+
+        // Test that invalid types are converted to Encode
+        assert_eq!(VideoSourceType::BluRay.to_valid_movie_type(), VideoSourceType::Encode);
+        assert_eq!(VideoSourceType::UHDBluRay.to_valid_movie_type(), VideoSourceType::Encode);
+        assert_eq!(VideoSourceType::WebDL.to_valid_movie_type(), VideoSourceType::Encode);
+        assert_eq!(VideoSourceType::HDTV.to_valid_movie_type(), VideoSourceType::Encode);
+    }
+
+    #[test]
+    fn test_video_category_validation() {
+        // Test movie category validation
+        let movie_category = VideoCategory::Movie;
+        
+        // Valid source types should remain unchanged
+        assert_eq!(movie_category.validate_source_type(&VideoSourceType::FullDisc), VideoSourceType::FullDisc);
+        assert_eq!(movie_category.validate_source_type(&VideoSourceType::Remux), VideoSourceType::Remux);
+        assert_eq!(movie_category.validate_source_type(&VideoSourceType::Encode), VideoSourceType::Encode);
+
+        // Invalid source types should be converted to Encode
+        assert_eq!(movie_category.validate_source_type(&VideoSourceType::BluRay), VideoSourceType::Encode);
+        assert_eq!(movie_category.validate_source_type(&VideoSourceType::WebDL), VideoSourceType::Encode);
+        assert_eq!(movie_category.validate_source_type(&VideoSourceType::HDTV), VideoSourceType::Encode);
+
+        // Test non-movie categories (should allow any source type unchanged)
+        let tv_category = VideoCategory::TvShow;
+        assert_eq!(tv_category.validate_source_type(&VideoSourceType::BluRay), VideoSourceType::BluRay);
+        assert_eq!(tv_category.validate_source_type(&VideoSourceType::WebDL), VideoSourceType::WebDL);
+        assert_eq!(tv_category.validate_source_type(&VideoSourceType::HDTV), VideoSourceType::HDTV);
     }
 }
