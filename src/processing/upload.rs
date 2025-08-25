@@ -3,7 +3,7 @@ use crate::metadata::tmdb::{fetch_external_ids, fetch_tmdb_id};
 use crate::processing::components::mediainfo_utils::generate_mediainfo;
 use crate::processing::description::DescriptionConfig;
 use crate::utils::{check_all_duplicates, find_and_read_nfo};
-use log::{error, info};
+use log::{error, info, warn};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -108,6 +108,7 @@ pub struct UploadBuilder {
 
     // Tracker configuration (loaded automatically)
     active_tracker: Option<String>,
+    tracker_config_applied: bool,
 
     // File filtering
     accepted_extensions: Option<Vec<String>>,
@@ -137,6 +138,7 @@ impl UploadBuilder {
             title: None,
             year: None,
             active_tracker: None,
+            tracker_config_applied: false,
             accepted_extensions: None,
             description_config: None,
             enriched_metadata: None,
@@ -416,10 +418,14 @@ impl UploadBuilder {
     /// Build the upload data
     pub fn build(mut self) -> Result<crate::media::video::UploadData, String> {
         info!("UploadBuilder: Starting build process");
-        // Apply tracker configuration automatically
-        info!("UploadBuilder: Applying tracker configuration");
-        self.apply_tracker_config()?;
-        info!("UploadBuilder: Tracker configuration applied successfully");
+        // Apply tracker configuration automatically if not already applied
+        if !self.tracker_config_applied {
+            info!("UploadBuilder: Applying tracker configuration");
+            self.apply_tracker_config()?;
+            info!("UploadBuilder: Tracker configuration applied successfully");
+        } else {
+            info!("UploadBuilder: Tracker configuration already applied, skipping automatic loading");
+        }
 
         info!(
             "Building upload data for: {} (tracker: {:?})",
@@ -1500,6 +1506,8 @@ impl UploadBuilder {
             &torrent_file,
             "--source",
             "seedpool.org",
+            "--workers",
+            "2",
             &self.input_path,
         ]);
 
@@ -1809,19 +1817,20 @@ impl UploadBuilder {
             return Ok(()); // Early return - we have the rich description, don't need anything else
         }
 
+        // Add custom description from tracker config to metadata (regardless of description component existence)
+        if let Some(UploadComponent::Metadata(tracker_meta)) = self.components.get("tracker_config") {
+            if let Some(custom_desc) = tracker_meta.get("custom_description") {
+                if !custom_desc.is_empty() {
+                    metadata["custom_description"] = serde_json::json!(custom_desc);
+                    info!("📝 Adding custom description from tracker config: {} chars", custom_desc.len());
+                }
+            }
+        }
+
         // Check if a description component already exists (e.g., from ebook processing)
         info!("🔍 DEBUG: Checking if description component exists. Current components: {:?}", self.components.keys().collect::<Vec<_>>());
         if !self.components.contains_key("description") {
             info!("🔍 DEBUG: No description component found, proceeding with generation");
-            // Add custom description from tracker config to metadata before creating component
-            if let Some(UploadComponent::Metadata(tracker_meta)) = self.components.get("tracker_config") {
-                if let Some(custom_desc) = tracker_meta.get("custom_description") {
-                    if !custom_desc.is_empty() {
-                        metadata["custom_description"] = serde_json::json!(custom_desc);
-                        info!("📝 Adding custom description from tracker config: {} chars", custom_desc.len());
-                    }
-                }
-            }
 
             // Create DescriptionComponent only if one doesn't already exist  
             let mut desc_component =
@@ -1918,7 +1927,16 @@ impl UploadBuilder {
                                 "Regular audio description generation failed".to_string()
                             };
                             
-                            // Generate alt description (skip if no MusicBrainz data)
+                            // Generate alt description (skip if no MusicBrainz data or if screenshots are disabled)
+                            if self.upload_config.skip_screenshots {
+                                info!("📸 Screenshots disabled, skipping alternative description generation for audio");
+                                self.components.insert(
+                                    "description".to_string(),
+                                    UploadComponent::Description(regular_description),
+                                );
+                                return Ok(());
+                            }
+                            
                             let description_result = match self.generate_alt_description(&metadata) {
                                 Ok(result) => result,
                                 Err(e) if e.contains("no MusicBrainz data") => {
@@ -1965,7 +1983,16 @@ impl UploadBuilder {
                         Err(e) => {
                             info!("⚠️ Failed to generate regular audio description: {:?}, using alt description only", e);
                             
-                            // Fall back to alt description only (skip if no MusicBrainz data)
+                            // Fall back to alt description only (skip if no MusicBrainz data or if screenshots are disabled)
+                            if self.upload_config.skip_screenshots {
+                                info!("📸 Screenshots disabled, skipping alternative description generation for audio fallback");
+                                self.components.insert(
+                                    "description".to_string(),
+                                    UploadComponent::Description("Beta testing".to_string()),
+                                );
+                                return Ok(());
+                            }
+                            
                             let description_result = match self.generate_alt_description(&metadata) {
                                 Ok(result) => result,
                                 Err(e) if e.contains("no MusicBrainz data") => {
@@ -2000,37 +2027,53 @@ impl UploadBuilder {
                         }
                     }
                 } else {
-                    // For non-audio content, use alt description only (existing behavior)
-                    let description_result = match self.generate_alt_description(&metadata) {
-                        Ok(result) => result,
-                        Err(e) if e.contains("no MusicBrainz data") => {
-                            log::info!("🎵 Skipping alt description generation: {}", e);
-                            self.components.insert(
-                                "description".to_string(),
-                                UploadComponent::Description("Beta testing".to_string()),
-                            );
-                            return Ok(());
-                        }
-                        Err(e) => return Err(e),
-                    };
-                    
-                    match description_result {
-                        crate::processing::DescriptionResult::Image { path, filename } => {
-                            // Upload the image description to CDN/ImgBB and get the final description
-                            let final_description = self.upload_and_build_alt_description(&path, &filename)?;
-                            
-                            self.components.insert(
-                                "description".to_string(),
-                                UploadComponent::Description(final_description),
-                            );
-                            
-                            info!("📸 Generated and uploaded image-based description: {}", filename);
-                        }
-                        crate::processing::DescriptionResult::BBCode(description) => {
-                            self.components.insert(
-                                "description".to_string(),
-                                UploadComponent::Description(description),
-                            );
+                    // For non-audio content, check if screenshots are enabled before generating alt description
+                    if self.upload_config.skip_screenshots {
+                        info!("📸 Screenshots disabled, skipping alternative description generation");
+                        // Use a simple text-based description instead
+                        let simple_description = format!(
+                            "[b]{}[/b]\n\n{}",
+                            metadata.get("title").unwrap_or(&serde_json::Value::String("Unknown Title".to_string())).as_str().unwrap_or("Unknown Title"),
+                            metadata.get("tmdb_overview").unwrap_or(&serde_json::Value::String("No overview available".to_string())).as_str().unwrap_or("No overview available")
+                        );
+                        self.components.insert(
+                            "description".to_string(),
+                            UploadComponent::Description(simple_description),
+                        );
+                        info!("📝 Generated simple text-based description");
+                    } else {
+                        // Screenshots enabled, proceed with alt description generation
+                        let description_result = match self.generate_alt_description(&metadata) {
+                            Ok(result) => result,
+                            Err(e) if e.contains("no MusicBrainz data") => {
+                                log::info!("🎵 Skipping alt description generation: {}", e);
+                                self.components.insert(
+                                    "description".to_string(),
+                                    UploadComponent::Description("Beta testing".to_string()),
+                                );
+                                return Ok(());
+                            }
+                            Err(e) => return Err(e),
+                        };
+                        
+                        match description_result {
+                            crate::processing::DescriptionResult::Image { path, filename } => {
+                                // Upload the image description to CDN/ImgBB and get the final description
+                                let final_description = self.upload_and_build_alt_description(&path, &filename)?;
+                                
+                                self.components.insert(
+                                    "description".to_string(),
+                                    UploadComponent::Description(final_description),
+                                );
+                                
+                                info!("📸 Generated and uploaded image-based description: {}", filename);
+                            }
+                            crate::processing::DescriptionResult::BBCode(description) => {
+                                self.components.insert(
+                                    "description".to_string(),
+                                    UploadComponent::Description(description),
+                                );
+                            }
                         }
                     }
                 }
@@ -2038,7 +2081,17 @@ impl UploadBuilder {
                 // Use traditional BBCode description generation
                 match desc_component.process() {
                     Ok(result) => {
-                        if let Some(description) = result.data {
+                        if let Some(mut description) = result.data {
+                            // Add custom description (ASCII banner) at the beginning if available
+                            if let Some(UploadComponent::Metadata(tracker_meta)) = self.components.get("tracker_config") {
+                                if let Some(custom_desc) = tracker_meta.get("custom_description") {
+                                    if !custom_desc.is_empty() {
+                                        info!("📝 Adding custom description (ASCII banner) to generated description: {} chars", custom_desc.len());
+                                        description = format!("{}\n\n{}", custom_desc, description);
+                                    }
+                                }
+                            }
+                            
                             self.components.insert(
                                 "description".to_string(),
                                 UploadComponent::Description(description),
@@ -2223,6 +2276,7 @@ impl UploadBuilder {
         // Get tracker configuration for upload settings
         let (has_imgbb, imgbb_api_key, has_cdn, remote_path, image_base_url) = 
             if let Some(UploadComponent::Metadata(tracker_metadata)) = self.components.get("tracker_config") {
+                // First check tracker-specific ImgBB key
                 let imgbb_key = tracker_metadata.get("imgbb_api_key").cloned();
                 let has_imgbb = imgbb_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false);
                 
@@ -2235,6 +2289,16 @@ impl UploadBuilder {
             } else {
                 (false, None, false, None, None)
             };
+        
+        // If no tracker ImgBB key, check main config
+        let (has_imgbb, imgbb_api_key) = if has_imgbb {
+            (has_imgbb, imgbb_api_key)
+        } else {
+            // Check main config for ImgBB API key
+            let main_imgbb_key = self.config.imgbb.as_ref().map(|c| c.imgbb_api_key.clone());
+            let has_main_imgbb = main_imgbb_key.as_ref().map(|k| !k.is_empty()).unwrap_or(false);
+            (has_main_imgbb, main_imgbb_key)
+        };
         
         // Upload the description image
         let image_url = if has_imgbb {
@@ -2259,12 +2323,20 @@ impl UploadBuilder {
             let remote_file_path = format!("{}/screenshots/{}", remote.trim_end_matches('/'), filename);
             
             if !self.upload_config.dry_run {
-                crate::utils::upload_to_cdn(image_path, &remote_file_path)
-                    .map_err(|e| format!("Failed to upload description image to CDN: {}", e))?;
+                match crate::utils::upload_to_cdn(image_path, &remote_file_path) {
+                    Ok(_) => {
+                        info!("✅ Successfully uploaded description image to CDN: {}", remote_file_path);
+                    }
+                    Err(e) => {
+                        warn!("⚠️ Failed to upload description image to CDN: {} - continuing without image", e);
+                        // Continue without the image - this shouldn't be fatal
+                    }
+                }
             } else {
                 info!("[DRY RUN] Would upload description image to CDN: {}", remote_file_path);
             }
             
+            // Always return the URL format, even if upload failed
             format!("{}/{}", base_url.trim_end_matches('/'), filename)
         } else {
             return Err("No image upload method available (no ImgBB API key or CDN configuration)".to_string());
@@ -2425,7 +2497,16 @@ impl TrackerUploadExt for UploadBuilder {
             seedpool_config.screenshots.image_path.clone(),
         );
 
-        self.with_custom_component("tracker_config", UploadComponent::Metadata(metadata))
+        self.components.insert(
+            "tracker_config".to_string(),
+            UploadComponent::Metadata(metadata),
+        );
+
+        // Set active tracker and mark config as applied
+        self.active_tracker = Some("seedpool".to_string());
+        self.tracker_config_applied = true;
+
+        self
     }
 
     fn for_torrentleech(mut self, tl_config: &crate::core::TorrentLeechConfig) -> Self {
@@ -2455,7 +2536,16 @@ impl TrackerUploadExt for UploadBuilder {
             tl_config.settings.stripshit_from_videos.to_string(),
         );
 
-        self.with_custom_component("tracker_config", UploadComponent::Metadata(metadata))
+        self.components.insert(
+            "tracker_config".to_string(),
+            UploadComponent::Metadata(metadata),
+        );
+
+        // Set active tracker and mark config as applied
+        self.active_tracker = Some("torrentleech".to_string());
+        self.tracker_config_applied = true;
+
+        self
     }
 }
 
