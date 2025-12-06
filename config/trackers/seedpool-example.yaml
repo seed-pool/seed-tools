@@ -1,22 +1,40 @@
-# Seedpool tracker configuration
-# Copy this file to seedpool.yaml and update with your credentials
+# Seedpool tracker configuration template
 general:
   enabled: true
-  username: "your_seedpool_username"
-  passkey: "your_seedpool_passkey"
-  api_key: "your_seedpool_api_key"
+  username: user
+  passkey: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  api_key: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 settings:
-  upload_url: "https://seedpool.com/api/upload"
-  custom_description: ""  # Leave empty for default formatting
+  stripshit_from_videos: true
+  announce_url: "https://seedpool.org/announce/xxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  announce_url_secondary: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  upload_url: "https://seedpool.org/api/torrents/upload?api_token=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  custom_description: |
+    [code][center]
+                                       ..                                   ..  
+                                     .4HH                                 .4HH  
+                                       HH                                   HH  
+      ,pP"Yb.  .gP"Ya   .gP"Ya    ,H""bHH  .4HHpdHAo.  ,pW"Wq.   ,pW"Wq.    HH  
+      8I   `" ,H'   Yb ,H'   Yb ,AP    HH    HH   `Wb 6W'   `Wb 6W'   `Wb   HH  
+      `YHHHa. 8H"""""" 8H"""""" 8HI    HH    HH    H8 8H     H8 8H     H8   HH  
+      L.   I8 YH.    , YH.    , `Hb    HH    HH   ,AP YA.   ,A9 YA.   ,A9   HH  
+      `9hhhP'  `Hbmhd'  `Hbmhd'  `Wbhd"HHL.  HHbhhd'   `Ybhd9'   `Ybhd9'  .JHHL.
+                                             HH                                 
+                                           .JHHL.                               
+    [/center][/code]
   dupe_checks: true
-  # Upload components
+  # Upload components - CRITICAL for torrent creation
   enable_mediainfo: true
   enable_screenshots: true
   enable_sample: true
   enable_nfo: true
   enable_tmdb: true
-  enable_torrent_creation: false
+  enable_torrent_creation: true  # ✅ CRITICAL: Enable torrent creation
   enable_duplicate_check: true
-  enable_alt_description: true  # Generate image-based description instead of BBCode
+  enable_alt_description: true
   screenshot_count: 4
+
+screenshots:
+  remote_path: ""
+  image_path: ""

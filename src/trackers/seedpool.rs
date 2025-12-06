@@ -430,10 +430,17 @@ pub fn parse_seedpool_category_type(arg: &str) -> Result<SeedpoolTorrentInfo, St
         .parse()
         .map_err(|_| format!("Invalid type code in argument: {}", &arg[2..4]))?;
 
-    let category = SeedpoolCategory::from_code(category_code)
+    let mut category = SeedpoolCategory::from_code(category_code)
         .ok_or_else(|| format!("Unknown Seedpool category code: {:02}", category_code))?;
     let torrent_type = SeedpoolType::from_code(type_code)
         .ok_or_else(|| format!("Unknown Seedpool type code: {:02}", type_code))?;
+
+    // Special case: Nintendo Switch games (type 15) should always go to category 3 (Games)
+    // regardless of the category code provided
+    if torrent_type == SeedpoolType::NSWGame {
+        category = SeedpoolCategory::Games;
+        info!("Info: Nintendo Switch game detected, overriding category to Games (3)");
+    }
 
     Ok(SeedpoolTorrentInfo::new_with_codes(category, torrent_type, category_code, type_code))
 }
@@ -800,61 +807,76 @@ pub fn create_torrent_info_from_media_strings_with_metadata(
                 "Audiobook" | "Podcast" => (SeedpoolCategory::Audiobook, SeedpoolType::Audiobook),
                 _ => {
                     // Determine format from metadata, source type, or media type
+                    // FLAC should only be used when "flac" is explicitly in the title/filename
+                    // All other audio uploads default to MP3
                     let format_type = if let Some(meta) = metadata {
-                        // Check audio_format field (from mediainfo)
-                        if let Some(format) = meta.get("audio_format").and_then(|f| f.as_str()) {
-                            if format.to_lowercase().contains("flac") {
-                                SeedpoolType::Flac
-                            } else if format.to_lowercase().contains("mp3")
-                                || format.to_lowercase().contains("mpeg")
-                            {
-                                SeedpoolType::Mp3
-                            } else {
-                                SeedpoolType::Flac // Default to FLAC for other lossless formats
-                            }
-                        } else if let Some(format) = meta.get("format").and_then(|f| f.as_str()) {
-                            // Check format field (from AudioType enum)
-                            if format.contains("Mp3") {
-                                SeedpoolType::Mp3
-                            } else if format.contains("Flac") {
-                                SeedpoolType::Flac
-                            } else {
-                                SeedpoolType::Flac // Default to FLAC
-                            }
+                        // First, check if "flac" is in the title/filename/release_name
+                        let has_flac_in_name = meta.get("title")
+                            .or_else(|| meta.get("filename"))
+                            .or_else(|| meta.get("release_name"))
+                            .or_else(|| meta.get("input_path"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_lowercase().contains("flac"))
+                            .unwrap_or(false);
+
+                        if has_flac_in_name {
+                            SeedpoolType::Flac
                         } else {
-                            // Try to infer from file extension in the path
-                            if let Some(path) = meta.get("input_path").and_then(|p| p.as_str()) {
-                                // Check files in the directory for format
-                                if let Ok(entries) = std::fs::read_dir(path) {
-                                    let mut has_mp3 = false;
-                                    let mut has_flac = false;
-
-                                    for entry in entries.flatten() {
-                                        if let Some(ext) =
-                                            entry.path().extension().and_then(|e| e.to_str())
-                                        {
-                                            match ext.to_lowercase().as_str() {
-                                                "mp3" => has_mp3 = true,
-                                                "flac" => has_flac = true,
-                                                _ => {}
-                                            }
-                                        }
-                                    }
-
-                                    if has_mp3 && !has_flac {
-                                        SeedpoolType::Mp3
-                                    } else {
-                                        SeedpoolType::Flac // Default to FLAC
-                                    }
+                            // Check audio_format field (from mediainfo)
+                            if let Some(format) = meta.get("audio_format").and_then(|f| f.as_str()) {
+                                if format.to_lowercase().contains("flac") {
+                                    SeedpoolType::Flac
+                                } else if format.to_lowercase().contains("mp3")
+                                    || format.to_lowercase().contains("mpeg")
+                                {
+                                    SeedpoolType::Mp3
                                 } else {
-                                    SeedpoolType::Flac // Default if can't read directory
+                                    SeedpoolType::Mp3 // Default to MP3 for other formats
+                                }
+                            } else if let Some(format) = meta.get("format").and_then(|f| f.as_str()) {
+                                // Check format field (from AudioType enum)
+                                if format.contains("Mp3") {
+                                    SeedpoolType::Mp3
+                                } else if format.contains("Flac") {
+                                    SeedpoolType::Flac
+                                } else {
+                                    SeedpoolType::Mp3 // Default to MP3
                                 }
                             } else {
-                                SeedpoolType::Flac // Default if no path info
+                                // Try to infer from file extension in the path
+                                if let Some(path) = meta.get("input_path").and_then(|p| p.as_str()) {
+                                    // Check files in the directory for format
+                                    if let Ok(entries) = std::fs::read_dir(path) {
+                                        let mut has_mp3 = false;
+                                        let mut has_flac = false;
+
+                                        for entry in entries.flatten() {
+                                            if let Some(ext) =
+                                                entry.path().extension().and_then(|e| e.to_str())
+                                            {
+                                                match ext.to_lowercase().as_str() {
+                                                    "mp3" => has_mp3 = true,
+                                                    "flac" => has_flac = true,
+                                                    _ => {}
+                                                }
+                                            }
+                                        }
+
+                                        if has_flac && !has_mp3 {
+                                            SeedpoolType::Flac
+                                        } else {
+                                            SeedpoolType::Mp3 // Default to MP3
+                                        }
+                                    } else {
+                                        SeedpoolType::Mp3 // Default to MP3 if can't read directory
+                                    }
+                                } else {
+                                    SeedpoolType::Mp3 // Default to MP3 if no path info
+                                }
                             }
                         }
                     } else {
-                        SeedpoolType::Flac // Default if no metadata
+                        SeedpoolType::Mp3 // Default to MP3 if no metadata
                     };
                     (SeedpoolCategory::Music, format_type)
                 }

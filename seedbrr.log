@@ -757,3 +757,278 @@
 22:22:21 [INFO] Configuration paths built: config_dir="/nvme/red/devseed/target/release/config"
 22:22:21 [INFO] Loading configurations...
 22:22:21 [ERROR] Failed to extract binary paths using config "/nvme/red/devseed/target/release/config/config.yaml": Failed to read config file: No such file or directory (os error 2)
+13:36:34 [INFO] Logging initialized. Execution ID: 150e1df6
+13:36:34 [INFO] Executable directory determined as: "/nvme/red/devseed/target/debug"
+13:36:34 [INFO] 🔍 Checking required binaries...
+13:36:34 [INFO] 🧪 Testing binary: "/nvme/red/devseed/target/debug/bin/ffmpeg" with args: ["-version"]
+13:36:34 [INFO] ✅ Binary test successful: "/nvme/red/devseed/target/debug/bin/ffmpeg"
+13:36:34 [INFO] 🧪 Testing binary: "/nvme/red/devseed/target/debug/bin/ffprobe" with args: ["-version"]
+13:36:34 [INFO] ✅ Binary test successful: "/nvme/red/devseed/target/debug/bin/ffprobe"
+13:36:34 [INFO] 🧪 Testing binary: "/nvme/red/devseed/target/debug/bin/mediainfo" with args: ["--version"]
+13:36:34 [INFO] ✅ Binary test successful: "/nvme/red/devseed/target/debug/bin/mediainfo"
+13:36:34 [INFO] 🧪 Testing binary: "/nvme/red/devseed/target/debug/bin/mkbrr" with args: ["version"]
+13:36:34 [INFO] ✅ Binary test successful: "/nvme/red/devseed/target/debug/bin/mkbrr"
+13:36:34 [INFO] ✅ All required binaries are available
+13:36:34 [INFO] Parsing arguments...
+13:37:06 [INFO] Logging initialized. Execution ID: aa9489fb
+13:37:06 [INFO] Executable directory determined as: "/nvme/red/devseed/target/debug"
+13:37:06 [INFO] 🔍 Checking required binaries...
+13:37:06 [INFO] 🧪 Testing binary: "/nvme/red/devseed/target/debug/bin/ffmpeg" with args: ["-version"]
+13:37:06 [INFO] ✅ Binary test successful: "/nvme/red/devseed/target/debug/bin/ffmpeg"
+13:37:06 [INFO] 🧪 Testing binary: "/nvme/red/devseed/target/debug/bin/ffprobe" with args: ["-version"]
+13:37:06 [INFO] ✅ Binary test successful: "/nvme/red/devseed/target/debug/bin/ffprobe"
+13:37:06 [INFO] 🧪 Testing binary: "/nvme/red/devseed/target/debug/bin/mediainfo" with args: ["--version"]
+13:37:06 [INFO] ✅ Binary test successful: "/nvme/red/devseed/target/debug/bin/mediainfo"
+13:37:06 [INFO] 🧪 Testing binary: "/nvme/red/devseed/target/debug/bin/mkbrr" with args: ["version"]
+13:37:06 [INFO] ✅ Binary test successful: "/nvme/red/devseed/target/debug/bin/mkbrr"
+13:37:06 [INFO] ✅ All required binaries are available
+13:37:06 [INFO] Parsing arguments...
+13:37:06 [INFO] Parsed arguments: Cli { sync: false, sp: false, tl: false, custom_cat_type: None, ui: false, pre: true, dry_run: false, config_dir: None, command: None, input_path: Some("test.mkv") }
+13:37:06 [INFO] Building configuration paths...
+13:37:06 [INFO] Using default config directory relative to executable
+13:37:06 [INFO] Configuration paths built: config_dir="/nvme/red/devseed/target/debug/config"
+13:37:06 [INFO] Loading configurations...
+13:37:06 [ERROR] Failed to extract binary paths using config "/nvme/red/devseed/target/debug/config/config.yaml": Failed to read config file: No such file or directory (os error 2)
+13:37:42 [INFO] Logging initialized. Execution ID: 08cf1f2f
+13:37:42 [INFO] Executable directory determined as: "/nvme/red/devseed/target/debug"
+13:37:42 [INFO] 🔍 Checking required binaries...
+13:37:42 [INFO] 🧪 Testing binary: "/nvme/red/devseed/target/debug/bin/ffmpeg" with args: ["-version"]
+13:37:42 [INFO] ✅ Binary test successful: "/nvme/red/devseed/target/debug/bin/ffmpeg"
+13:37:42 [INFO] 🧪 Testing binary: "/nvme/red/devseed/target/debug/bin/ffprobe" with args: ["-version"]
+13:37:42 [INFO] ✅ Binary test successful: "/nvme/red/devseed/target/debug/bin/ffprobe"
+13:37:42 [INFO] 🧪 Testing binary: "/nvme/red/devseed/target/debug/bin/mediainfo" with args: ["--version"]
+13:37:42 [INFO] ✅ Binary test successful: "/nvme/red/devseed/target/debug/bin/mediainfo"
+13:37:42 [INFO] 🧪 Testing binary: "/nvme/red/devseed/target/debug/bin/mkbrr" with args: ["version"]
+13:37:42 [INFO] ✅ Binary test successful: "/nvme/red/devseed/target/debug/bin/mkbrr"
+13:37:42 [INFO] ✅ All required binaries are available
+13:37:42 [INFO] Parsing arguments...
+13:37:42 [INFO] Parsed arguments: Cli { sync: false, sp: false, tl: false, custom_cat_type: None, ui: false, pre: true, dry_run: false, config_dir: None, command: None, input_path: Some("test.mkv") }
+13:37:42 [INFO] Building configuration paths...
+13:37:42 [INFO] Using default config directory relative to executable
+13:37:42 [INFO] Configuration paths built: config_dir="/nvme/red/devseed/target/debug/config"
+13:37:42 [INFO] Loading configurations...
+13:37:42 [ERROR] Failed to extract binary paths using config "/nvme/red/devseed/target/debug/config/config.yaml": Failed to read config file: No such file or directory (os error 2)
+13:38:11 [INFO] Logging initialized. Execution ID: c0879ebb
+13:38:11 [INFO] Executable directory determined as: "/nvme/red/devseed/target/debug"
+13:38:12 [INFO] 🔍 Checking required binaries...
+13:38:12 [INFO] 🧪 Testing binary: "/nvme/red/devseed/target/debug/bin/ffmpeg" with args: ["-version"]
+13:38:12 [INFO] ✅ Binary test successful: "/nvme/red/devseed/target/debug/bin/ffmpeg"
+13:38:12 [INFO] 🧪 Testing binary: "/nvme/red/devseed/target/debug/bin/ffprobe" with args: ["-version"]
+13:38:12 [INFO] ✅ Binary test successful: "/nvme/red/devseed/target/debug/bin/ffprobe"
+13:38:12 [INFO] 🧪 Testing binary: "/nvme/red/devseed/target/debug/bin/mediainfo" with args: ["--version"]
+13:38:12 [INFO] ✅ Binary test successful: "/nvme/red/devseed/target/debug/bin/mediainfo"
+13:38:12 [INFO] 🧪 Testing binary: "/nvme/red/devseed/target/debug/bin/mkbrr" with args: ["version"]
+13:38:12 [INFO] ✅ Binary test successful: "/nvme/red/devseed/target/debug/bin/mkbrr"
+13:38:12 [INFO] ✅ All required binaries are available
+13:38:12 [INFO] Parsing arguments...
+13:38:12 [INFO] Parsed arguments: Cli { sync: false, sp: false, tl: false, custom_cat_type: None, ui: false, pre: true, dry_run: false, config_dir: Some("./config"), command: None, input_path: Some("test.mkv") }
+13:38:12 [INFO] Building configuration paths...
+13:38:12 [INFO] Using custom config directory: "./config"
+13:38:12 [INFO] Configuration paths built: config_dir="./config"
+13:38:12 [INFO] Loading configurations...
+13:38:12 [ERROR] Failed to extract binary paths using config "./config/config.yaml": Binary 'ffmpeg' not found at './bin/ffmpeg'
+12:15:13 [INFO] Logging initialized. Execution ID: db92ddc9
+12:15:13 [INFO] Executable directory determined as: "/nvme/red/devseed/target/debug"
+12:15:13 [INFO] 🔍 Checking required binaries...
+12:15:13 [INFO] ❌ Binary not found at: "/nvme/red/devseed/target/debug/bin/ffmpeg"
+12:15:13 [INFO] ❌ Binary not found at: "/nvme/red/devseed/target/debug/bin/ffprobe"
+12:15:13 [INFO] ❌ Binary not found at: "/nvme/red/devseed/target/debug/bin/mediainfo"
+12:15:13 [INFO] 🔍 Checking for system-wide mediainfo
+12:15:13 [INFO] ✅ System binary test successful: mediainfo
+12:15:13 [INFO] ✅ Found system-wide MediaInfo, creating symlink...
+12:15:13 [INFO] ❌ Binary not found at: "/nvme/red/devseed/target/debug/bin/mkbrr"
+12:15:13 [INFO] 📦 Missing binaries: ffmpeg, ffprobe, mkbrr
+12:15:13 [INFO] 📥 Downloading ffmpeg...
+12:15:13 [INFO] 🌐 Downloading ffmpeg from https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
+12:15:13 [DEBUG] (1) reqwest::connect: starting new connection: https://github.com/
+12:15:13 [DEBUG] (1) reqwest::connect: starting new connection: https://release-assets.githubusercontent.com/
+12:15:14 [INFO] 📦 Extracting ffmpeg archive...
+12:15:14 [INFO] Extracting TAR archive: /nvme/red/devseed/target/debug/bin/ffmpeg.tar.xz
+12:15:23 [INFO] Successfully extracted archive: /nvme/red/devseed/target/debug/bin/ffmpeg.tar.xz
+12:15:23 [INFO] ✅ Archive extraction successful
+12:15:23 [INFO] 🔍 Searching for binary 'ffmpeg' in: "/nvme/red/devseed/target/debug/bin/ffmpeg_extract"
+12:15:23 [INFO]   Checking file: ffmpeg_extract
+12:15:23 [INFO]   Checking file: ffmpeg-master-latest-linux64-gpl
+12:15:23 [INFO]   Checking file: presets
+12:15:23 [INFO]   Checking file: libvpx-1080p.ffpreset
+12:15:23 [INFO]   Checking file: libvpx-1080p50_60.ffpreset
+12:15:23 [INFO]   Checking file: libvpx-360p.ffpreset
+12:15:23 [INFO]   Checking file: libvpx-720p50_60.ffpreset
+12:15:23 [INFO]   Checking file: libvpx-720p.ffpreset
+12:15:23 [INFO]   Checking file: doc
+12:15:23 [INFO]   Checking file: drawvg-reference.html
+12:15:23 [INFO]   Checking file: ffmpeg.html
+12:15:23 [INFO]   Checking file: mailing-list-faq.html
+12:15:23 [INFO]   Checking file: ffprobe-all.html
+12:15:23 [INFO]   Checking file: libavcodec.html
+12:15:23 [INFO]   Checking file: default.css
+12:15:23 [INFO]   Checking file: libavutil.html
+12:15:23 [INFO]   Checking file: style.min.css
+12:15:23 [INFO]   Checking file: ffmpeg-codecs.html
+12:15:23 [INFO]   Checking file: ffmpeg-resampler.html
+12:15:23 [INFO]   Checking file: libswresample.html
+12:15:23 [INFO]   Checking file: platform.html
+12:15:23 [INFO]   Checking file: ffmpeg-filters.html
+12:15:23 [INFO]   Checking file: ffprobe.html
+12:15:23 [INFO]   Checking file: ffmpeg-protocols.html
+12:15:23 [INFO]   Checking file: fate.html
+12:15:23 [INFO]   Checking file: ffmpeg-all.html
+12:15:23 [INFO]   Checking file: libswscale.html
+12:15:23 [INFO]   Checking file: bootstrap.min.css
+12:15:23 [INFO]   Checking file: general.html
+12:15:23 [INFO]   Checking file: git-howto.html
+12:15:23 [INFO]   Checking file: faq.html
+12:15:23 [INFO]   Checking file: libavdevice.html
+12:15:23 [INFO]   Checking file: nut.html
+12:15:23 [INFO]   Checking file: ffmpeg-utils.html
+12:15:23 [INFO]   Checking file: libavformat.html
+12:15:23 [INFO]   Checking file: ffmpeg-scaler.html
+12:15:23 [INFO]   Checking file: ffmpeg-bitstream-filters.html
+12:15:23 [INFO]   Checking file: developer.html
+12:15:23 [INFO]   Checking file: ffplay.html
+12:15:23 [INFO]   Checking file: libavfilter.html
+12:15:23 [INFO]   Checking file: ffmpeg-formats.html
+12:15:23 [INFO]   Checking file: community.html
+12:15:23 [INFO]   Checking file: ffplay-all.html
+12:15:23 [INFO]   Checking file: ffmpeg-devices.html
+12:15:23 [INFO]   Checking file: man
+12:15:23 [INFO]   Checking file: man3
+12:15:23 [INFO]   Checking file: libavfilter.3
+12:15:23 [INFO]   Checking file: libavdevice.3
+12:15:23 [INFO]   Checking file: libswscale.3
+12:15:23 [INFO]   Checking file: libavcodec.3
+12:15:23 [INFO]   Checking file: libavutil.3
+12:15:23 [INFO]   Checking file: libavformat.3
+12:15:23 [INFO]   Checking file: libswresample.3
+12:15:23 [INFO]   Checking file: man1
+12:15:23 [INFO]   Checking file: ffmpeg-scaler.1
+12:15:23 [INFO]   Checking file: ffplay-all.1
+12:15:23 [INFO]   Checking file: ffmpeg-utils.1
+12:15:23 [INFO]   Checking file: ffplay.1
+12:15:23 [INFO]   Checking file: ffprobe-all.1
+12:15:23 [INFO]   Checking file: ffmpeg-codecs.1
+12:15:23 [INFO]   Checking file: ffmpeg-devices.1
+12:15:23 [INFO]   Checking file: ffprobe.1
+12:15:23 [INFO]   Checking file: ffmpeg-filters.1
+12:15:23 [INFO]   Checking file: ffmpeg.1
+12:15:23 [INFO]   Checking file: ffmpeg-protocols.1
+12:15:23 [INFO]   Checking file: ffmpeg-formats.1
+12:15:23 [INFO]   Checking file: ffmpeg-all.1
+12:15:23 [INFO]   Checking file: ffmpeg-resampler.1
+12:15:23 [INFO]   Checking file: ffmpeg-bitstream-filters.1
+12:15:23 [INFO]   Checking file: bin
+12:15:23 [INFO]   Checking file: ffplay
+12:15:23 [INFO]   Checking file: ffmpeg
+12:15:23 [INFO] ✅ Found binary at: "/nvme/red/devseed/target/debug/bin/ffmpeg_extract/ffmpeg-master-latest-linux64-gpl/bin/ffmpeg"
+12:15:23 [INFO] 📋 Copied binary to: "/nvme/red/devseed/target/debug/bin/ffmpeg"
+12:15:23 [INFO] 🧪 Testing binary: "/nvme/red/devseed/target/debug/bin/ffmpeg" with args: ["-version"]
+12:15:23 [INFO] ✅ Binary test successful: "/nvme/red/devseed/target/debug/bin/ffmpeg"
+12:15:23 [INFO] ✅ ffmpeg installed successfully
+12:15:23 [INFO] 📥 Downloading ffprobe...
+12:15:23 [INFO] 🌐 Downloading ffprobe from https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz
+12:15:24 [INFO] 📦 Extracting ffprobe archive...
+12:15:24 [INFO] Extracting TAR archive: /nvme/red/devseed/target/debug/bin/ffprobe.tar.xz
+12:15:34 [INFO] Successfully extracted archive: /nvme/red/devseed/target/debug/bin/ffprobe.tar.xz
+12:15:34 [INFO] ✅ Archive extraction successful
+12:15:34 [INFO] 🔍 Searching for binary 'ffprobe' in: "/nvme/red/devseed/target/debug/bin/ffprobe_extract"
+12:15:34 [INFO]   Checking file: ffprobe_extract
+12:15:34 [INFO]   Checking file: ffmpeg-master-latest-linux64-gpl
+12:15:34 [INFO]   Checking file: presets
+12:15:34 [INFO]   Checking file: libvpx-1080p.ffpreset
+12:15:34 [INFO]   Checking file: libvpx-1080p50_60.ffpreset
+12:15:34 [INFO]   Checking file: libvpx-360p.ffpreset
+12:15:34 [INFO]   Checking file: libvpx-720p50_60.ffpreset
+12:15:34 [INFO]   Checking file: libvpx-720p.ffpreset
+12:15:34 [INFO]   Checking file: doc
+12:15:34 [INFO]   Checking file: drawvg-reference.html
+12:15:34 [INFO]   Checking file: ffmpeg.html
+12:15:34 [INFO]   Checking file: mailing-list-faq.html
+12:15:34 [INFO]   Checking file: ffprobe-all.html
+12:15:34 [INFO]   Checking file: libavcodec.html
+12:15:34 [INFO]   Checking file: default.css
+12:15:34 [INFO]   Checking file: libavutil.html
+12:15:34 [INFO]   Checking file: style.min.css
+12:15:34 [INFO]   Checking file: ffmpeg-codecs.html
+12:15:34 [INFO]   Checking file: ffmpeg-resampler.html
+12:15:34 [INFO]   Checking file: libswresample.html
+12:15:34 [INFO]   Checking file: platform.html
+12:15:34 [INFO]   Checking file: ffmpeg-filters.html
+12:15:34 [INFO]   Checking file: ffprobe.html
+12:15:34 [INFO]   Checking file: ffmpeg-protocols.html
+12:15:34 [INFO]   Checking file: fate.html
+12:15:34 [INFO]   Checking file: ffmpeg-all.html
+12:15:34 [INFO]   Checking file: libswscale.html
+12:15:34 [INFO]   Checking file: bootstrap.min.css
+12:15:34 [INFO]   Checking file: general.html
+12:15:34 [INFO]   Checking file: git-howto.html
+12:15:34 [INFO]   Checking file: faq.html
+12:15:34 [INFO]   Checking file: libavdevice.html
+12:15:34 [INFO]   Checking file: nut.html
+12:15:34 [INFO]   Checking file: ffmpeg-utils.html
+12:15:34 [INFO]   Checking file: libavformat.html
+12:15:34 [INFO]   Checking file: ffmpeg-scaler.html
+12:15:34 [INFO]   Checking file: ffmpeg-bitstream-filters.html
+12:15:34 [INFO]   Checking file: developer.html
+12:15:34 [INFO]   Checking file: ffplay.html
+12:15:34 [INFO]   Checking file: libavfilter.html
+12:15:34 [INFO]   Checking file: ffmpeg-formats.html
+12:15:34 [INFO]   Checking file: community.html
+12:15:34 [INFO]   Checking file: ffplay-all.html
+12:15:34 [INFO]   Checking file: ffmpeg-devices.html
+12:15:34 [INFO]   Checking file: man
+12:15:34 [INFO]   Checking file: man3
+12:15:34 [INFO]   Checking file: libavfilter.3
+12:15:34 [INFO]   Checking file: libavdevice.3
+12:15:34 [INFO]   Checking file: libswscale.3
+12:15:34 [INFO]   Checking file: libavcodec.3
+12:15:34 [INFO]   Checking file: libavutil.3
+12:15:34 [INFO]   Checking file: libavformat.3
+12:15:34 [INFO]   Checking file: libswresample.3
+12:15:34 [INFO]   Checking file: man1
+12:15:34 [INFO]   Checking file: ffmpeg-scaler.1
+12:15:34 [INFO]   Checking file: ffplay-all.1
+12:15:34 [INFO]   Checking file: ffmpeg-utils.1
+12:15:34 [INFO]   Checking file: ffplay.1
+12:15:34 [INFO]   Checking file: ffprobe-all.1
+12:15:34 [INFO]   Checking file: ffmpeg-codecs.1
+12:15:34 [INFO]   Checking file: ffmpeg-devices.1
+12:15:34 [INFO]   Checking file: ffprobe.1
+12:15:34 [INFO]   Checking file: ffmpeg-filters.1
+12:15:34 [INFO]   Checking file: ffmpeg.1
+12:15:34 [INFO]   Checking file: ffmpeg-protocols.1
+12:15:34 [INFO]   Checking file: ffmpeg-formats.1
+12:15:34 [INFO]   Checking file: ffmpeg-all.1
+12:15:34 [INFO]   Checking file: ffmpeg-resampler.1
+12:15:34 [INFO]   Checking file: ffmpeg-bitstream-filters.1
+12:15:34 [INFO]   Checking file: bin
+12:15:34 [INFO]   Checking file: ffplay
+12:15:34 [INFO]   Checking file: ffmpeg
+12:15:34 [INFO]   Checking file: ffprobe
+12:15:34 [INFO] ✅ Found binary at: "/nvme/red/devseed/target/debug/bin/ffprobe_extract/ffmpeg-master-latest-linux64-gpl/bin/ffprobe"
+12:15:34 [INFO] 📋 Copied binary to: "/nvme/red/devseed/target/debug/bin/ffprobe"
+12:15:34 [INFO] 🧪 Testing binary: "/nvme/red/devseed/target/debug/bin/ffprobe" with args: ["-version"]
+12:15:34 [INFO] ✅ Binary test successful: "/nvme/red/devseed/target/debug/bin/ffprobe"
+12:15:34 [INFO] ✅ ffprobe installed successfully
+12:15:34 [INFO] 📥 Downloading mkbrr...
+12:15:34 [INFO] 🌐 Downloading mkbrr from https://github.com/autobrr/mkbrr/releases/download/v1.13.0/mkbrr_1.13.0_linux_x86_64.tar.gz
+12:15:34 [INFO] 📦 Extracting mkbrr archive...
+12:15:34 [INFO] Extracting TAR archive: /nvme/red/devseed/target/debug/bin/mkbrr.tar.gz
+12:15:35 [INFO] Successfully extracted archive: /nvme/red/devseed/target/debug/bin/mkbrr.tar.gz
+12:15:35 [INFO] ✅ Archive extraction successful
+12:15:35 [INFO] 🔍 Searching for binary 'mkbrr' in: "/nvme/red/devseed/target/debug/bin/mkbrr_extract"
+12:15:35 [INFO]   Checking file: mkbrr_extract
+12:15:35 [INFO]   Checking file: README.md
+12:15:35 [INFO]   Checking file: mkbrr
+12:15:35 [INFO] ✅ Found binary at: "/nvme/red/devseed/target/debug/bin/mkbrr_extract/mkbrr"
+12:15:35 [INFO] 📋 Copied binary to: "/nvme/red/devseed/target/debug/bin/mkbrr"
+12:15:35 [INFO] 🧪 Testing binary: "/nvme/red/devseed/target/debug/bin/mkbrr" with args: ["version"]
+12:15:35 [INFO] ✅ Binary test successful: "/nvme/red/devseed/target/debug/bin/mkbrr"
+12:15:35 [INFO] ✅ mkbrr installed successfully
+12:15:35 [INFO] 🎉 Binary setup complete! All required tools are now available.
+12:15:35 [INFO] Parsing arguments...
+12:15:35 [INFO] Parsed arguments: Cli { sync: false, sp: false, tl: false, custom_cat_type: None, ui: false, pre: false, dry_run: false, config_dir: None, command: None, input_path: Some("build") }
+12:15:35 [INFO] Building configuration paths...
+12:15:35 [INFO] Using default config directory relative to executable
+12:15:35 [INFO] Configuration paths built: config_dir="/nvme/red/devseed/target/debug/config"
+12:15:35 [INFO] Loading configurations...
+12:15:35 [ERROR] Failed to extract binary paths using config "/nvme/red/devseed/target/debug/config/config.yaml": Failed to read config file: No such file or directory (os error 2)

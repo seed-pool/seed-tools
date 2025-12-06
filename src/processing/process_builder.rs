@@ -298,7 +298,13 @@ impl ProcessBuilder {
             let media_type = if forced_category.starts_with("VideoCategory::") {
                 MediaType::Video(VideoType::Mkv) // Default to MKV for video directories
             } else if forced_category.starts_with("AudioCategory::") {
-                MediaType::Audio(AudioType::Flac) // Default to FLAC for audio directories  
+                // Only use FLAC if "flac" is explicitly in the path, otherwise default to MP3
+                let audio_type = if self.input_path.to_lowercase().contains("flac") {
+                    AudioType::Flac
+                } else {
+                    AudioType::Mp3
+                };
+                MediaType::Audio(audio_type)  
             } else if forced_category.starts_with("EbookCategory::") {
                 // For ebook categories, detect actual file type instead of guessing
                 let media_files = detect_media_type(&self.input_path)?;

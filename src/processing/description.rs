@@ -265,8 +265,8 @@ impl DescriptionBuilder {
                 let mut result = String::from("[center][tr]\n");
                 for (i, url) in urls.iter().enumerate() {
                     result.push_str(&format!(
-                        "        [td][url={}][img width={}]{}[/img][/url][/td]\n",
-                        url, width, url
+                        "        [td][url={}][img]{}[/img][/url][/td]\n",
+                        url, url
                     ));
 
                     // Add new row every 2 images
@@ -291,7 +291,7 @@ impl DescriptionBuilder {
 
                 while let Some(url1) = iter.next() {
                     result.push_str("[tr]\n");
-                    result.push_str(&format!("[td][center][img width={}]{}[/img][/center][/td]\n", width, url1));
+                                            result.push_str(&format!("[td][center][img]{}[/img][/center][/td]\n", url1));
 
                     if let Some(url2) = iter.next() {
                         result.push_str(&format!("[td][center][img width={}]{}[/img][/center][/td]\n", width, url2));

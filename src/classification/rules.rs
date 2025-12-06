@@ -54,7 +54,7 @@ pub fn classify_video_rules(metadata: &JsonValue) -> Option<String> {
 
     // Check for ISO/disc files
     let iso_regex = Regex::new(r"(?i)\.iso$").unwrap();
-    let bluray_regex = Regex::new(r"(?i)\b(blu.?ray|bd|m2ts)\b").unwrap();
+    let bluray_regex = Regex::new(r"(?i)\b(blu.?ray|bd)\b").unwrap(); // Removed m2ts from here
     let dvd_regex = Regex::new(r"(?i)\b(dvd|dvdrip)\b").unwrap();
 
     // Determine category based on patterns
@@ -133,9 +133,9 @@ pub fn classify_video_source_type(metadata: &JsonValue) -> Option<String> {
     let full_disc_regex =
         Regex::new(r"(?i)\b(full\.?disc|complete\.?disc|bdmv|disc\.?image)\b").unwrap();
     let uhd_bluray_regex = Regex::new(r"(?i)\b(uhd\.?blu.?ray|4k\.?blu.?ray)\b").unwrap();
-    let bluray_regex = Regex::new(r"(?i)\b(blu.?ray|bd|m2ts)\b").unwrap();
+    let remux_regex = Regex::new(r"(?i)\b(remux|remiux|remux)\b").unwrap();
+    let bluray_regex = Regex::new(r"(?i)\b(blu.?ray|bd)\b").unwrap(); // Removed m2ts from here
     let dvd_regex = Regex::new(r"(?i)\b(dvd|dvdrip)\b").unwrap();
-    let remux_regex = Regex::new(r"(?i)\b(remux)\b").unwrap();
     let web_dl_regex =
         Regex::new(r"(?i)\b(web[\.\-]?dl|webdl|amzn|nf|hmax|dsnp|atvp|hulu|pcok|pmtp)\b").unwrap();
     let web_rip_regex = Regex::new(r"(?i)\b(web[\.\-]?rip|webrip)\b").unwrap();
@@ -175,10 +175,35 @@ pub fn classify_video_source_type(metadata: &JsonValue) -> Option<String> {
         VideoSourceType::Unknown
     };
 
-    // Validate movie source types using the new validation methods
-    // This automatically converts disallowed types to Encode for movies
+    // Check for .m2ts files in the directory structure for movies
+    // This should override the above detection for movies with .m2ts files
     if let Some(category_str) = metadata.get("category").and_then(|c| c.as_str()) {
         if category_str == "Movie" {
+            // Check if the directory contains .m2ts files (indicating full disc)
+            if let Some(input_path) = metadata.get("input_path").and_then(|p| p.as_str()) {
+                if std::path::Path::new(input_path).is_dir() {
+                    if let Ok(mut entries) = std::fs::read_dir(input_path) {
+                        let has_m2ts = entries.any(|entry| {
+                            if let Ok(entry) = entry {
+                                if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
+                                    ext.to_lowercase() == "m2ts"
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        });
+                        
+                        if has_m2ts {
+                            source_type = VideoSourceType::FullDisc;
+                        }
+                    }
+                }
+            }
+            
+            // Validate movie source types using the new validation methods
+            // This automatically converts disallowed types to Encode for movies
             source_type = VideoCategory::Movie.validate_source_type(&source_type);
         }
     }

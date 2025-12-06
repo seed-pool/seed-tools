@@ -2365,7 +2365,7 @@ impl UploadBuilder {
                     }
                     
                     final_description.push_str(&format!(
-                        "[td][url={}][img width=720]{}[/img][/url][/td]",
+                        "[td][url={}][img]{}[/img][/url][/td]",
                         screenshot_url, thumb_url
                     ));
                     

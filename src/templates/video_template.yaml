@@ -17,6 +17,12 @@ layout:
   include_footer: true
 
 sections:
+  - name: "custom_description"
+    section_type: "raw"
+    content: "{{custom_description}}"
+    order: 0
+    required_fields: []
+
   - name: "title"
     section_type: "title"
     content: "{{tmdb_title}} ({{tmdb_year}})"
@@ -83,11 +89,3 @@ conditionals:
       section_type: "raw"
       content: "[center][b][url={{tmdb_trailer_url}}][Trailer on YouTube][/url][/b][/center]"
       order: 8
-
-  - name: "custom_description"
-    condition: "field_exists:custom_description"
-    section:
-      name: "custom_description"
-      section_type: "raw"
-      content: "{{custom_description}}"
-      order: 9

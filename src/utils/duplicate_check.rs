@@ -9,8 +9,8 @@ use std::fs;
 
 /// Check for duplicates across all configured trackers
 ///
-/// This function loads configurations and checks all enabled trackers for duplicates.
-/// It's useful when you need to check duplicates without knowing which tracker will be used.
+/// This function automatically detects which trackers are configured and enabled,
+/// then checks each one for duplicates of the given title.
 ///
 /// # Arguments
 /// * `title` - The title/name to check for duplicates
@@ -128,10 +128,27 @@ pub fn check_duplicates(
 
 /// Load tracker configuration from YAML file
 pub fn load_tracker_config<T: serde::de::DeserializeOwned>(tracker_name: &str) -> Result<T> {
-    let config_path = format!("config/trackers/{}.yaml", tracker_name);
-    let config_contents = fs::read_to_string(&config_path)
-        .map_err(|e| SeedError::Other(format!("Failed to read {} config: {}", tracker_name, e)))?;
+    // Try multiple possible config paths
+    let possible_paths = [
+        format!("config/trackers/{}.yaml", tracker_name),
+        format!("../config/trackers/{}.yaml", tracker_name),
+        format!("../../config/trackers/{}.yaml", tracker_name),
+        format!("./config/trackers/{}.yaml", tracker_name),
+    ];
 
-    serde_yaml::from_str(&config_contents)
-        .map_err(|e| SeedError::Parse(format!("Failed to parse {} config: {}", tracker_name, e)))
+    for config_path in &possible_paths {
+        match fs::read_to_string(config_path) {
+            Ok(config_contents) => {
+                return serde_yaml::from_str(&config_contents)
+                    .map_err(|e| SeedError::Parse(format!("Failed to parse {} config: {}", tracker_name, e)));
+            }
+            Err(_) => {
+                // Continue to next path
+                continue;
+            }
+        }
+    }
+
+    // If we get here, none of the paths worked
+    Err(SeedError::Other(format!("Failed to find {} config in any of the expected locations", tracker_name)))
 }

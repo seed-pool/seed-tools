@@ -1,0 +1,31 @@
+# Minimal test configuration for seedbrr
+general:
+  tmdb_api_key: "test_key"
+  youtube_api_key: "test_key"
+  igdb_client_id: "test_id"
+  igdb_bearer_token: "test_token"
+  release_groups: "CODEX,PLAZA,RELOADED"
+
+paths:
+  torrent_dir: "./torrents"
+  screenshots_dir: "./screenshots"
+  ffmpeg: "./bin/ffmpeg"
+  ffprobe: "./bin/ffprobe"
+  mkbrr: "./bin/mkbrr"
+  mediainfo: "./bin/mediainfo"
+  ghostscript: "/usr/bin/gs"
+
+qbittorrent: []
+
+deluge:
+  webui_url: ""
+  daemon_port: 24537
+  username: ""
+  password: ""
+  label: ""
+  default_save_path: ""
+
+imgbb:
+  imgbb_api_key: ""
+
+

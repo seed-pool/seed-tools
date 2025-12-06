@@ -1130,9 +1130,9 @@ pub fn classify_video_content(path: &str) -> VideoMetadata {
 
     // Source type patterns - order matters for proper detection
     let uhd_bluray_regex = Regex::new(r"(?i)\b(uhd\.?blu.?ray|4k\.?blu.?ray)\b").unwrap();
-    let bluray_regex = Regex::new(r"(?i)\b(blu.?ray|bd|m2ts)\b").unwrap();
+    let bluray_regex = Regex::new(r"(?i)\b(blu.?ray|bd)\b").unwrap(); // Removed m2ts from here
     let dvd_regex = Regex::new(r"(?i)\b(dvd|dvdrip)\b").unwrap();
-    let remux_regex = Regex::new(r"(?i)\b(remux)\b").unwrap();
+    let remux_regex = Regex::new(r"(?i)\b(remux|remiux)\b").unwrap();
     let full_disc_regex =
         Regex::new(r"(?i)\b(full\.?disc|complete\.?disc|bdmv|disc\.?image)\b").unwrap();
     let iso_regex = Regex::new(r"(?i)\.iso$").unwrap();

@@ -121,9 +121,15 @@ pub fn detect_media_type_from_name(name: &str) -> Result<Vec<MediaFile>, String>
     for pattern in &audio_patterns {
         if name_lower.contains(pattern) {
             info!("Detected audio pattern '{}' in name", pattern);
+            // Only use FLAC if "flac" is explicitly in the name, otherwise default to MP3
+            let audio_type = if name_lower.contains("flac") {
+                AudioType::Flac
+            } else {
+                AudioType::Mp3
+            };
             return Ok(vec![MediaFile {
                 path: PathBuf::from(name),
-                media_type: MediaType::Audio(AudioType::Flac), // Default to FLAC for audio
+                media_type: MediaType::Audio(audio_type),
             }]);
         }
     }
